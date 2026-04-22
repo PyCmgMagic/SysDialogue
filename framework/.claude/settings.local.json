@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/project/Nexus//**)",
+      "Read(//d/project/Nexus/**)"
+    ]
+  }
+}
