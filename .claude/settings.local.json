@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"D:\\\\project\\\\Nexus\\\\Nexus\")",
+      "Read(//mnt/d/project/Nexus/**)"
+    ]
+  }
+}
