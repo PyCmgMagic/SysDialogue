@@ -21,11 +21,9 @@ def create_web_app(config) -> FastAPI:
     async def index(request: Request):
         session = store.get("default")
         return templates.TemplateResponse(
-            "index.html",
-            {
-                "request": request,
-                "session_id": session.session_id,
-            },
+            request=request,
+            name="index.html",
+            context={"session_id": session.session_id},
         )
 
     @app.get("/api/session/{session_id}/state")
