@@ -244,6 +244,12 @@ class SafetyDecision:
   → 返回最终用户摘要
 ```
 
+完成门要点：
+- 运维/诊断/远程目标机任务若没有环境观察，不能 `completed`。
+- 失败或被安全门拦截的变更工具不会计入成功变更；必须后续有成功变更和后置验证，才能 `completed`。
+- `safe_config_patch`、`service_restart`、`container_rollout`、`rollback_config`、`file_edit` 这类内建校验 workflow 成功后，可作为变更后的验证证据。
+- 取消发生在多工具响应中时，未执行的 tool call 也会写入取消型 `tool_result`，避免下一轮 OpenAI tool message 配对损坏。
+
 ### WorkflowEngine 执行约定
 - YAML 加载两阶段：占位符 skeleton 解析 `parameters` → regex 参数预渲染（integer 去引号场景）→ YAML 最终解析 → 每步 Jinja2 注入 step 引用
 - 步骤类型：`tool_call | confirm | approval | display | input`

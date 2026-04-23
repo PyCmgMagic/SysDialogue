@@ -69,6 +69,13 @@ VERIFICATION_TOOLS = {
 }
 
 READ_ONLY_WORKFLOWS = {"security_audit", "disk_cleanup"}
+WORKFLOWS_WITH_INTERNAL_VERIFICATION = {
+    "container_rollout",
+    "file_edit",
+    "rollback_config",
+    "safe_config_patch",
+    "service_restart",
+}
 
 
 @dataclass
@@ -99,6 +106,7 @@ class TaskRun:
     tool_steps: int = 0
     last_action_step: int = 0
     last_verification_step: int = 0
+    failed_mutations: list[str] = field(default_factory=list)
     events: list[TaskEvent] = field(default_factory=list)
     final_status: str = ""
     final_reply: str = ""
@@ -196,6 +204,9 @@ class ReActRunner:
                 name = _block_attr(block, "name")
                 args = _block_attr(block, "input") or {}
                 tool_use_id = _block_attr(block, "id")
+                if self.controller.is_cancel_requested():
+                    result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block, include_current=True))
+                    break
                 if name == META_FINISH_TASK:
                     result_block = self._handle_finish_task(task, args, tool_use_id)
                     result_blocks.append(result_block)
@@ -209,9 +220,16 @@ class ReActRunner:
                 self._emit_tool_finished(task, name, args, result_block)
 
                 if self.controller.is_cancel_requested():
+                    result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block))
                     break
 
             messages.append({"role": "user", "content": result_blocks})
+            if self.controller.is_cancel_requested():
+                task.final_status = "cancelled"
+                task.final_reply = "当前执行已取消。"
+                self._emit(task, "task_failed", "ReAct task cancelled.", {"status": "cancelled"})
+                self._commit_final(messages, task)
+                return task.final_reply
             if final_ready:
                 self._commit_final(messages, task)
                 return task.final_reply
@@ -251,18 +269,30 @@ class ReActRunner:
 
     def _observe_tool_result(self, task: TaskRun, name: str, args: dict, result_block: dict) -> None:
         task.tool_steps += 1
+        success = not result_block.get("is_error")
+
         if name == META_SET_EXECUTION_MODE:
             mode = args.get("mode")
             if mode == "workflow":
                 workflow_name = args.get("workflow_name", "")
                 task.observed = True
-                if workflow_name not in READ_ONLY_WORKFLOWS:
+                if success and workflow_name not in READ_ONLY_WORKFLOWS:
                     task.acted = True
                     task.changed_state = True
                     task.last_action_step = task.tool_steps
-                if not result_block.get("is_error"):
+                    if workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
+                        task.verified = True
+                        # Synthetic sub-step: the workflow already ran its own post-change checks.
+                        task.last_verification_step = task.tool_steps + 1
+                if success and workflow_name in READ_ONLY_WORKFLOWS:
                     task.verified = True
                     task.last_verification_step = task.tool_steps
+            return
+
+        if not success:
+            task.observed = True
+            if _is_mutating_tool(name, args):
+                task.failed_mutations.append(_tool_action_key(name, args))
             return
 
         if _is_mutating_tool(name, args):
@@ -329,6 +359,8 @@ def _requires_environment_feedback(user_message: str) -> bool:
         "安装", "删除", "修改", "写入", "备份", "恢复", "回滚", "验证",
         "服务", "端口", "日志", "磁盘", "内存", "cpu", "防火墙", "cron",
         "nginx", "docker", "podman", "ssh", "服务器", "/etc", "远程",
+        "配置", "密钥", "安全", "审计", "权限", "环境变量", "连接",
+        "key", "token", "secret", ".env",
     )
     if any(k in text for k in ops_keywords):
         return True
@@ -362,6 +394,10 @@ def _validate_finish_args(task: TaskRun, args: dict) -> list[str]:
                 errors.append("Changed-state completions require an executed mutation before completed.")
             if not task.verified or task.last_verification_step <= task.last_action_step:
                 errors.append("Changed-state tasks require a verification tool/workflow after the mutation before completed.")
+        if task.failed_mutations and not task.acted:
+            errors.append(
+                "Failed mutation attempts cannot be reported as completed before a later successful mutation and verification."
+            )
     if task.requires_environment_feedback and not task.observed and status not in {"need_info", "blocked", "failed", "cancelled"}:
         errors.append("Operational tasks without observation must finish as need_info, blocked, failed, or cancelled.")
     if status in {"need_info", "blocked", "failed"} and not (next_steps or no_action_reason):
@@ -395,6 +431,26 @@ def _react_correction_message(user_message: str, assistant_text: str) -> str:
         "For operational tasks, completed requires evidence from tool results. "
         f"User goal: {user_message}. Previous text: {assistant_text[:400]}"
     )
+
+
+def _cancelled_results_for_pending(tool_blocks: list, current_block, *, include_current: bool = False) -> list[dict]:
+    pending: list[dict] = []
+    current_seen = False
+    for block in tool_blocks:
+        if block is current_block:
+            current_seen = True
+            if not include_current:
+                continue
+        if not current_seen:
+            continue
+        pending.append(
+            _tool_result(
+                _block_attr(block, "id"),
+                "当前执行已取消，该工具未执行。",
+                is_error=True,
+            )
+        )
+    return pending
 
 
 def _model_response_summary(content: list) -> str:

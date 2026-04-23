@@ -74,6 +74,12 @@ def _registry_with_mutation_and_validation() -> ToolRegistry:
     def mutate_marker(executor):
         return ToolResult(success=True, data={"changed": True})
 
+    def fail_mutation(executor):
+        return ToolResult(success=False, error="mutation failed before changing state")
+
+    def cancel_marker(executor):
+        return ToolResult(success=True, data={"cancelled": True})
+
     def validate_config(executor, path: str, target_type: str = "auto"):
         return ToolResult(success=True, data={"path": path, "valid": True})
 
@@ -84,6 +90,28 @@ def _registry_with_mutation_and_validation() -> ToolRegistry:
             schema={
                 "name": "mutate_marker",
                 "description": "Mutate test marker",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    registry.register(
+        ToolDef(
+            name="fail_mutation",
+            fn=fail_mutation,
+            schema={
+                "name": "fail_mutation",
+                "description": "Failing mutation test marker",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    registry.register(
+        ToolDef(
+            name="cancel_marker",
+            fn=cancel_marker,
+            schema={
+                "name": "cancel_marker",
+                "description": "Cancellation test marker",
                 "input_schema": {"type": "object", "properties": {}},
             },
         )
@@ -112,6 +140,8 @@ def _registry_with_mutation_and_validation() -> ToolRegistry:
 def test_requires_environment_feedback_classifies_greeting_and_ops() -> None:
     assert _requires_environment_feedback("你好") is False
     assert _requires_environment_feedback("检查系统版本和负载") is True
+    assert _requires_environment_feedback("解释 OpenAI API 怎么使用") is False
+    assert _requires_environment_feedback("审计 API 密钥配置") is True
 
 
 def test_greeting_can_finish_without_system_action(tmp_path: Path) -> None:
@@ -254,3 +284,104 @@ def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> N
     assert "verification tool/workflow after the mutation" in rejected_result["content"]
     stages = [event.stage for event in events]
     assert stages.count("correction") == 1
+
+
+def test_failed_mutation_does_not_satisfy_completion_gate(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("fail_mutation", {}, tool_id="mutate_1")],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="validate_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "错误地声称完成。",
+                "evidence": ["fail_mutation failed", "validate_config valid=true"],
+                "verification": "validate_config 在失败变更后返回 valid=true。",
+                "changed_state": True,
+            })
+        ],
+        [
+            _finish({
+                "status": "failed",
+                "summary": "变更工具失败，未完成修改。",
+                "next_steps": ["检查失败原因后重试变更"],
+            }, tool_id="finish_2")
+        ],
+    ])
+    controller, events = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("修改配置并验证")
+
+    assert "未完成修改" in reply
+    rejected_result = llm.calls[3]["messages"][-1]["content"][0]
+    assert rejected_result["is_error"] is True
+    assert "Failed mutation attempts cannot be reported as completed" in rejected_result["content"]
+    assert "task_failed" in [event.stage for event in events]
+
+
+def test_cancelled_multi_tool_turn_writes_results_for_all_tool_calls(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use("cancel_marker", {}, tool_id="cancel_1"),
+            _tool_use("get_system_info", {}, tool_id="info_1"),
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    original_dispatch = controller._dispatch_tool
+
+    def dispatch_and_cancel(name, args, tool_use_id):
+        result = original_dispatch(name, args, tool_use_id)
+        if name == "cancel_marker":
+            controller.request_cancel()
+        return result
+
+    controller._dispatch_tool = dispatch_and_cancel
+
+    reply = controller.run_turn("检查系统并取消")
+
+    assert "已取消" in reply
+    tool_result_message = controller.conversation_manager.history[-2]
+    result_ids = [block["tool_use_id"] for block in tool_result_message["content"]]
+    assert result_ids == ["cancel_1", "info_1"]
+    assert tool_result_message["content"][1]["is_error"] is True
+    assert "未执行" in tool_result_message["content"][1]["content"]
+
+
+def test_verified_workflow_can_complete_without_extra_validation_tool(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "workflow",
+                    "workflow_name": "safe_config_patch",
+                    "workflow_params": {"file_path": "/tmp/example.conf"},
+                },
+                tool_id="workflow_1",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "配置修改 workflow 已完成。",
+                "evidence": ["safe_config_patch final_status=completed"],
+                "verification": "safe_config_patch 内部已执行 validate_config。",
+                "changed_state": True,
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    def fake_workflow(args, tool_use_id):
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": '{"final_status":"completed"}',
+            "is_error": False,
+        }
+
+    controller._handle_set_execution_mode = fake_workflow
+
+    reply = controller.run_turn("修改配置并验证")
+
+    assert "workflow 已完成" in reply

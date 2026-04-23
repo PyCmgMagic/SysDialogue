@@ -33,7 +33,8 @@ _REACT_PROTOCOL = """【ReAct 任务协议】
 3. 变更型任务必须遵循 observe → act → verify → finish；没有验证结论时不得用 completed 收口。
 4. 普通聊天、项目说明、文档解释、设计讨论也要调用 finish_task，但可用 no_action_reason 说明未执行系统操作。
 5. 工具失败后必须基于 tool_result 修正、降级、请求更多信息，或用 failed/blocked/need_info 收口；不得忽略失败。
-6. 不要输出隐藏思维链；只输出用户可见的计划摘要、观察摘要、验证结论和完成说明。
+6. 失败或被拦截的变更工具不代表已完成变更；若要 completed，必须在失败后有成功变更和后置验证，或使用内建验证的成功 workflow。
+7. 不要输出隐藏思维链；只输出用户可见的计划摘要、观察摘要、验证结论和完成说明。
 finish_task 字段要求：status、summary 必填；completed 的运维任务必须提供 evidence；need_info/blocked/failed 必须提供 next_steps 或 no_action_reason。"""
 
 

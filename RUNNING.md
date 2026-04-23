@@ -475,6 +475,13 @@ SysDialogue 的执行链路大致为：
   -> 返回结果或触发回滚
 ```
 
+ReAct 完成门会额外保护几类边界：
+
+- 运维类任务必须先观察环境，不能只靠模型口头判断完成。
+- 失败或被拦截的变更工具不会计入成功变更；如果后续没有成功变更和验证，只能以 `failed`、`blocked`、`need_info` 等状态收口。
+- 包含内建验证的成功 workflow 可直接作为变更后的验证证据，例如 `safe_config_patch`、`service_restart`、`container_rollout`。
+- 取消多工具调用时，系统会为未执行的工具补写取消结果，保证后续 OpenAI `tool_calls` / `tool` 消息配对完整。
+
 风险等级：
 
 - `SAFE`：直接执行并审计
