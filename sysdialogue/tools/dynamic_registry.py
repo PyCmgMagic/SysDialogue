@@ -53,6 +53,7 @@ class DynamicTool(TypedDict):
     changes_state: bool
     usage_count: int
     safety_overrides: int
+    signature: str
 
 
 @dataclass
@@ -235,6 +236,27 @@ class DynamicToolRegistry:
         data = self._load()
         return list(data.values())
 
+    def render_prompt_summary(self, limit: int = 8) -> str:
+        tools = self.list_tools()
+        if not tools:
+            return ""
+        tools.sort(
+            key=lambda item: (
+                int(item.get("usage_count", 0)),
+                str(item.get("created_at", "")),
+            ),
+            reverse=True,
+        )
+        lines = ["[Reusable DynTools]"]
+        for tool in tools[:limit]:
+            params = ", ".join(list((tool.get("params") or {}).keys())[:4]) or "-"
+            mode = "mutating" if tool.get("changes_state", True) else "read-only"
+            template = " ".join((tool.get("cmd_template") or [])[:4])
+            lines.append(
+                f"  - {tool.get('tool_id')}: {tool.get('name')} | {mode} | params: {params} | template: {template}"
+            )
+        return "\n".join(lines)
+
     def register(
         self,
         *,
@@ -250,20 +272,23 @@ class DynamicToolRegistry:
         created_for: str = "",
     ) -> DynamicTool:
         """Register a new DynTool."""
-        if not name.strip():
-            raise ValueError("DynTool name 不能为空")
-        if not cmd_template:
-            raise ValueError("cmd_template 不能为空")
-        if len(cmd_template) > 10:
-            raise ValueError("cmd_template 元素数量超过 10")
-        if not isinstance(params, dict):
-            raise ValueError("params 必须是对象")
-        for t in cmd_template:
-            if len(t) > 256:
-                raise ValueError("cmd_template 元素长度超过 256")
+        _validate_tool_spec(
+            name=name,
+            cmd_template=cmd_template,
+            params=params,
+        )
+        signature = _tool_signature(
+            cmd_template=cmd_template,
+            params=params,
+            changes_state=bool(changes_state),
+            reversible=bool(reversible),
+        )
 
         def _op():
             data = self._load()
+            existing = _find_by_signature(data, signature)
+            if existing is not None:
+                return {**existing, "reused_existing": True}
             if len(data) >= MAX_DYNAMIC_TOOLS:
                 raise RuntimeError(f"DynTool 上限 {MAX_DYNAMIC_TOOLS} 已达")
             tid = "dyn_" + uuid.uuid4().hex[:8]
@@ -283,10 +308,11 @@ class DynamicToolRegistry:
                 "changes_state": bool(changes_state),
                 "usage_count": 0,
                 "safety_overrides": 0,
+                "signature": signature,
             }
             data[tid] = tool
             self._save(data)
-            return tool
+            return {**tool, "reused_existing": False}
 
         return self._with_lock(_op)
 
@@ -325,6 +351,95 @@ class DynamicToolRegistry:
                 success=False, blocked=True,
                 reason=f"DynTool 不存在：{tool_id}",
             )
+        return self._execute_spec(
+            tool_id=tool_id,
+            tool=tool,
+            args=args,
+            executor=executor,
+            env_profile=env_profile,
+            confirm_fn=confirm_fn,
+            timeout=timeout,
+            persist_usage=True,
+        )
+
+    def execute_inline(
+        self,
+        *,
+        name: str,
+        description: str,
+        cmd_template: list[str],
+        params: dict,
+        args: dict,
+        consequences: str,
+        risk_assessment: str,
+        estimated_risk: str,
+        changes_state: bool = True,
+        reversible: bool = False,
+        executor: "SafeExecutor",
+        env_profile: "EnvProfile",
+        confirm_fn: Callable[[dict], bool],
+        timeout: int = 30,
+    ) -> DynToolResult:
+        try:
+            _validate_tool_spec(
+                name=name or _default_tool_name(cmd_template),
+                cmd_template=cmd_template,
+                params=params,
+            )
+        except ValueError as exc:
+            return DynToolResult(
+                success=False,
+                blocked=True,
+                reason=f"DynTool 临时执行参数非法：{exc}",
+                declared_changes_state=bool(changes_state),
+                changes_state=True,
+            )
+        tool: DynamicTool = {
+            "tool_id": "adhoc_" + uuid.uuid4().hex[:8],
+            "name": name or _default_tool_name(cmd_template),
+            "description": description or "Ad-hoc dynamic execution",
+            "cmd_template": cmd_template,
+            "params": params,
+            "risk_level": "UNKNOWN",
+            "estimated_risk": estimated_risk,
+            "reversible": bool(reversible),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_for": "adhoc_execution",
+            "consequences": consequences,
+            "risk_assessment": risk_assessment,
+            "changes_state": bool(changes_state),
+            "usage_count": 0,
+            "safety_overrides": 0,
+            "signature": _tool_signature(
+                cmd_template=cmd_template,
+                params=params,
+                changes_state=bool(changes_state),
+                reversible=bool(reversible),
+            ),
+        }
+        return self._execute_spec(
+            tool_id=tool["tool_id"],
+            tool=tool,
+            args=args,
+            executor=executor,
+            env_profile=env_profile,
+            confirm_fn=confirm_fn,
+            timeout=timeout,
+            persist_usage=False,
+        )
+
+    def _execute_spec(
+        self,
+        *,
+        tool_id: str,
+        tool: DynamicTool,
+        args: dict,
+        executor: "SafeExecutor",
+        env_profile: "EnvProfile",
+        confirm_fn: Callable[[dict], bool],
+        timeout: int,
+        persist_usage: bool,
+    ) -> DynToolResult:
         declared_changes_state = bool(tool.get("changes_state", True))
 
         missing = _missing_required_args(tool, args)
@@ -385,6 +500,7 @@ class DynamicToolRegistry:
             "tool_id": tool_id,
             "tool_name": tool["name"],
             "cmd": cmd,
+            "dynamic_mode": "registered" if persist_usage else "inline",
             "safety_level": safety.level,
             "safety_rules": safety.rule_ids,
             "mapped_tool": mapped.tool if mapped else None,
@@ -415,18 +531,19 @@ class DynamicToolRegistry:
         output, exit_code = executor.run(cmd, timeout=timeout)
 
         # 更新用量统计
-        def _inc():
-            data = self._load()
-            if tool_id in data:
-                data[tool_id]["usage_count"] = data[tool_id].get("usage_count", 0) + 1
-                if safety.level != "SAFE":
-                    data[tool_id]["safety_overrides"] = \
-                        data[tool_id].get("safety_overrides", 0) + 1
-                self._save(data)
-        try:
-            self._with_lock(_inc)
-        except Exception:
-            pass
+        if persist_usage:
+            def _inc():
+                data = self._load()
+                if tool_id in data:
+                    data[tool_id]["usage_count"] = data[tool_id].get("usage_count", 0) + 1
+                    if safety.level != "SAFE":
+                        data[tool_id]["safety_overrides"] = \
+                            data[tool_id].get("safety_overrides", 0) + 1
+                    self._save(data)
+            try:
+                self._with_lock(_inc)
+            except Exception:
+                pass
 
         return DynToolResult(
             success=(exit_code == 0),
@@ -454,6 +571,65 @@ class DynamicToolRegistry:
 
 def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
+
+
+def _validate_tool_spec(*, name: str, cmd_template: list[str], params: dict) -> None:
+    if not str(name).strip():
+        raise ValueError("DynTool name 不能为空")
+    if not cmd_template:
+        raise ValueError("cmd_template 不能为空")
+    if len(cmd_template) > 10:
+        raise ValueError("cmd_template 元素数量超过 10")
+    if not isinstance(params, dict):
+        raise ValueError("params 必须是对象")
+    for token in cmd_template:
+        if len(str(token)) > 256:
+            raise ValueError("cmd_template 元素长度超过 256")
+
+
+def _tool_signature(
+    *,
+    cmd_template: list[str],
+    params: dict,
+    changes_state: bool,
+    reversible: bool,
+) -> str:
+    normalized_params = {
+        str(key): {
+            "type": str((value or {}).get("type", "")),
+            "required": bool((value or {}).get("required", False)),
+        }
+        for key, value in sorted((params or {}).items())
+    }
+    return json.dumps(
+        {
+            "cmd_template": [str(token) for token in cmd_template],
+            "params": normalized_params,
+            "changes_state": bool(changes_state),
+            "reversible": bool(reversible),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _find_by_signature(data: dict[str, DynamicTool], signature: str) -> DynamicTool | None:
+    for tool in data.values():
+        tool_signature = tool.get("signature") or _tool_signature(
+            cmd_template=list(tool.get("cmd_template") or []),
+            params=dict(tool.get("params") or {}),
+            changes_state=bool(tool.get("changes_state", True)),
+            reversible=bool(tool.get("reversible", False)),
+        )
+        if tool_signature == signature:
+            return tool
+    return None
+
+
+def _default_tool_name(cmd_template: list[str]) -> str:
+    if not cmd_template:
+        return "adhoc_command"
+    return _command_basename(str(cmd_template[0])) or "adhoc_command"
 
 
 def _effective_changes_state(

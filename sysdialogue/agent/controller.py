@@ -131,7 +131,9 @@ class AgentController:
     def __post_init__(self) -> None:
         self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
-            self._env_sanitized, self.registry
+            self._env_sanitized,
+            self.registry,
+            dynamic_tools_summary=self._dynamic_tools_prompt_summary(),
         )
         self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
         if self.conversation_manager is None:
@@ -357,7 +359,16 @@ class AgentController:
             self._env_sanitized,
             self.registry,
             context_summary=self.conversation_manager.render_context(),
+            dynamic_tools_summary=self._dynamic_tools_prompt_summary(),
         )
+
+    def _dynamic_tools_prompt_summary(self) -> str | None:
+        if self.dynamic_registry is None:
+            return None
+        try:
+            return self.dynamic_registry.render_prompt_summary(limit=8)
+        except Exception:
+            return None
 
     def _handle_propose_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
         if self.dynamic_registry is None:
@@ -398,8 +409,8 @@ class AgentController:
         self.audit_log.log_decision(
             tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
             risk_level="WARN-HIGH", rule_ids=[],
-            reason=f"DynTool 已注册：{dt['tool_id']}",
-            decision="propose_dynamic_tool_registered",
+            reason=f"DynTool {'复用' if dt.get('reused_existing') else '已注册'}：{dt['tool_id']}",
+            decision="propose_dynamic_tool_reused" if dt.get("reused_existing") else "propose_dynamic_tool_registered",
             env_profile_id=self._env_profile_id,
         )
         return _tool_result_block(
@@ -408,7 +419,8 @@ class AgentController:
                 "tool_id": dt["tool_id"], "name": dt["name"],
                 "estimated_risk": dt["estimated_risk"],
                 "changes_state": dt.get("changes_state", True),
-                "note": "已注册为 UNKNOWN 级；如需执行，请继续调用 execute_dynamic_tool；执行前须经 CommandSafetyChecker + 用户确认。",
+                "reused_existing": bool(dt.get("reused_existing")),
+                "note": "这是可复用 DynTool；如需执行，请继续调用 execute_dynamic_tool。对于一次性命令，也可以直接用 execute_dynamic_tool 的 inline cmd_template 模式。",
             }, ensure_ascii=False),
             is_error=False,
         )
@@ -434,11 +446,20 @@ class AgentController:
                 is_error=True,
             )
 
-        tool_id = args.get("tool_id", "")
-        if not isinstance(tool_id, str) or not tool_id.strip():
+        raw_tool_id = args.get("tool_id", "")
+        has_tool_id = isinstance(raw_tool_id, str) and bool(raw_tool_id.strip())
+        cmd_template = args.get("cmd_template")
+        has_inline_template = isinstance(cmd_template, list) and bool(cmd_template)
+        if has_tool_id and has_inline_template:
             return _tool_result_block(
                 tool_use_id,
-                "execute_dynamic_tool 需要非空字符串 tool_id。",
+                "execute_dynamic_tool 不能同时传 tool_id 和 cmd_template；请选择 registered 或 inline 其中一种模式。",
+                is_error=True,
+            )
+        if not has_tool_id and not has_inline_template:
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool 需要 registered 模式的 tool_id，或 inline 模式的非空 cmd_template。",
                 is_error=True,
             )
         dyn_args = args.get("args") or {}
@@ -446,6 +467,13 @@ class AgentController:
             return _tool_result_block(
                 tool_use_id,
                 "execute_dynamic_tool.args 必须是对象。",
+                is_error=True,
+            )
+        inline_params = args.get("params") or {}
+        if inline_params and not isinstance(inline_params, dict):
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool.params 必须是对象。",
                 is_error=True,
             )
         raw_timeout = args.get("timeout", 30)
@@ -529,14 +557,32 @@ class AgentController:
             return bool(ok)
 
         try:
-            result = self.dynamic_registry.execute(
-                tool_id,
-                dyn_args,
-                executor=self.executor,
-                env_profile=self.env_profile,
-                confirm_fn=confirm_dynamic,
-                timeout=timeout,
-            )
+            if has_tool_id:
+                result = self.dynamic_registry.execute(
+                    raw_tool_id.strip(),
+                    dyn_args,
+                    executor=self.executor,
+                    env_profile=self.env_profile,
+                    confirm_fn=confirm_dynamic,
+                    timeout=timeout,
+                )
+            else:
+                result = self.dynamic_registry.execute_inline(
+                    name=str(args.get("tool_name") or ""),
+                    description=str(args.get("intent_summary") or ""),
+                    cmd_template=list(cmd_template),
+                    params=inline_params if isinstance(inline_params, dict) else {},
+                    args=dyn_args,
+                    consequences=str(args.get("consequences") or "未说明"),
+                    risk_assessment=str(args.get("risk_assessment") or "未提供风险评估"),
+                    estimated_risk=str(args.get("estimated_risk") or "UNKNOWN"),
+                    changes_state=bool(args.get("changes_state", True)),
+                    reversible=bool(args.get("reversible", False)),
+                    executor=self.executor,
+                    env_profile=self.env_profile,
+                    confirm_fn=confirm_dynamic,
+                    timeout=timeout,
+                )
         except Exception as exc:
             self.audit_log.log_decision(
                 tool=META_EXECUTE_DYNAMIC_TOOL,
@@ -563,6 +609,8 @@ class AgentController:
             "final_risk": result.final_risk,
             "declared_changes_state": result.declared_changes_state,
             "changes_state": result.changes_state,
+            "dynamic_mode": "registered" if has_tool_id else "inline",
+            "tool_id": raw_tool_id.strip() if has_tool_id else None,
         }
         self.audit_log.log_command(
             tool=META_EXECUTE_DYNAMIC_TOOL,

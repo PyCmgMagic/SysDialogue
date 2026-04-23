@@ -187,7 +187,9 @@ sysdialogue --help
 - DynTool 默认启用，是 agent 处理复杂任务时的必要扩展能力。
 - DynTool 仍然是 last resort：如果 37 个静态工具或内置 workflow 能覆盖任务，模型不应创建动态工具。
 - DynTool 执行不是裸奔：执行前仍会经过命令形态检查、静态语义风险映射、用户确认、审计记录和 ReAct 完成门。
-- 模型的正确流程是先调用 `propose_dynamic_tool` 注册工具，再读取返回的 `tool_id` 调用 `execute_dynamic_tool`。
+- 对于一次性命令，优先直接调用 `execute_dynamic_tool` 的 inline 模式：传 `cmd_template + args` 即可执行，不需要先注册持久化工具。
+- 只有当某类命令值得跨轮或跨任务复用时，才使用 `propose_dynamic_tool` 注册可复用 DynTool，然后再用 `execute_dynamic_tool(tool_id=..., args=...)` 调用。
+- 持久化 DynTool 现在会按命令模板签名自动复用，同一类工具不会因为换参数就反复注册。
 
 ## 5. 运行方式
 

@@ -52,9 +52,10 @@ SET_EXECUTION_MODE_SCHEMA: dict = {
 PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
     "name": META_PROPOSE_DYNAMIC_TOOL,
     "description": (
-        "Call only when the existing 37 static tools and built-in workflows cannot satisfy the user request. "
-        "Proposes a new DynTool for controlled registration; it does not execute automatically. "
-        "DynTool is always available but must remain a last resort and is still subject to safety checks, confirmation, audit, and ReAct completion gates."
+        "Call only when the existing 37 static tools and built-in workflows cannot satisfy the user request, "
+        "and the capability is worth reusing across future turns. Proposes or reuses a registered DynTool for controlled registration; "
+        "it does not execute automatically. For one-off ad-hoc commands, prefer execute_dynamic_tool directly with inline cmd_template + args. "
+        "DynTool remains a last resort and is still subject to safety checks, confirmation, audit, and ReAct completion gates."
     ),
     "input_schema": {
         "type": "object",
@@ -99,18 +100,45 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
 EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
     "name": META_EXECUTE_DYNAMIC_TOOL,
     "description": (
-        "Execute a registered DynTool. Execution always passes through CommandSafetyChecker, "
-        "static semantic risk mapping, user confirmation, audit, and ReAct completion gates. "
-        "Usually call propose_dynamic_tool first, read the returned tool_id, then call this tool."
+        "Execute DynTool in one of two modes: "
+        "1) registered mode with tool_id + args, for an already registered reusable DynTool; "
+        "2) inline mode with cmd_template + args, for a one-off ad-hoc command without registering a persistent tool. "
+        "Execution always passes through CommandSafetyChecker, static semantic risk mapping, user confirmation, audit, and ReAct completion gates. "
+        "Prefer inline mode for one-off tasks; use propose_dynamic_tool only when the command family should be reused later."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "tool_id": {"type": "string", "description": "propose_dynamic_tool 返回的 dyn_* ID"},
+            "tool_id": {"type": "string", "description": "已注册 DynTool 的 dyn_* ID；registered mode 使用"},
+            "tool_name": {"type": "string", "description": "inline mode 显示名称；省略时自动从命令推断"},
+            "cmd_template": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 10,
+                "description": "inline mode 使用的 subprocess argv 模板，用 {param_name} 表示参数占位符",
+            },
             "args": {
                 "type": "object",
-                "description": "DynTool 参数值，按注册时 params 定义传入",
+                "description": "DynTool 参数值；registered mode 按已注册 params 传入，inline mode 按 cmd_template 占位符传入",
             },
+            "params": {
+                "type": "object",
+                "description": "inline mode 可选参数定义：{param_name: {type, description, required}}",
+            },
+            "intent_summary": {"type": "string", "description": "inline mode 的意图摘要"},
+            "consequences": {"type": "string", "description": "inline mode 的影响说明"},
+            "risk_assessment": {"type": "string", "description": "inline mode 的风险评估"},
+            "estimated_risk": {
+                "type": "string",
+                "enum": ["WARN-LOW", "WARN-HIGH", "UNKNOWN"],
+                "description": "inline mode 预估风险等级",
+            },
+            "changes_state": {
+                "type": "boolean",
+                "default": True,
+                "description": "inline mode 是否会修改目标系统状态；只读诊断应设置为 false",
+            },
+            "reversible": {"type": "boolean", "description": "inline mode 是否易于回滚"},
             "timeout": {
                 "type": "integer",
                 "minimum": 1,
@@ -118,7 +146,7 @@ EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "default": 30,
             },
         },
-        "required": ["tool_id", "args"],
+        "required": ["args"],
     },
 }
 

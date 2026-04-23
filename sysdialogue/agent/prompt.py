@@ -22,7 +22,10 @@ Before using OS-facing tools, call set_execution_mode when one of these applies:
 - The request matches a built-in workflow: mode="workflow" with workflow_name and workflow_params.
 - The request is a single direct action: mode="direct" or proceed directly when obvious.
 
-DynTool is always available, but it is a last resort. If static tools or built-in workflows can express the task, do not call propose_dynamic_tool. Use propose_dynamic_tool only when the existing 37 static tools and built-in workflows cannot cover the required capability. A successful proposal returns a tool_id; call execute_dynamic_tool only when execution is still required, then continue observing, repairing, verifying, and finishing based on the result."""
+DynTool is always available, but it is a last resort. If static tools or built-in workflows can express the task, do not call propose_dynamic_tool.
+- If an existing reusable DynTool already matches the command family, reuse it with execute_dynamic_tool(tool_id=..., args=...).
+- If the command is a one-off ad-hoc capability for the current task, call execute_dynamic_tool directly with inline cmd_template + args; do not register a new persistent tool first.
+- Use propose_dynamic_tool only when the command family should be reusable across future turns or future tasks. A successful proposal returns a reusable tool_id; call execute_dynamic_tool only when execution is still required, then continue observing, repairing, verifying, and finishing based on the result."""
 
 
 _REACT_PROTOCOL = """[ReAct Task Protocol]
@@ -70,6 +73,7 @@ def build_system_prompt(
     env_sanitized: dict,
     registry: "ToolRegistry",
     context_summary: str | None = None,
+    dynamic_tools_summary: str | None = None,
 ) -> str:
     """Build the system prompt injected into the LLM."""
     sections = [
@@ -82,6 +86,8 @@ def build_system_prompt(
     ]
     if context_summary:
         sections.append("[Reusable Cross-Turn Context]\n" + context_summary)
+    if dynamic_tools_summary:
+        sections.append(dynamic_tools_summary)
     sections.extend(
         [
             _REACT_PROTOCOL,

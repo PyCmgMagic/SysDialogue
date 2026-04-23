@@ -491,6 +491,88 @@ def test_dynamic_tool_can_be_proposed_then_executed_by_default(
     assert "confirmation_requested" in [event.stage for event in events]
 
 
+def test_execute_dynamic_tool_inline_mode_supports_one_off_command(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_name": "echo_once",
+                    "cmd_template": ["echo", "{message}"],
+                    "args": {"message": "hello"},
+                    "params": {
+                        "message": {
+                            "type": "string",
+                            "description": "message to echo",
+                            "required": True,
+                        }
+                    },
+                    "intent_summary": "Run a one-off echo diagnostic.",
+                    "consequences": "只读输出，不修改系统。",
+                    "risk_assessment": "SAFE shape, still requires dynamic confirmation.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                    "reversible": True,
+                },
+                tool_id="execute_inline_1",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "一次性动态命令已执行。",
+                "evidence": ["execute_dynamic_tool output=hello"],
+                "verification": "命令返回 exit_code=0，且 inline 动态命令声明为只读。",
+            })
+        ],
+    ])
+
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("hello\n", 0) if cmd == ["echo", "hello"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("执行一个一次性的 echo 诊断动作")
+
+    assert "一次性动态命令已执行" in reply
+    assert executor.calls == [["echo", "hello"]]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["dynamic_mode"] == "inline"
+    assert execute_result["changes_state"] is False
+    assert not (tmp_path / "dynamic_tools.json").exists()
+
+
+def test_registered_dynamic_tool_is_reused_by_signature(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+
+    first = registry.register(
+        name="echo_token",
+        description="Echo a token",
+        cmd_template=["echo", "{message}"],
+        params={"message": {"type": "string", "required": True}},
+        consequences="只读输出，不修改系统。",
+        risk_assessment="SAFE shape.",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+        reversible=True,
+    )
+    second = registry.register(
+        name="echo_token_again",
+        description="Echo the same token family",
+        cmd_template=["echo", "{message}"],
+        params={"message": {"type": "string", "required": True}},
+        consequences="只读输出，不修改系统。",
+        risk_assessment="SAFE shape.",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+        reversible=True,
+    )
+
+    assert second["tool_id"] == first["tool_id"]
+    assert second["reused_existing"] is True
+    assert len(registry.list_tools()) == 1
+
+
 def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(
     tmp_path: Path,
 ) -> None:
@@ -571,3 +653,25 @@ def test_execute_dynamic_tool_invalid_args_return_tool_errors(tmp_path: Path) ->
         assert "动态工具参数无效" in reply
         tool_result = llm.calls[1]["messages"][-1]["content"][0]
         assert tool_result["is_error"] is True
+
+
+def test_system_prompt_lists_reusable_dynamic_tools(tmp_path: Path) -> None:
+    llm = FakeLLM([])
+    controller, _ = _controller_with_dynamic(tmp_path, llm, RecordingExecutor())
+    controller.dynamic_registry.register(
+        name="echo_token",
+        description="Echo a token",
+        cmd_template=["echo", "{message}"],
+        params={"message": {"type": "string", "required": True}},
+        consequences="只读输出，不修改系统。",
+        risk_assessment="SAFE shape.",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+        reversible=True,
+    )
+
+    prompt = controller._current_system_prompt()
+
+    assert "[Reusable DynTools]" in prompt
+    assert "dyn_" in prompt
+    assert "echo_token" in prompt

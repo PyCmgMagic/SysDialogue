@@ -10,7 +10,7 @@
 
 SysDialogue v6：面向 Linux 服务器运维场景的操作系统智能代理。用户用自然语言输入运维需求，代理在受控工具体系内规划执行，所有操作经过安全门拦截和审计记录。
 
-**核心原则**：Static-first / Workflow-first / Preview-Backup-Validate / EnvProfile-driven / DynTool-last
+**核心原则**：Static-first / Workflow-first / Preview-Backup-Validate / EnvProfile-driven / DynTool-last（一次性命令优先 inline 执行，可复用能力才注册）
 
 ---
 
