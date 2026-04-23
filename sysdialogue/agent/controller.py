@@ -37,21 +37,32 @@ _DEFAULT_WORKFLOWS_DIR = Path(__file__).parent.parent / "workflows"
 
 
 # --------------------------------------------------------------------------
-# ClaudeClient — Anthropic SDK 同步封装
+# OpenAIChatClient — OpenAI-compatible Chat Completions 同步封装
 # --------------------------------------------------------------------------
 
-class ClaudeClient:
-    """同步 agentic loop 封装。Task 13 TUI 再加流式。"""
+@dataclass
+class LLMResponse:
+    content: list[dict]
+    stop_reason: str
+
+
+class OpenAIChatClient:
+    """OpenAI-compatible Chat Completions wrapper using SysDialogue tool blocks."""
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-6",
-        max_tokens: int = 4096,
+        base_url: str | None = None,
+        model: str = "",
+        max_tokens: int | None = None,
     ):
-        from anthropic import Anthropic
-        self._client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+        from openai import OpenAI
+        kwargs = {"api_key": api_key or os.environ.get("OPENAI_API_KEY")}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = OpenAI(**kwargs)
         self.model = model
+        self.base_url = base_url or ""
         self.max_tokens = max_tokens
 
     def messages_create(
@@ -61,13 +72,18 @@ class ClaudeClient:
         messages: list,
         tools: list[dict],
     ):
-        return self._client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=messages,
-            tools=tools,
-        )
+        kwargs = {
+            "model": self.model,
+            "messages": _to_openai_messages(system, messages),
+            "tools": _to_openai_tools(tools),
+            "tool_choice": "auto",
+        }
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        response = self._client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        message = _object_attr(choice, "message")
+        return _from_openai_message(message, _object_attr(choice, "finish_reason", "stop"))
 
 
 # --------------------------------------------------------------------------
@@ -76,13 +92,13 @@ class ClaudeClient:
 
 @dataclass
 class AgentController:
-    """主控。持有 executor / env_profile / audit / registry / claude_client / confirm_callback。"""
+    """主控。持有 executor / env_profile / audit / registry / llm_client / confirm_callback。"""
 
     executor: "SafeExecutor"
     env_profile: "EnvProfile"
     audit_log: AuditLog
     registry: "ToolRegistry"
-    claude_client: Any
+    llm_client: Any
     confirm_callback: Callable[[ConfirmationRequest], bool] = field(
         default=lambda req: False
     )
@@ -143,7 +159,7 @@ class AgentController:
             if self.is_cancel_requested():
                 self.conversation_manager.commit_turn(messages)
                 return "当前执行已取消。"
-            response = self.claude_client.messages_create(
+            response = self.llm_client.messages_create(
                 system=self._current_system_prompt(),
                 messages=messages,
                 tools=all_tools,
@@ -410,8 +426,131 @@ class AgentController:
 
 
 # --------------------------------------------------------------------------
-# 辅助函数 — 兼容 Anthropic SDK content block 与 mock 字典结构
+# 辅助函数 — 兼容内部 content block、OpenAI SDK 对象与 mock 字典结构
 # --------------------------------------------------------------------------
+
+def _object_attr(obj, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    converted = []
+    for tool in tools:
+        converted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            }
+        )
+    return converted
+
+
+def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
+    converted = [{"role": "system", "content": system}]
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "assistant":
+            converted.append(_assistant_message_to_openai(content))
+            continue
+        if role == "user" and _contains_tool_result_block(content):
+            converted.extend(_tool_result_messages_to_openai(content))
+            continue
+        converted.append({"role": role, "content": _content_to_text(content)})
+    return converted
+
+
+def _assistant_message_to_openai(content) -> dict:
+    blocks = _content_as_list(content)
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    for block in blocks:
+        block_type = _block_type(block)
+        if block_type == "text":
+            text = _block_attr(block, "text") or ""
+            if text:
+                text_parts.append(text)
+        elif block_type == "tool_use":
+            tool_calls.append(
+                {
+                    "id": _block_attr(block, "id"),
+                    "type": "function",
+                    "function": {
+                        "name": _block_attr(block, "name"),
+                        "arguments": json.dumps(_block_attr(block, "input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
+    message: dict = {
+        "role": "assistant",
+        "content": "\n".join(text_parts) if text_parts else None,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
+
+
+def _tool_result_messages_to_openai(content) -> list[dict]:
+    messages = []
+    for block in _content_as_list(content):
+        if _block_type(block) != "tool_result":
+            continue
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": _block_attr(block, "tool_use_id"),
+                "content": _block_attr(block, "content") or "",
+            }
+        )
+    return messages
+
+
+def _from_openai_message(message, finish_reason: str | None = None) -> LLMResponse:
+    content: list[dict] = []
+    text = _object_attr(message, "content", "") or ""
+    if text:
+        content.append({"type": "text", "text": text})
+
+    tool_calls = _object_attr(message, "tool_calls", None) or []
+    for call in tool_calls:
+        function = _object_attr(call, "function", {}) or {}
+        raw_args = _object_attr(function, "arguments", "") or "{}"
+        try:
+            parsed_args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            parsed_args = {}
+        content.append(
+            {
+                "type": "tool_use",
+                "id": _object_attr(call, "id"),
+                "name": _object_attr(function, "name", ""),
+                "input": parsed_args,
+            }
+        )
+    stop_reason = "tool_use" if tool_calls else (finish_reason or "stop")
+    return LLMResponse(content=content, stop_reason=stop_reason)
+
+
+def _content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in _content_as_list(content):
+        if _block_type(block) == "text":
+            text = _block_attr(block, "text") or ""
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _contains_tool_result_block(content) -> bool:
+    return any(_block_type(block) == "tool_result" for block in _content_as_list(content))
 
 def _content_as_list(content) -> list:
     if isinstance(content, list):

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from sysdialogue.agent.controller import AgentController, ClaudeClient
+from sysdialogue.agent.controller import AgentController, OpenAIChatClient
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.runtime.secure_runner import LocalExecutor, SafeExecutor
@@ -17,9 +17,9 @@ if TYPE_CHECKING:
     from sysdialogue.app.config import AppConfig
 
 
-class NullClaudeClient:
+class NullLLMClient:
     def messages_create(self, *, system, messages, tools):
-        raise RuntimeError("当前入口不调用 Claude API")
+        raise RuntimeError("当前入口不调用 OpenAI-compatible API")
 
 
 @dataclass
@@ -42,7 +42,7 @@ def create_runtime(
     *,
     session_id: str | None = None,
     require_api: bool = False,
-    claude_client: Any | None = None,
+    llm_client: Any | None = None,
     confirm_callback=None,
     input_callback=None,
 ) -> RuntimeBundle:
@@ -66,20 +66,26 @@ def create_runtime(
     env_profile = probe.probe()
     audit = AuditLog(session_id=session_id)
 
-    if claude_client is None:
+    if llm_client is None:
         if require_api:
             if not config.api_key:
-                raise RuntimeError("ANTHROPIC_API_KEY is required for this entrypoint")
-            claude_client = ClaudeClient(api_key=config.api_key, model=config.model)
+                raise RuntimeError("OPENAI_API_KEY is required for this entrypoint")
+            if not config.model:
+                raise RuntimeError("OPENAI_MODEL or --model is required for this entrypoint")
+            llm_client = OpenAIChatClient(
+                api_key=config.api_key,
+                base_url=config.base_url or None,
+                model=config.model,
+            )
         else:
-            claude_client = NullClaudeClient()
+            llm_client = NullLLMClient()
 
     controller = AgentController(
         executor=executor,
         env_profile=env_profile,
         audit_log=audit,
         registry=default_registry(),
-        claude_client=claude_client,
+        llm_client=llm_client,
         competition_mode=config.competition_mode,
         max_iterations=config.max_iterations,
         workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,

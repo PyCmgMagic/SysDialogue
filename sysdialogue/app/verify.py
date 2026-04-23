@@ -105,13 +105,17 @@ def run_verify(config: "AppConfig") -> int:
     # 5. Runtime config
     _safe_print("\n[5/5] Config:")
     _safe_print(f"  - model: {config.model}")
+    _safe_print(f"  - base_url: {config.base_url or '(OpenAI SDK default)'}")
     _safe_print(f"  - competition_mode: {config.competition_mode}")
     _safe_print(f"  - deployment_mode: {'remote' if config.remote_mode else 'local'}")
     if config.api_key:
-        _safe_print(f"  - ANTHROPIC_API_KEY: configured ({config.api_key[:8]}...)")
+        _safe_print(f"  - OPENAI_API_KEY: configured ({config.api_key[:8]}...)")
     else:
-        _safe_print("  - ANTHROPIC_API_KEY: missing (required for TUI/simple/web)")
-        issues.append("ANTHROPIC_API_KEY is not configured")
+        _safe_print("  - OPENAI_API_KEY: missing (required for TUI/simple/web)")
+        issues.append("OPENAI_API_KEY is not configured")
+    if not config.model:
+        _safe_print("  - OPENAI_MODEL / --model: missing (required for TUI/simple/web)")
+        issues.append("OPENAI_MODEL or --model is not configured")
 
     _safe_print("\n" + "=" * 60)
     if issues:
@@ -127,7 +131,7 @@ def run_verify(config: "AppConfig") -> int:
 
 
 def run_demo(config: "AppConfig") -> int:
-    """Run the built-in security_audit workflow without calling Claude."""
+    """Run the built-in security_audit workflow without calling the LLM API."""
     _safe_print("=" * 60)
     _safe_print(" SysDialogue v6 - Demo mode (--demo)")
     _safe_print(" Scenario: security_audit workflow (read-only inspection)")

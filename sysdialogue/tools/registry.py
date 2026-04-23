@@ -1,4 +1,4 @@
-"""ToolRegistry — 37 个工具的 JSON Schema 注册表，供 ClaudeClient 拉取 tool_definitions。"""
+"""ToolRegistry — 37 个工具的 JSON Schema 注册表，供 LLM 客户端拉取 tool definitions。"""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class ToolRegistry:
         return list(self._tools.keys())
 
     def all_schemas(self) -> list[dict]:
-        """导出 Anthropic tool_definitions[] 使用的 Schema 列表。"""
+        """导出内部工具 Schema 列表，供 LLM 客户端转换为目标 API 格式。"""
         return [td.schema for td in self._tools.values()]
 
     def describe(self) -> list[tuple[str, str]]:

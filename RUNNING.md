@@ -6,7 +6,7 @@
 cd D:\项目\Nexus
 ```
 
-SysDialogue 是面向 Linux 服务器运维场景的智能代理。它可以通过 TUI、轻量 CLI、Web 控制台或计划任务入口运行，并通过固定工具集、风险分级、人工确认、备份回滚和审计日志来约束操作。
+SysDialogue 是面向 Linux 服务器运维场景的智能代理。它通过 OpenAI-compatible Chat Completions API 调用模型，可从 TUI、轻量 CLI、Web 控制台或计划任务入口运行，并通过固定工具集、风险分级、人工确认、备份回滚和审计日志来约束操作。
 
 ## 1. 运行前提
 
@@ -97,7 +97,7 @@ python -m pip install -r requirements-dev.txt
 
 主要运行依赖来自 `requirements.txt` / `pyproject.toml`：
 
-- `anthropic`：Claude API 客户端
+- `openai`：OpenAI-compatible Chat Completions 客户端
 - `paramiko`：远程 SSH 执行
 - `textual`：TUI 界面
 - `fastapi`、`uvicorn`：Web 控制台
@@ -108,20 +108,24 @@ python -m pip install -r requirements-dev.txt
 
 ## 3. 配置 API Key
 
-`--verify` 和 `--demo` 不调用 Claude API，可以不配置 Key。TUI、Simple CLI、Web 控制台需要 `ANTHROPIC_API_KEY`。
+`--verify` 和 `--demo` 不调用 LLM API，可以不配置 Key。TUI、Simple CLI、Web 控制台需要 `OPENAI_API_KEY` 和模型名。
 
 ### 3.1 使用环境变量
 
 Windows PowerShell：
 
 ```powershell
-$env:ANTHROPIC_API_KEY="你的_api_key"
+$env:OPENAI_API_KEY="你的_api_key"
+$env:OPENAI_BASE_URL="你的_openai_compatible_base_url"
+$env:OPENAI_MODEL="你的模型名"
 ```
 
 Linux / macOS：
 
 ```bash
-export ANTHROPIC_API_KEY="你的_api_key"
+export OPENAI_API_KEY="你的_api_key"
+export OPENAI_BASE_URL="你的_openai_compatible_base_url"
+export OPENAI_MODEL="你的模型名"
 ```
 
 ### 3.2 使用 `.env`
@@ -129,8 +133,9 @@ export ANTHROPIC_API_KEY="你的_api_key"
 在仓库根目录创建 `.env`：
 
 ```dotenv
-ANTHROPIC_API_KEY=你的_api_key
-SYSDIALOGUE_MODEL=claude-sonnet-4-6
+OPENAI_API_KEY=你的_api_key
+OPENAI_BASE_URL=你的_openai_compatible_base_url
+OPENAI_MODEL=你的模型名
 SYSDIALOGUE_COMPETITION_MODE=true
 SYSDIALOGUE_MAX_ITER=25
 ```
@@ -186,7 +191,7 @@ sysdialogue --help
 - 探测当前环境能力
 - 列出已注册工具和工作流
 - 检查安全规则、配置状态
-- 不调用 Claude API
+- 不调用 LLM API
 
 运行：
 
@@ -196,15 +201,15 @@ python -m sysdialogue.app.cli --verify
 
 常见结果：
 
-- 配置了 `ANTHROPIC_API_KEY`：通常返回 `0`
-- 未配置 `ANTHROPIC_API_KEY`：会列出 1 个 warning，返回 `1`
+- 配置了 `OPENAI_API_KEY` 和模型：通常返回 `0`
+- 未配置 `OPENAI_API_KEY` 或模型：会列出 warning，返回 `1`
 - Windows 本地：Linux 能力项可能显示 `unknown`，这是正常开发环境现象
 
 ### 5.2 演示模式：`--demo`
 
 用途：
 
-- 不调用 Claude API
+- 不调用 LLM API
 - 直接跑内置 `security_audit` 工作流
 - 用于验证工作流引擎、工具注册、安全链路
 
@@ -267,7 +272,7 @@ TUI 快捷键：
 
 - 轻量 stdin/stdout 对话
 - 适合终端快速测试
-- 需要 `ANTHROPIC_API_KEY`
+- 需要 `OPENAI_API_KEY` 和模型名
 
 运行：
 
@@ -303,7 +308,7 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 
 - 浏览器界面
 - 提供对话区、计划区、风险确认区、执行时间线、结果总结
-- 需要 `ANTHROPIC_API_KEY`
+- 需要 `OPENAI_API_KEY` 和模型名
 
 启动：
 
@@ -456,7 +461,7 @@ SysDialogue 的执行链路大致为：
 
 ```text
 用户自然语言
-  -> Claude 生成 tool_use 或 workflow 路由
+  -> LLM 生成 tool_use 或 workflow 路由
   -> RiskClassifier 风险分级
   -> RemoteLockout / CommandSafety 追加检查
   -> 必要时人工确认
@@ -541,18 +546,20 @@ python -m sysdialogue.app.cli --demo
 注意：
 
 - Windows 上 `--demo` 返回 unsupported 是预期，不代表测试失败
-- 未配置 `ANTHROPIC_API_KEY` 时 `--verify` 会返回 warning
+- 未配置 `OPENAI_API_KEY` 或模型时 `--verify` 会返回 warning
 
 ## 12. 常见问题
 
-### 12.1 `ANTHROPIC_API_KEY is missing`
+### 12.1 `OPENAI_API_KEY` 或模型缺失
 
 原因：TUI、Simple CLI、Web 需要 API Key。
 
 解决：
 
 ```powershell
-$env:ANTHROPIC_API_KEY="你的_api_key"
+$env:OPENAI_API_KEY="你的_api_key"
+$env:OPENAI_BASE_URL="你的_openai_compatible_base_url"
+$env:OPENAI_MODEL="你的模型名"
 python -m sysdialogue.app.cli --simple
 ```
 
@@ -623,7 +630,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 如果唯一问题是：
 
 ```text
-ANTHROPIC_API_KEY is not configured
+OPENAI_API_KEY is not configured
+OPENAI_MODEL or --model is not configured
 ```
 
 这是配置警告，不代表程序损坏。配置 API Key 后再运行即可。
@@ -664,7 +672,9 @@ python -m sysdialogue.app.cli --verify
 配置 API Key 后启动 Simple CLI：
 
 ```powershell
-$env:ANTHROPIC_API_KEY="你的_api_key"
+$env:OPENAI_API_KEY="你的_api_key"
+$env:OPENAI_BASE_URL="你的_openai_compatible_base_url"
+$env:OPENAI_MODEL="你的模型名"
 python -m sysdialogue.app.cli --simple
 ```
 
@@ -676,7 +686,9 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
-export ANTHROPIC_API_KEY="你的_api_key"
+export OPENAI_API_KEY="你的_api_key"
+export OPENAI_BASE_URL="你的_openai_compatible_base_url"
+export OPENAI_MODEL="你的模型名"
 python -m sysdialogue.app.cli --verify
 python -m sysdialogue.app.cli --demo
 python -m sysdialogue.app.cli
@@ -687,7 +699,9 @@ python -m sysdialogue.app.cli
 ```powershell
 cd D:\项目\Nexus
 .\.venv\Scripts\Activate.ps1
-$env:ANTHROPIC_API_KEY="你的_api_key"
+$env:OPENAI_API_KEY="你的_api_key"
+$env:OPENAI_BASE_URL="你的_openai_compatible_base_url"
+$env:OPENAI_MODEL="你的模型名"
 ssh -p 22 user@example.com
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519 --simple
 ```
@@ -698,4 +712,3 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 - Windows 本地只作为开发与入口 smoke 环境，不等价于 Linux 运维目标机
 - Web 控制台是轻量最小可用版本，当前 session 存储在进程内存中
 - 计划任务入口是非交互模式，高风险任务会被拒绝，不会等待人工确认
-

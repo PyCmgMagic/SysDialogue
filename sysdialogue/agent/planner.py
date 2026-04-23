@@ -7,7 +7,7 @@
   3. 冻结 plan_id 并写入 AuditLog
   4. 返回一段 UI 可展示的计划文本
 
-随后 Claude 按 plan 依次调用 tool_use，AgentController 常规路径处理。
+随后 LLM 按 plan 依次调用 tool_use，AgentController 常规路径处理。
 """
 
 from __future__ import annotations

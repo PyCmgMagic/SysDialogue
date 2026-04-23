@@ -72,7 +72,7 @@ def build_system_prompt(
     competition_mode: bool = True,
     context_summary: str | None = None,
 ) -> str:
-    """构造注入 Claude 的 system prompt。"""
+    """构造注入 LLM 的 system prompt。"""
     sections = [
         "你是 SysDialogue，一个面向 Linux 服务器运维场景的操作系统智能代理。"
         "用户用自然语言描述运维需求，你在受控工具体系内规划并执行，所有操作经过安全门和审计。",

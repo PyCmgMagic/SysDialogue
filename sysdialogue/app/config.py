@@ -10,7 +10,8 @@ from pathlib import Path
 @dataclass
 class AppConfig:
     api_key: str = ""
-    model: str = "claude-sonnet-4-6"
+    base_url: str = ""
+    model: str = ""
     competition_mode: bool = True
     remote_mode: bool = False
     ssh_host: str = ""
@@ -45,8 +46,9 @@ def load_config(
             pass
 
     cfg = AppConfig(
-        api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        model=model or os.environ.get("SYSDIALOGUE_MODEL", "claude-sonnet-4-6"),
+        api_key=os.environ.get("OPENAI_API_KEY", ""),
+        base_url=os.environ.get("OPENAI_BASE_URL", ""),
+        model=model or os.environ.get("OPENAI_MODEL", "") or os.environ.get("SYSDIALOGUE_MODEL", ""),
         competition_mode=(competition_mode
                           if competition_mode is not None
                           else _env_bool("SYSDIALOGUE_COMPETITION_MODE", True)),
