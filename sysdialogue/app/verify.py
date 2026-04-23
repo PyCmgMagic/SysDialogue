@@ -106,7 +106,7 @@ def run_verify(config: "AppConfig") -> int:
     _safe_print("\n[5/5] Config:")
     _safe_print(f"  - model: {config.model}")
     _safe_print(f"  - base_url: {config.base_url or '(OpenAI SDK default)'}")
-    _safe_print(f"  - competition_mode: {config.competition_mode}")
+    _safe_print("  - dynamic_tools: enabled")
     _safe_print(f"  - deployment_mode: {'remote' if config.remote_mode else 'local'}")
     if config.api_key:
         _safe_print(f"  - OPENAI_API_KEY: configured ({config.api_key[:8]}...)")

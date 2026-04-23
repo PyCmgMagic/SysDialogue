@@ -52,9 +52,9 @@ SET_EXECUTION_MODE_SCHEMA: dict = {
 PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
     "name": META_PROPOSE_DYNAMIC_TOOL,
     "description": (
-        "当现有 37 个静态工具和内置 workflow 均无法满足用户需求时调用。"
-        "提出新工具方案供用户审批，不自动执行。"
-        "竞赛模式下本工具关闭；严禁用于已有静态工具可表达的能力。"
+        "Call only when the existing 37 static tools and built-in workflows cannot satisfy the user request. "
+        "Proposes a new DynTool for controlled registration; it does not execute automatically. "
+        "DynTool is always available but must remain a last resort and is still subject to safety checks, confirmation, audit, and ReAct completion gates."
     ),
     "input_schema": {
         "type": "object",
@@ -99,9 +99,9 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
 EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
     "name": META_EXECUTE_DYNAMIC_TOOL,
     "description": (
-        "执行已注册的 DynTool。仅在 --dev/开发模式可用；执行前仍会经过 "
-        "CommandSafetyChecker、静态语义风险映射和用户确认。"
-        "通常先调用 propose_dynamic_tool，读取返回的 tool_id，再调用本工具。"
+        "Execute a registered DynTool. Execution always passes through CommandSafetyChecker, "
+        "static semantic risk mapping, user confirmation, audit, and ReAct completion gates. "
+        "Usually call propose_dynamic_tool first, read the returned tool_id, then call this tool."
     ),
     "input_schema": {
         "type": "object",

@@ -1,6 +1,4 @@
-"""DynamicToolRegistry — DynTool 持久化 + 三层执行链（竞赛模式关闭）。
-
-参考 claudeplan6.md §6。竞赛模式下 execute() 直接拒绝；开发态保留完整能力。
+"""DynamicToolRegistry — DynTool persistence + three-layer execution chain.
 
 第一层：CommandSafetyChecker（形态 + 远程锁门）
 第二层：StaticRuleMapper + RiskClassifier（对象语义）
@@ -185,22 +183,16 @@ class StaticRuleMapper:
 # --------------------------------------------------------------------------
 
 class DynamicToolRegistry:
-    """DynTool 持久化 + 三层执行链。
-
-    - competition_mode=True（默认）：execute() 直接拒绝
-    - 开发态：走 CS → StaticRuleMapper+RiskClassifier → UNKNOWN 确认 → 执行
-    """
+    """DynTool persistence + safety-gated execution chain."""
 
     def __init__(
         self,
         *,
         storage_path: str | None = None,
-        competition_mode: bool = True,
     ):
         self.storage_path = Path(storage_path or os.path.expanduser(
             "~/.sysdialogue/dynamic_tools.json"
         ))
-        self.competition_mode = competition_mode
 
     # ------------------------------------------------------------------
     # 存取
@@ -257,7 +249,7 @@ class DynamicToolRegistry:
         reversible: bool = False,
         created_for: str = "",
     ) -> DynamicTool:
-        """注册一个新 DynTool（竞赛模式仍允许注册但不可执行）。"""
+        """Register a new DynTool."""
         if not name.strip():
             raise ValueError("DynTool name 不能为空")
         if not cmd_template:
@@ -326,13 +318,7 @@ class DynamicToolRegistry:
         confirm_fn: Callable[[dict], bool],
         timeout: int = 30,
     ) -> DynToolResult:
-        """竞赛模式直接拒绝；开发态走三层执行链。"""
-        if self.competition_mode:
-            return DynToolResult(
-                success=False, blocked=True,
-                reason="竞赛模式下 DynTool 已关闭，禁止执行",
-            )
-
+        """Execute a DynTool through the three-layer safety chain."""
         tool = self.get(tool_id)
         if tool is None:
             return DynToolResult(

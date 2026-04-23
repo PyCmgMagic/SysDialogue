@@ -5,7 +5,6 @@
   sysdialogue --verify               系统自检（不调 API）
   sysdialogue --demo                 演示 security_audit 工作流（不调 API）
   sysdialogue --remote user@host     远程模式（SSH）
-  sysdialogue --dev                  关闭竞赛模式（开启 DynTool）
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from sysdialogue.app.verify import run_demo, run_verify
 @click.option("--remote", metavar="USER@HOST[:PORT]", help="远程 SSH 模式")
 @click.option("--ssh-key", "ssh_key_file", type=click.Path(exists=True),
               help="SSH 私钥文件路径")
-@click.option("--dev", is_flag=True, help="关闭竞赛模式（开启 DynTool）")
 @click.option("--model", help="覆盖 OpenAI-compatible 模型（如 gpt-5.4 或你的服务模型名）")
 @click.option("--env-file", type=click.Path(), help=".env 配置文件路径")
 @click.option("--workflows-dir", type=click.Path(),
@@ -42,7 +40,7 @@ from sysdialogue.app.verify import run_demo, run_verify
 @click.option("--port", "web_port", default=8000, show_default=True, type=int,
               help="Web 控制台监听端口")
 def main(verify: bool, demo: bool, remote: str | None,
-         ssh_key_file: str | None, dev: bool,
+         ssh_key_file: str | None,
          model: str | None, env_file: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
          simple: bool, web_mode: bool, web_host: str, web_port: int) -> None:
@@ -68,7 +66,6 @@ def main(verify: bool, demo: bool, remote: str | None,
 
     config = load_config(
         env_file=env_file,
-        competition_mode=(not dev),
         model=model,
         remote=remote_mode,
         ssh=ssh_conf if ssh_conf else None,

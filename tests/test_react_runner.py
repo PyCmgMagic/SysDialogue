@@ -59,9 +59,7 @@ def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
         event_callback=events.append,
         dynamic_registry=DynamicToolRegistry(
             storage_path=str(tmp_path / "dynamic_tools.json"),
-            competition_mode=False,
         ),
-        competition_mode=False,
     )
     return controller, events
 
@@ -411,7 +409,7 @@ def test_verified_workflow_can_complete_without_extra_validation_tool(tmp_path: 
     assert "workflow 已完成" in reply
 
 
-def test_dynamic_tool_can_be_proposed_then_executed_in_dev_mode(
+def test_dynamic_tool_can_be_proposed_then_executed_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:

@@ -80,7 +80,7 @@ sysdialogue/
 │   ├── base.py                  # ToolResult
 │   ├── registry.py              # ToolDef + ToolRegistry + default_registry()（37 工具 JSON Schema 注册）
 │   ├── meta_tools.py            # set_execution_mode / propose_dynamic_tool / execute_dynamic_tool / finish_task
-│   ├── dynamic_registry.py      # DynamicToolRegistry + StaticRuleMapper（竞赛态关闭，开发态三层链）
+│   ├── dynamic_registry.py      # DynamicToolRegistry + StaticRuleMapper（默认启用，三层安全链）
 │   ├── system_info.py           # get_system_info, get_disk_usage
 │   ├── process_ports.py         # list_processes, kill_process, get_port_status, get_network_info, find_files
 │   ├── file_reading.py          # read_log
@@ -161,9 +161,6 @@ python -m sysdialogue.app.cli
 
 # 远程 SSH 模式
 python -m sysdialogue.app.cli --remote user@host:22 --ssh-key ~/.ssh/id_ed25519
-
-# 开发态（关闭竞赛模式，开启 DynTool）
-python -m sysdialogue.app.cli --dev
 
 # 覆盖 OpenAI-compatible 模型
 python -m sysdialogue.app.cli --model your-model-name

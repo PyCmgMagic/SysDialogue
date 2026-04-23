@@ -136,7 +136,6 @@ export OPENAI_MODEL="你的模型名"
 OPENAI_API_KEY=你的_api_key
 OPENAI_BASE_URL=你的_openai_compatible_base_url
 OPENAI_MODEL=你的模型名
-SYSDIALOGUE_COMPETITION_MODE=true
 SYSDIALOGUE_MAX_ITER=25
 ```
 
@@ -171,7 +170,6 @@ sysdialogue --help
 --demo                     演示 security_audit 工作流，不调 API
 --remote USER@HOST[:PORT]  远程 SSH 模式
 --ssh-key PATH             SSH 私钥文件路径
---dev                      关闭竞赛模式，开启 DynTool
 --model TEXT               覆盖默认模型
 --env-file PATH            指定 .env 文件
 --workflows-dir PATH       指定工作流 YAML 目录
@@ -184,9 +182,9 @@ sysdialogue --help
 
 关于 DynTool：
 
-- 默认竞赛模式下，模型只能使用 37 个静态工具和内置 workflow；`propose_dynamic_tool` / `execute_dynamic_tool` 会被安全策略限制。
-- 如果确实需要让模型为静态工具未覆盖的能力创建并执行临时工具，启动时加 `--dev`。
-- DynTool 执行不是裸奔：执行前仍会经过命令形态检查、静态语义风险映射、用户确认和审计记录。
+- DynTool 默认启用，是 agent 处理复杂任务时的必要扩展能力。
+- DynTool 仍然是 last resort：如果 37 个静态工具或内置 workflow 能覆盖任务，模型不应创建动态工具。
+- DynTool 执行不是裸奔：执行前仍会经过命令形态检查、静态语义风险映射、用户确认、审计记录和 ReAct 完成门。
 - 模型的正确流程是先调用 `propose_dynamic_tool` 注册工具，再读取返回的 `tool_id` 调用 `execute_dynamic_tool`。
 
 ## 5. 运行方式

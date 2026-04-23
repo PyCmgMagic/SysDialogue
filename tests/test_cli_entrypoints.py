@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from click.testing import CliRunner
 
-from sysdialogue.app.cli import _require_api_config
+from sysdialogue.app.cli import _require_api_config, main
 from sysdialogue.app.config import AppConfig, load_config
+from sysdialogue.app.runtime_factory import create_runtime
+from sysdialogue.tools.dynamic_registry import DynamicToolRegistry
 
 
 def test_require_api_config_exits_with_clear_message(capsys) -> None:
@@ -39,3 +42,23 @@ def test_load_config_falls_back_to_openai_model_then_legacy(monkeypatch, tmp_pat
 
     monkeypatch.delenv("OPENAI_MODEL")
     assert load_config().model == "legacy-model"
+
+
+def test_cli_help_no_longer_exposes_dev_mode() -> None:
+    result = CliRunner().invoke(main, ["--help"])
+    removed_option = "-" + "-dev"
+
+    assert result.exit_code == 0
+    assert removed_option not in result.output
+    assert "competition" not in result.output.lower()
+    assert "竞赛" not in result.output
+
+
+def test_default_runtime_injects_executable_dynamic_registry() -> None:
+    runtime = create_runtime(AppConfig(), require_api=False)
+    try:
+        assert isinstance(runtime.controller.dynamic_registry, DynamicToolRegistry)
+        removed_attr = "competition" + "_mode"
+        assert not hasattr(runtime.controller.dynamic_registry, removed_attr)
+    finally:
+        runtime.close()

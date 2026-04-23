@@ -87,8 +87,7 @@ def create_runtime(
         audit_log=audit,
         registry=default_registry(),
         llm_client=llm_client,
-        dynamic_registry=DynamicToolRegistry(competition_mode=config.competition_mode),
-        competition_mode=config.competition_mode,
+        dynamic_registry=DynamicToolRegistry(),
         max_iterations=config.max_iterations,
         workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,
     )

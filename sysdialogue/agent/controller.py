@@ -115,8 +115,7 @@ class AgentController:
     )
     event_callback: Callable[[Any], None] = field(default=lambda event: None)
     workflows_dir: Path | None = None
-    dynamic_registry: Any = None  # 可选 DynamicToolRegistry 实例（dev 模式）
-    competition_mode: bool = True
+    dynamic_registry: Any = None  # DynamicToolRegistry instance.
     max_iterations: int = 25
     conversation_manager: ConversationManager | None = None
 
@@ -132,7 +131,7 @@ class AgentController:
     def __post_init__(self) -> None:
         self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
-            self._env_sanitized, self.registry, self.competition_mode
+            self._env_sanitized, self.registry
         )
         self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
         if self.conversation_manager is None:
@@ -357,36 +356,21 @@ class AgentController:
         return build_system_prompt(
             self._env_sanitized,
             self.registry,
-            self.competition_mode,
             context_summary=self.conversation_manager.render_context(),
         )
 
     def _handle_propose_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
-        if self.competition_mode:
-            self.audit_log.log_decision(
-                tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
-                risk_level="BLOCK", rule_ids=[],
-                reason="竞赛模式关闭 propose_dynamic_tool",
-                decision="BLOCK", env_profile_id=self._env_profile_id,
-            )
-            return _tool_result_block(
-                tool_use_id,
-                "竞赛模式下 propose_dynamic_tool 已关闭；请使用 37 个静态工具或内置 workflow 完成任务。",
-                is_error=True,
-            )
-
-        # 开发模式：有 dynamic_registry 则注册提案，否则只记录不执行
         if self.dynamic_registry is None:
             self.audit_log.log_decision(
                 tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
                 risk_level="WARN-HIGH", rule_ids=[],
-                reason="dev 模式但未注入 dynamic_registry",
+                reason="DynamicToolRegistry 未注入",
                 decision="propose_dynamic_tool_pending",
                 env_profile_id=self._env_profile_id,
             )
             return _tool_result_block(
                 tool_use_id,
-                "DynTool 提案已记录但 DynamicToolRegistry 未注入，无法执行。",
+                "DynTool registry is unavailable; runtime did not inject DynamicToolRegistry.",
                 is_error=True,
             )
         try:
@@ -446,7 +430,7 @@ class AgentController:
             )
             return _tool_result_block(
                 tool_use_id,
-                "DynTool 执行器不可用；请用 --dev 启动，或确认 runtime 已注入 DynamicToolRegistry。",
+                "DynTool executor is unavailable; runtime did not inject DynamicToolRegistry.",
                 is_error=True,
             )
 
