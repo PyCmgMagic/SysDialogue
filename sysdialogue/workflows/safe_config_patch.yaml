@@ -1,0 +1,144 @@
+name: 安全修改配置
+description: 浏览 → 备份 → 精准替换 → 校验 → 可选 reload → 可选连通性验证（v5.4 推荐主路径，含 v6 修复）
+
+parameters:
+  - name: file_path
+    type: text
+    required: true
+  - name: search_text
+    type: text
+    required: true
+  - name: replace_text
+    type: text
+    required: true
+  - name: validator
+    type: text
+    required: false
+    default: auto
+  - name: service_name
+    type: text
+    required: false
+  - name: verify_host
+    type: text
+    required: false
+    description: "连通性验证目标主机，留空则跳过"
+  - name: verify_port
+    type: integer
+    required: false
+    description: "连通性验证目标端口（整数，不加引号）"
+  - name: verify_kind
+    type: enum
+    required: false
+    options: [tcp, http, tls]
+    default: tcp
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: stat_path
+    args:
+      path: "{{file_path}}"
+  - id: s2
+    type: tool_call
+    tool: read_file
+    args:
+      path: "{{file_path}}"
+      mode: head
+      head_lines: 80
+    depends_on: [s1]
+  - id: s3
+    type: tool_call
+    tool: replace_in_file
+    args:
+      path: "{{file_path}}"
+      search: "{{search_text}}"
+      replace: "{{replace_text}}"
+      dry_run: true
+      expected_matches: 1
+    depends_on: [s2]
+  - id: s4
+    type: approval
+    depends_on: [s3]
+    template: |
+      将对 {{file_path}} 进行如下修改：
+      {{s3.result.diff_preview}}
+      匹配处数：{{s3.result.actual_matches}}
+      将先创建备份，再执行修改与校验；失败自动回滚。
+  - id: s5
+    type: tool_call
+    tool: backup_path
+    args:
+      action: create
+      path: "{{file_path}}"
+    depends_on: [s4]
+  - id: s6
+    type: tool_call
+    tool: replace_in_file
+    args:
+      path: "{{file_path}}"
+      search: "{{search_text}}"
+      replace: "{{replace_text}}"
+      create_backup: false
+      expected_matches: 1
+    depends_on: [s5]
+    lock_scope: "file:{{file_path}}"
+    on_fail: rollback
+  - id: s7
+    type: tool_call
+    tool: validate_config
+    args:
+      target_type: "{{validator}}"
+      path: "{{file_path}}"
+    depends_on: [s6]
+    on_fail: rollback
+  - id: s8
+    type: tool_call
+    tool: manage_service
+    args:
+      action: reload
+      name: "{{service_name}}"
+    depends_on: [s7]
+    condition: "{{service_name is not none and service_name != ''}}"
+    on_fail: rollback
+    lock_scope: "service:{{service_name}}"
+  - id: s9
+    type: tool_call
+    tool: check_endpoint
+    args:
+      kind: "{{verify_kind}}"
+      host: "{{verify_host}}"
+      port: {{verify_port}}
+    depends_on: [s7, s8]
+    condition: "{{verify_host is not none and verify_host != '' and verify_port is not none}}"
+    on_fail: rollback
+
+rollback:
+  - id: r1
+    type: tool_call
+    tool: backup_path
+    args:
+      action: restore
+      backup_id: "{{s5.result.backup_id}}"
+      path: "{{file_path}}"
+    on_fail: continue
+  - id: r2
+    type: tool_call
+    tool: stat_path
+    args:
+      path: "{{file_path}}"
+    depends_on: [r1]
+    condition: "{{r1.failed}}"
+  - id: r3
+    type: display
+    depends_on: [r2]
+    condition: "{{r1.failed}}"
+    template: |
+      ⚠️ 警告：自动回滚失败。
+      文件 {{file_path}} 可能处于不一致状态，请立即人工介入。
+      备份 ID：{{s5.result.backup_id}}
+      可手动执行：backup_path(action=restore, backup_id={{s5.result.backup_id}})
+
+final:
+  success_template: "配置修改完成，已通过校验。"
+  rollback_template: "修改后验证失败，已自动回滚到备份版本。"
+  rollback_failed_template: "自动回滚失败，请人工介入恢复文件。备份 ID：{{s5.result.backup_id}}"

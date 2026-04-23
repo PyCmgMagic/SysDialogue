@@ -1,0 +1,92 @@
+name: 容器服务发布
+description: pull → run → check_endpoint → logs（v5.4，含 v6 整数插值去引号修复）
+
+parameters:
+  - name: image
+    type: text
+    required: true
+  - name: container_name
+    type: text
+    required: true
+  - name: host_port
+    type: integer
+    required: true
+    description: "宿主机端口号（1-65535，整数插值不加引号）"
+  - name: container_port
+    type: integer
+    required: true
+    description: "容器内端口号（1-65535）"
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: manage_container
+    args:
+      action: pull
+      image: "{{image}}"
+  - id: s2
+    type: confirm
+    depends_on: [s1]
+    message: "即将启动容器 {{container_name}}（{{image}}），映射端口 {{host_port}}:{{container_port}}。确认继续？"
+  - id: s3
+    type: tool_call
+    tool: manage_container
+    args:
+      action: run
+      name: "{{container_name}}"
+      image: "{{image}}"
+      ports:
+        - host_port: {{host_port}}
+          container_port: {{container_port}}
+    depends_on: [s2]
+    on_fail: rollback
+  - id: s4
+    type: tool_call
+    tool: check_endpoint
+    args:
+      kind: tcp
+      host: localhost
+      port: {{host_port}}
+    depends_on: [s3]
+    on_fail: rollback
+  - id: s5
+    type: tool_call
+    tool: manage_container
+    args:
+      action: logs
+      name: "{{container_name}}"
+      lines: 50
+    depends_on: [s4]
+  - id: s6
+    type: display
+    depends_on: [s5]
+    template: |
+      容器 {{container_name}} 启动完成。
+      连通性：{{s4.result}}
+      近期日志：
+      {{s5.result}}
+
+rollback:
+  - id: r1
+    type: tool_call
+    tool: manage_container
+    args:
+      action: stop
+      name: "{{container_name}}"
+    on_fail: continue
+  - id: r2
+    type: tool_call
+    tool: manage_container
+    args:
+      action: remove
+      name: "{{container_name}}"
+    depends_on: [r1]
+    on_fail: continue
+  - id: r3
+    type: display
+    depends_on: [r2]
+    template: "容器 {{container_name}} 启动失败，已尝试停止并删除。如需重试，请检查镜像和端口配置。"
+
+final:
+  success_template: "容器 {{container_name}} 发布完成，端口 {{host_port}} 连通性正常。"
+  rollback_template: "容器发布失败，已自动回滚（停止并删除容器）。"

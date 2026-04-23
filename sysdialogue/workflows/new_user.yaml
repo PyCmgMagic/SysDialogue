@@ -1,0 +1,42 @@
+name: 创建开发者账号
+description: 创建带附加组的新用户并验证结果（v4.1）
+
+parameters:
+  - name: username
+    type: text
+    required: true
+  - name: groups
+    type: text_list
+    required: false
+    default: []
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: get_system_info
+    description: 获取当前系统信息，用于确认部署环境
+  - id: s2
+    type: tool_call
+    tool: create_user
+    args:
+      username: "{{username}}"
+      create_home: true
+    depends_on: [s1]
+    lock_scope: "user:{{username}}"
+  - id: s3
+    type: tool_call
+    tool: modify_user_groups
+    args:
+      username: "{{username}}"
+      groups: "{{groups}}"
+      action: add
+    depends_on: [s2]
+    lock_scope: "user:{{username}}"
+    condition: "{{groups is not none and groups|length > 0}}"
+  - id: s4
+    type: display
+    depends_on: [s3]
+    template: "用户 {{username}} 创建成功。附加组：{{groups}}"
+
+final:
+  success_template: "用户 {{username}} 创建完成。"

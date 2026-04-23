@@ -1,0 +1,61 @@
+name: 编辑配置文件
+description: 读取 → 采集新内容 → 预览 → 确认 → 覆盖写入 → 验证（v5.3）
+
+parameters:
+  - name: file_path
+    type: text
+    required: true
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: read_file
+    args:
+      path: "{{file_path}}"
+      mode: head
+      head_lines: 80
+  - id: s2
+    type: input
+    depends_on: [s1]
+    prompt: "文件当前内容已显示。请输入替换后的完整内容（将完整覆盖原文件）："
+    param: new_content
+    multiline: true
+  - id: s3
+    type: display
+    depends_on: [s2]
+    template: |
+      预览：将写入以下内容至 {{file_path}}
+      ─────────────────────────────────
+      {{new_content}}
+      ─────────────────────────────────
+      此操作将完整覆盖原文件，不可自动还原。
+  - id: s4
+    type: confirm
+    depends_on: [s3]
+    message: "确认以上预览内容无误，将覆盖写入 {{file_path}}？"
+  - id: s5
+    type: tool_call
+    tool: write_file
+    args:
+      path: "{{file_path}}"
+      content: "{{new_content}}"
+      mode: overwrite
+    depends_on: [s4]
+    lock_scope: "file:{{file_path}}"
+  - id: s6
+    type: tool_call
+    tool: read_file
+    args:
+      path: "{{file_path}}"
+      mode: head
+      head_lines: 80
+    depends_on: [s5]
+    description: 验证写入结果
+  - id: s7
+    type: display
+    depends_on: [s6]
+    source_step: s6
+    template: "{{file_path}} 已更新。验证内容：\n{{s6.result}}"
+
+final:
+  success_template: "{{file_path}} 已完整覆盖写入。"

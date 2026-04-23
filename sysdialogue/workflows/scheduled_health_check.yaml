@@ -1,0 +1,45 @@
+name: 定时健康巡检
+description: 创建 tool 型 cron 任务，周期调用 check_endpoint（v5.4，含 v6 端口 integer 修复）
+
+parameters:
+  - name: endpoint_host
+    type: text
+    required: true
+  - name: endpoint_port
+    type: integer
+    required: true
+    description: "目标端口号（整数插值不加引号）"
+  - name: schedule
+    type: text
+    required: true
+    description: "标准 5 字段 cron 表达式，如 */5 * * * *"
+
+steps:
+  - id: s1
+    type: confirm
+    message: "将创建计划任务（{{schedule}}），周期检查 {{endpoint_host}}:{{endpoint_port}}。确认继续？"
+  - id: s2
+    type: tool_call
+    tool: manage_cron
+    args:
+      action: create
+      scope: system
+      schedule: "{{schedule}}"
+      job_target:
+        kind: tool
+        name: check_endpoint
+        args:
+          kind: tcp
+          host: "{{endpoint_host}}"
+          port: {{endpoint_port}}
+    depends_on: [s1]
+  - id: s3
+    type: display
+    depends_on: [s2]
+    template: |
+      已创建计划任务（ID: {{s2.result.job_id}}）。
+      调度：{{schedule}}
+      目标：{{endpoint_host}}:{{endpoint_port}}（tcp）
+
+final:
+  success_template: "定时健康巡检已部署，将按 {{schedule}} 执行。"

@@ -1,0 +1,51 @@
+name: 配置回滚
+description: 列备份 → 选择 → 确认 → 恢复 → 校验（v5.4）
+
+parameters:
+  - name: file_path
+    type: text
+    required: true
+  - name: validator
+    type: text
+    required: false
+    default: auto
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: backup_path
+    args:
+      action: list
+      path: "{{file_path}}"
+  - id: s2
+    type: input
+    depends_on: [s1]
+    prompt: "请输入要恢复的备份 ID："
+    param: backup_id
+  - id: s3
+    type: confirm
+    depends_on: [s2]
+    message: "将恢复 {{file_path}} 到备份 {{backup_id}}，确认继续？"
+  - id: s4
+    type: tool_call
+    tool: backup_path
+    args:
+      action: restore
+      backup_id: "{{backup_id}}"
+      path: "{{file_path}}"
+    depends_on: [s3]
+    lock_scope: "file:{{file_path}}"
+  - id: s5
+    type: tool_call
+    tool: validate_config
+    args:
+      target_type: "{{validator}}"
+      path: "{{file_path}}"
+    depends_on: [s4]
+  - id: s6
+    type: display
+    depends_on: [s5]
+    template: "{{file_path}} 已回滚并验证。校验结果：\n{{s5.result}}"
+
+final:
+  success_template: "{{file_path}} 回滚完成。"

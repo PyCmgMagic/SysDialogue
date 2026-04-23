@@ -1,0 +1,43 @@
+name: 安全重启服务
+description: 先查状态，确认后重启并复查（v4.1）
+
+parameters:
+  - name: service_name
+    type: text
+    required: true
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: manage_service
+    args:
+      name: "{{service_name}}"
+      action: status
+  - id: s2
+    type: confirm
+    depends_on: [s1]
+    message: "即将重启 {{service_name}}，这可能中断正在处理的请求。确认继续？"
+  - id: s3
+    type: tool_call
+    tool: manage_service
+    args:
+      name: "{{service_name}}"
+      action: restart
+    depends_on: [s2]
+    lock_scope: "service:{{service_name}}"
+  - id: s4
+    type: tool_call
+    tool: manage_service
+    args:
+      name: "{{service_name}}"
+      action: status
+    depends_on: [s3]
+    description: 重启后复查服务状态
+  - id: s5
+    type: display
+    depends_on: [s4]
+    source_step: s4
+    template: "{{service_name}} 重启完成。当前状态：\n{{s4.result}}"
+
+final:
+  success_template: "{{service_name}} 已成功重启。"

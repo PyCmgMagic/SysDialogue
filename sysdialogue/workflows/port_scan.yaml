@@ -1,0 +1,28 @@
+name: 端口扫描
+description: 列出 TCP 和 UDP 的监听端口（v4.1）
+
+parameters: []
+
+steps:
+  - id: s1
+    type: tool_call
+    tool: get_port_status
+    args:
+      protocol: tcp
+  - id: s2
+    type: tool_call
+    tool: get_port_status
+    args:
+      protocol: udp
+  - id: s3
+    type: display
+    depends_on: [s1, s2]
+    template: |
+      TCP 监听：
+      {{s1.result}}
+
+      UDP 监听：
+      {{s2.result}}
+
+final:
+  success_template: "端口扫描完成。"
