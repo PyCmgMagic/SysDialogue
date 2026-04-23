@@ -44,7 +44,11 @@ def test_tui_need_info_choices_are_limited_and_labelled() -> None:
             "status": "need_info",
             "next_steps": [
                 "提供服务名",
+                None,
+                42,
+                {"label": "对象不应显示"},
                 "提供配置文件路径",
+                "   ",
                 "说明希望检查的端口",
                 "第四个不会展示",
             ],

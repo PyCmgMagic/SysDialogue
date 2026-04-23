@@ -543,7 +543,9 @@ def _choices_from_task_event(data: dict[str, Any]) -> list[str]:
     raw_choices = data.get("choices") or data.get("next_steps") or []
     choices: list[str] = []
     for item in raw_choices:
-        text = str(item).strip()
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
         if not text or text in choices:
             continue
         choices.append(text)

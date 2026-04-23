@@ -478,5 +478,90 @@ def test_dynamic_tool_can_be_proposed_then_executed_in_dev_mode(
 
     assert "动态工具已执行" in reply
     assert executor.calls == [["echo", "hello"]]
+    execute_result = json.loads(llm.calls[2]["messages"][-1]["content"][0]["content"])
+    assert execute_result["declared_changes_state"] is False
+    assert execute_result["changes_state"] is False
     assert "dynamic_tools.json" in str(controller.dynamic_registry.storage_path)
     assert "confirmation_requested" in [event.stage for event in events]
+
+
+def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_id": "placeholder",
+                    "args": {"path": "/tmp/marker"},
+                },
+                tool_id="execute_1",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "错误地声称动态变更已完成。",
+                "evidence": ["execute_dynamic_tool exit_code=0"],
+            })
+        ],
+        [
+            _finish({
+                "status": "failed",
+                "summary": "动态工具执行后还没有完成验证。",
+                "next_steps": ["执行后置验证工具"],
+            }, tool_id="finish_2")
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("", 0) if cmd == ["touch", "/tmp/marker"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    tool = controller.dynamic_registry.register(
+        name="touch_marker",
+        description="Mutates a marker file",
+        cmd_template=["touch", "{path}"],
+        params={"path": {"type": "string", "required": True}},
+        consequences="创建或更新文件时间戳。",
+        risk_assessment="实际会修改文件系统。",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+    )
+    llm.responses[0][0]["input"]["tool_id"] = tool["tool_id"]
+
+    reply = controller.run_turn("执行一个动态变更")
+
+    assert "还没有完成验证" in reply
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["declared_changes_state"] is False
+    assert execute_result["changes_state"] is True
+    rejected_result = llm.calls[2]["messages"][-1]["content"][0]
+    assert rejected_result["is_error"] is True
+    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+
+
+def test_execute_dynamic_tool_invalid_args_return_tool_errors(tmp_path: Path) -> None:
+    cases = [
+        {"tool_id": "", "args": {}},
+        {"tool_id": "dyn_missing", "args": [], "timeout": 30},
+        {"tool_id": "dyn_missing", "args": {}, "timeout": "abc"},
+    ]
+    for index, bad_args in enumerate(cases):
+        llm = FakeLLM([
+            [_tool_use("execute_dynamic_tool", bad_args, tool_id=f"execute_{index}")],
+            [
+                _finish({
+                    "status": "failed",
+                    "summary": "动态工具参数无效。",
+                    "next_steps": ["修正 execute_dynamic_tool 参数"],
+                }, tool_id=f"finish_{index}")
+            ],
+        ])
+        controller, _ = _controller_with_dynamic(tmp_path / f"case_{index}", llm, RecordingExecutor())
+
+        reply = controller.run_turn("执行动态工具")
+
+        assert "动态工具参数无效" in reply
+        tool_result = llm.calls[1]["messages"][-1]["content"][0]
+        assert tool_result["is_error"] is True

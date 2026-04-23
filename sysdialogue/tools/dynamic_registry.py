@@ -67,6 +67,43 @@ class DynToolResult:
     reason: str = ""
     cmd: list[str] = field(default_factory=list)
     final_risk: str = "UNKNOWN"
+    declared_changes_state: bool = True
+    changes_state: bool = True
+
+
+_READ_ONLY_COMMAND_BASENAMES = {
+    "echo",
+    "printf",
+    "true",
+    "false",
+    "pwd",
+    "whoami",
+    "id",
+    "uname",
+    "date",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "find",
+    "ls",
+    "stat",
+    "df",
+    "du",
+    "ps",
+    "ss",
+    "netstat",
+    "ip",
+    "journalctl",
+}
+
+_READ_ONLY_MAPPED_TOOL_KEYS = {
+    "get_port_status",
+    "get_network_info",
+    "list_processes",
+    "get_disk_usage",
+    "manage_service:status",
+}
 
 
 # --------------------------------------------------------------------------
@@ -302,12 +339,15 @@ class DynamicToolRegistry:
                 success=False, blocked=True,
                 reason=f"DynTool 不存在：{tool_id}",
             )
+        declared_changes_state = bool(tool.get("changes_state", True))
 
         missing = _missing_required_args(tool, args)
         if missing:
             return DynToolResult(
                 success=False, blocked=True,
                 reason=f"DynTool 缺少必填参数：{', '.join(missing)}",
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
             )
 
         # 渲染 cmd
@@ -317,7 +357,16 @@ class DynamicToolRegistry:
             return DynToolResult(
                 success=False, blocked=True, cmd=cmd,
                 reason=f"DynTool 命令仍包含未解析参数：{', '.join(unresolved)}",
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
             )
+
+        mapped = StaticRuleMapper.map(cmd)
+        effective_changes_state = _effective_changes_state(
+            declared_changes_state=declared_changes_state,
+            cmd=cmd,
+            mapped=mapped,
+        )
 
         # 第一层：形态检查
         safety = check_command(cmd, env_profile)
@@ -326,11 +375,12 @@ class DynamicToolRegistry:
                 success=False, blocked=True, cmd=cmd,
                 final_risk="BLOCK",
                 reason=f"CommandSafetyChecker BLOCK：{', '.join(safety.rule_ids)} {safety.reason}",
+                declared_changes_state=declared_changes_state,
+                changes_state=effective_changes_state,
             )
 
         # 第二层：StaticRuleMapper → RiskClassifier
         highest = safety.level
-        mapped = StaticRuleMapper.map(cmd)
         if mapped is not None:
             rc = risk_classify(mapped.tool, mapped.args, env_profile)
             if rc.level == "BLOCK":
@@ -338,6 +388,8 @@ class DynamicToolRegistry:
                     success=False, blocked=True, cmd=cmd,
                     final_risk="BLOCK",
                     reason=f"对象语义 BLOCK（映射到 {mapped.tool}）：{rc.reason}",
+                    declared_changes_state=declared_changes_state,
+                    changes_state=effective_changes_state,
                 )
             if _level_rank(rc.level) > _level_rank(highest):
                 highest = rc.level
@@ -353,6 +405,8 @@ class DynamicToolRegistry:
             "consequences": tool["consequences"],
             "risk_assessment": tool["risk_assessment"],
             "final_risk": highest,
+            "declared_changes_state": declared_changes_state,
+            "changes_state": effective_changes_state,
         }
         try:
             ok = confirm_fn(decision_payload)
@@ -360,11 +414,15 @@ class DynamicToolRegistry:
             return DynToolResult(
                 success=False, blocked=True, cmd=cmd,
                 reason=f"confirm_fn 异常：{e}",
+                declared_changes_state=declared_changes_state,
+                changes_state=effective_changes_state,
             )
         if not ok:
             return DynToolResult(
                 success=False, cancelled=True, cmd=cmd,
                 final_risk=highest, reason="用户未批准",
+                declared_changes_state=declared_changes_state,
+                changes_state=effective_changes_state,
             )
 
         # 实际执行
@@ -388,6 +446,8 @@ class DynamicToolRegistry:
             success=(exit_code == 0),
             cmd=cmd, output=output, exit_code=exit_code,
             final_risk=highest,
+            declared_changes_state=declared_changes_state,
+            changes_state=effective_changes_state,
         )
 
     # ------------------------------------------------------------------
@@ -408,6 +468,30 @@ class DynamicToolRegistry:
 
 def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
+
+
+def _effective_changes_state(
+    *,
+    declared_changes_state: bool,
+    cmd: list[str],
+    mapped: MappedTool | None,
+) -> bool:
+    if declared_changes_state:
+        return True
+    if mapped is not None and _mapped_tool_key(mapped) in _READ_ONLY_MAPPED_TOOL_KEYS:
+        return False
+    if cmd and _command_basename(cmd[0]) in _READ_ONLY_COMMAND_BASENAMES:
+        return False
+    return True
+
+
+def _mapped_tool_key(mapped: MappedTool) -> str:
+    action = (mapped.args.get("action") or "").lower()
+    return f"{mapped.tool}:{action}" if action else mapped.tool
+
+
+def _command_basename(command: str) -> str:
+    return command.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _missing_required_args(tool: DynamicTool, args: dict) -> list[str]:

@@ -430,6 +430,12 @@ class AgentController:
         )
 
     def _handle_execute_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
+        if not isinstance(args, dict):
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool 参数必须是对象。",
+                is_error=True,
+            )
         if self.dynamic_registry is None:
             self.audit_log.log_decision(
                 tool=META_EXECUTE_DYNAMIC_TOOL, args=args,
@@ -445,8 +451,34 @@ class AgentController:
             )
 
         tool_id = args.get("tool_id", "")
+        if not isinstance(tool_id, str) or not tool_id.strip():
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool 需要非空字符串 tool_id。",
+                is_error=True,
+            )
         dyn_args = args.get("args") or {}
-        timeout = int(args.get("timeout") or 30)
+        if not isinstance(dyn_args, dict):
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool.args 必须是对象。",
+                is_error=True,
+            )
+        raw_timeout = args.get("timeout", 30)
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool.timeout 必须是 1-300 之间的整数。",
+                is_error=True,
+            )
+        if timeout < 1 or timeout > 300:
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool.timeout 必须是 1-300 之间的整数。",
+                is_error=True,
+            )
 
         def confirm_dynamic(payload: dict) -> bool:
             reason = (
@@ -512,16 +544,30 @@ class AgentController:
             )
             return bool(ok)
 
-        result = self.dynamic_registry.execute(
-            tool_id,
-            dyn_args,
-            executor=self.executor,
-            env_profile=self.env_profile,
-            confirm_fn=confirm_dynamic,
-            timeout=timeout,
-        )
-        tool = self.dynamic_registry.get(tool_id)
-        changes_state = bool(tool.get("changes_state", True)) if tool else True
+        try:
+            result = self.dynamic_registry.execute(
+                tool_id,
+                dyn_args,
+                executor=self.executor,
+                env_profile=self.env_profile,
+                confirm_fn=confirm_dynamic,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            self.audit_log.log_decision(
+                tool=META_EXECUTE_DYNAMIC_TOOL,
+                args=args,
+                risk_level="BLOCK",
+                rule_ids=["DYN002"],
+                reason=f"DynTool 执行异常：{exc}",
+                decision="dynamic_tool_error",
+                env_profile_id=self._env_profile_id,
+            )
+            return _tool_result_block(
+                tool_use_id,
+                f"DynTool 执行异常：{exc}",
+                is_error=True,
+            )
         content = {
             "success": result.success,
             "blocked": result.blocked,
@@ -531,7 +577,8 @@ class AgentController:
             "reason": result.reason,
             "cmd": result.cmd,
             "final_risk": result.final_risk,
-            "changes_state": changes_state,
+            "declared_changes_state": result.declared_changes_state,
+            "changes_state": result.changes_state,
         }
         self.audit_log.log_command(
             tool=META_EXECUTE_DYNAMIC_TOOL,
