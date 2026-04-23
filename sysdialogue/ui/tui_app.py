@@ -6,6 +6,9 @@ import threading
 import traceback
 from typing import TYPE_CHECKING, Any
 
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
@@ -19,6 +22,36 @@ from sysdialogue.ui.input_modal import InputModal
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
     from sysdialogue.security.approval_rules import ConfirmationRequest
+
+
+_EVENT_LABELS = {
+    "task_started": "开始",
+    "model_response": "分析",
+    "correction": "调整",
+    "tool_started": "工具",
+    "tool_finished": "结果",
+    "workflow_started": "流程",
+    "workflow_finished": "流程",
+    "confirmation_requested": "确认",
+    "verification": "验证",
+    "task_finished": "完成",
+    "task_failed": "结束",
+}
+
+
+_EVENT_STYLES = {
+    "task_started": "bold cyan",
+    "model_response": "cyan",
+    "correction": "yellow",
+    "tool_started": "blue",
+    "tool_finished": "green",
+    "workflow_started": "blue",
+    "workflow_finished": "green",
+    "confirmation_requested": "bold yellow",
+    "verification": "bold green",
+    "task_finished": "bold green",
+    "task_failed": "bold red",
+}
 
 
 class SysDialogueTUI(App):
@@ -73,6 +106,8 @@ class SysDialogueTUI(App):
         self._worker: threading.Thread | None = None
         self._confirm_state: dict[str, Any] | None = None
         self._input_state: dict[str, Any] | None = None
+        self._turn_failed = False
+        self._turn_cancelled = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -114,39 +149,93 @@ class SysDialogueTUI(App):
         event.input.value = ""
         self._write_log(f"[bold green]> 你:[/bold green] {text}")
 
+        self._turn_failed = False
+        self._turn_cancelled = False
         event.input.disabled = True
         self._set_status("思考中…")
 
         def worker() -> None:
             try:
                 reply = self.controller.run_turn(text)
+                is_error = False
             except Exception:
-                reply = f"[错误] {traceback.format_exc()}"
-            self.call_from_thread(self._on_turn_done, reply)
+                reply = traceback.format_exc()
+                is_error = True
+            self.call_from_thread(self._on_turn_done, reply, is_error)
 
         self._worker = threading.Thread(target=worker, daemon=True)
         self._worker.start()
 
-    def _on_turn_done(self, reply: str) -> None:
+    def _on_turn_done(self, reply: str, is_error: bool = False) -> None:
         self._worker = None
-        self._write_log(f"[bold magenta]SysDialogue:[/bold magenta] {reply}\n")
+        if is_error or _looks_like_failure_reply(reply) or self._turn_failed:
+            self._write_error(reply)
+        elif self._turn_cancelled:
+            self._write_warning(reply, title="任务已取消")
+        else:
+            self._write_assistant(reply)
         self._refresh_audit_panel()
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = False
         input_box.focus()
         self._set_status("就绪")
 
-    def _write_log(self, text: str) -> None:
-        self.query_one("#conversation", RichLog).write(text)
+    def _write_log(self, renderable) -> None:
+        self.query_one("#conversation", RichLog).write(renderable)
+
+    def _write_assistant(self, reply: str) -> None:
+        self._write_log(
+            Panel(
+                Markdown(reply or "（无输出）"),
+                title="SysDialogue",
+                border_style="magenta",
+                padding=(0, 1),
+            )
+        )
+
+    def _write_error(self, reply: str) -> None:
+        self._write_log(
+            Panel(
+                Markdown(_format_error_markdown(reply)),
+                title="执行遇到问题",
+                border_style="red",
+                padding=(0, 1),
+            )
+        )
+
+    def _write_warning(self, reply: str, *, title: str = "提示") -> None:
+        self._write_log(
+            Panel(
+                Markdown(reply or "当前任务已停止。"),
+                title=title,
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
 
     def _event_callback(self, event) -> None:
         stage = getattr(event, "stage", "event")
         message = getattr(event, "message", "")
+        data = getattr(event, "data", {}) or {}
+        if stage == "task_failed":
+            if data.get("status") == "cancelled":
+                self._turn_cancelled = True
+            else:
+                self._turn_failed = True
 
         def write() -> None:
-            self._write_log(f"[dim]· {stage}: {message}[/dim]")
+            self._write_event(stage, message, data)
 
         self.call_from_thread(write)
+
+    def _write_event(self, stage: str, message: str, data: dict[str, Any]) -> None:
+        label = _EVENT_LABELS.get(stage, "事件")
+        style = _event_style(stage, data)
+        text = Text()
+        text.append(f"{label:<4}", style=style)
+        text.append(" | ", style="dim")
+        text.append(_format_event_message(stage, message, data), style=style if stage in {"task_failed", "correction"} else "")
+        self._write_log(text)
 
     def _refresh_audit_panel(self) -> None:
         try:
@@ -317,6 +406,79 @@ class SysDialogueTUI(App):
 
     def action_quit(self) -> None:
         self.exit()
+
+
+def _event_style(stage: str, data: dict[str, Any]) -> str:
+    if stage == "task_failed" and data.get("status") == "cancelled":
+        return "yellow"
+    if stage in {"tool_finished", "workflow_finished"} and data.get("success") is False:
+        return "red"
+    return _EVENT_STYLES.get(stage, "dim")
+
+
+def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str:
+    if stage == "task_started":
+        return "已接收需求，正在建立任务上下文。"
+    if stage == "model_response":
+        count = data.get("tool_count", 0)
+        if count:
+            return f"已规划下一步动作：{count} 个工具/流程调用。"
+        return "正在整理回复格式，等待 ReAct 收口。"
+    if stage == "correction":
+        return "输出未满足 ReAct 协议，已自动要求模型改用工具或 finish_task 收口。"
+    if stage == "tool_started":
+        return f"正在调用工具：{data.get('tool') or message}"
+    if stage == "tool_finished":
+        tool = data.get("tool") or message
+        return f"工具完成：{tool}" if data.get("success") is not False else f"工具失败：{tool}"
+    if stage == "workflow_started":
+        return f"开始执行工作流：{data.get('workflow_name') or message}"
+    if stage == "workflow_finished":
+        name = data.get("workflow_name") or message
+        return f"工作流完成：{name}" if data.get("success") is not False else f"工作流失败：{name}"
+    if stage == "confirmation_requested":
+        tool = data.get("tool") or "当前操作"
+        risk = data.get("risk_level") or "WARN-HIGH"
+        reason = data.get("reason") or message
+        return f"{tool} 需要确认（{risk}）：{reason}"
+    if stage == "verification":
+        return message or "验证已记录。"
+    if stage == "task_finished":
+        return f"任务已收口：{data.get('status') or 'completed'}。"
+    if stage == "task_failed":
+        if data.get("status") == "cancelled":
+            return "任务已取消，未继续执行后续工具。"
+        return message or "任务未完成。"
+    return message or stage
+
+
+def _looks_like_failure_reply(reply: str) -> bool:
+    text = (reply or "").strip()
+    failure_markers = (
+        "LLM 调用失败",
+        "未按 ReAct 协议",
+        "达到最大 ReAct",
+        "Traceback (most recent call last)",
+    )
+    return any(marker in text for marker in failure_markers)
+
+
+def _format_error_markdown(reply: str) -> str:
+    text = (reply or "").strip() or "未知错误。"
+    if "Traceback (most recent call last)" in text:
+        return (
+            "### 执行异常\n\n"
+            "系统捕获到未处理异常，任务已经停止。\n\n"
+            "```text\n"
+            f"{text}\n"
+            "```\n\n"
+            "请先查看上方流程事件和右侧审计面板，再决定是否重试。"
+        )
+    return (
+        "### 任务未完成\n\n"
+        f"{text}\n\n"
+        "可以根据上方流程事件继续补充信息、修正配置，或重新发起更小范围的任务。"
+    )
 
 
 def run_tui(controller: "AgentController") -> None:

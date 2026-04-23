@@ -240,6 +240,8 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 - 主要交互入口
 - 使用 Textual TUI
 - 支持对话、计划预览、风险确认、审计查看、环境查看
+- ReAct 执行过程会显示为友好的阶段事件，如“开始 / 分析 / 工具 / 验证 / 完成”
+- 最终回复支持 Markdown 渲染，异常和失败会包装为错误面板，而不是裸 traceback
 
 运行：
 
