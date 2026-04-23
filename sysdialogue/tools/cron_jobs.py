@@ -11,6 +11,7 @@ from sysdialogue.tools.base import ToolResult
 
 _SYSDIALOGUE_MARKER = "# sysdialogue:job:"
 _SYSTEM_CRON_DIR = "/etc/cron.d"
+_VALID_SCOPES = {"user", "system"}
 
 
 def cron_state_dir(executor: SafeExecutor) -> str:
@@ -52,6 +53,8 @@ def manage_cron(
     job_id: str | None = None,
 ) -> ToolResult:
     """计划任务管理。"""
+    if scope not in _VALID_SCOPES:
+        return ToolResult(success=False, error=f"无效 scope: {scope}，仅支持 user/system")
     if action == "list":
         return _list(executor, scope)
     if action == "create":
@@ -192,6 +195,8 @@ def _safe_save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None
 
 
 def _sync_installed_jobs(executor: SafeExecutor, data: dict, scope: str) -> None:
+    if scope not in _VALID_SCOPES:
+        raise ValueError(f"invalid cron scope: {scope}")
     if scope == "user":
         _sync_user_crontab(executor, data)
         return

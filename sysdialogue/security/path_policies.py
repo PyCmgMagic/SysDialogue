@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import os
+import posixpath
 import re
 import socket
 
@@ -123,9 +124,18 @@ SYSTEM_DIR_PREFIXES: list[str] = [
 
 def normalize(path: str) -> str:
     """规范化路径：展开 ~，realpath，去尾部斜线。"""
-    path = os.path.expanduser(path)
-    path = os.path.normpath(path)
-    return path
+    path = os.path.expanduser(path or "")
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def _same_or_descendant(path: str, base: str) -> bool:
+    n = normalize(path)
+    b = normalize(base).rstrip("/")
+    if b == "":
+        b = "/"
+    if b == "/":
+        return n == "/" or n.startswith("/")
+    return n == b or n.startswith(f"{b}/")
 
 
 def _home() -> str:
@@ -141,9 +151,10 @@ def matches_sensitive_credential(path: str) -> bool:
     raw = path
     for g in SENSITIVE_CREDENTIAL_GLOBS:
         g_expanded = g.replace("~", _home())
-        if fnmatch.fnmatch(raw, g_expanded) or fnmatch.fnmatch(n, g_expanded):
+        g_normalized = normalize(g_expanded)
+        if fnmatch.fnmatch(raw, g_expanded) or fnmatch.fnmatch(n, g_normalized):
             return True
-        if fnmatch.fnmatch(os.path.basename(raw), g):
+        if fnmatch.fnmatch(normalize(raw).rsplit("/", 1)[-1], g):
             return True
     return False
 
@@ -152,8 +163,7 @@ def matches_persistence_entry(path: str) -> bool:
     """路径是否命中 PERSISTENCE_ENTRY_PATHS（前缀匹配）。"""
     n = normalize(path)
     for entry in PERSISTENCE_ENTRY_PATHS:
-        prefix = normalize(entry)
-        if n == prefix or n.startswith(prefix + os.sep) or n.startswith(prefix):
+        if _same_or_descendant(n, entry):
             return True
     return False
 
@@ -164,7 +174,7 @@ def matches_critical_edit(path: str) -> bool:
     for entry in CRITICAL_EDIT_PATHS:
         en = normalize(entry)
         if entry.endswith("/"):
-            if n == en or n.startswith(en + os.sep) or n.startswith(en):
+            if _same_or_descendant(n, en):
                 return True
         else:
             if n == en:
@@ -184,12 +194,14 @@ def matches_archive_block(path: str) -> bool:
 
 def matches_container_sensitive_bind(path: str) -> bool:
     n = normalize(path)
-    sensitive = [normalize(p) for p in CONTAINER_SENSITIVE_BIND_SOURCES]
-    sensitive.append(normalize("~/.ssh/"))
-    if n in sensitive:
-        return True
+    sensitive = [*CONTAINER_SENSITIVE_BIND_SOURCES, "~/.ssh/"]
+    file_exact = {normalize("/var/run/docker.sock")}
     for s in sensitive:
-        if s.endswith(os.sep) and n.startswith(s):
+        sn = normalize(s)
+        if sn in file_exact:
+            if n == sn:
+                return True
+        elif _same_or_descendant(n, sn):
             return True
     return False
 
@@ -197,8 +209,7 @@ def matches_container_sensitive_bind(path: str) -> bool:
 def matches_sensitive_dir(path: str) -> bool:
     n = normalize(path)
     for d in SENSITIVE_DIR_PATHS:
-        dn = normalize(d)
-        if n == dn or n.startswith(dn + os.sep) or n.startswith(dn):
+        if _same_or_descendant(n, d):
             return True
     return False
 
@@ -206,16 +217,14 @@ def matches_sensitive_dir(path: str) -> bool:
 def matches_v41_block(path: str) -> bool:
     n = normalize(path)
     for p in V41_BLOCK_PATHS:
-        pn = normalize(p)
-        if n == pn or n.startswith(pn + os.sep):
+        if _same_or_descendant(n, p):
             return True
     return False
 
 
 def matches_system_dir(path: str) -> bool:
-    n = normalize(path) + os.sep
     for prefix in SYSTEM_DIR_PREFIXES:
-        if n.startswith(prefix):
+        if _same_or_descendant(path, prefix):
             return True
     return False
 

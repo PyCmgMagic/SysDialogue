@@ -274,6 +274,8 @@ def _classify_copy_move_path(args: dict, ep: EnvProfile) -> RiskDecision:
     action = args.get("action", "copy")
     if pp.has_path_traversal(src) or pp.has_path_traversal(dst):
         return RiskDecision(level="BLOCK", rule_ids=["B005"], reason="路径包含 .. 组件")
+    if pp.matches_critical_edit(dst):
+        return RiskDecision(level="BLOCK", rule_ids=["B012"], reason=f"禁止通过复制/移动覆盖关键系统文件 {dst}")
     if action == "copy" and pp.matches_system_dir(dst):
         return RiskDecision(
             level="WARN-HIGH", rule_ids=["WH024"],

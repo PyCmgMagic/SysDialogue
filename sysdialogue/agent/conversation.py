@@ -33,7 +33,7 @@ class ConversationManager:
         return [*self.history, {"role": "user", "content": user_message}]
 
     def commit_turn(self, messages: list[dict]) -> None:
-        self.history = messages[-self.max_messages :]
+        self.history = self._trim_complete_turns(messages)
 
     def render_context(self) -> str:
         if not self.context:
@@ -76,4 +76,44 @@ class ConversationManager:
             canonical = _ALIASES.get(key, key)
             if canonical in _CANONICAL_KEYS and value not in (None, ""):
                 self.context[canonical] = value
+
+    def _trim_complete_turns(self, messages: list[dict]) -> list[dict]:
+        groups: list[list[dict]] = []
+        current: list[dict] = []
+        for message in messages:
+            if _is_turn_start(message):
+                if current:
+                    groups.append(current)
+                current = [message]
+            elif current:
+                current.append(message)
+        if current:
+            groups.append(current)
+        if not groups:
+            return []
+
+        retained: list[dict] = []
+        for group in reversed(groups):
+            if not retained:
+                retained = [*group]
+                continue
+            if len(retained) + len(group) > self.max_messages:
+                break
+            retained = [*group, *retained]
+        return retained
+
+
+def _is_turn_start(message: dict) -> bool:
+    return message.get("role") == "user" and not _contains_tool_result(message.get("content"))
+
+
+def _contains_tool_result(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            return True
+        if getattr(block, "type", None) == "tool_result":
+            return True
+    return False
 

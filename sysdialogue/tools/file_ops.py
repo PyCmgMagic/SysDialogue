@@ -168,6 +168,8 @@ def copy_move_path(
     """拷贝或移动文件/目录。"""
     if pp.has_path_traversal(src) or pp.has_path_traversal(dst):
         return ToolResult(success=False, error="路径包含 .. 组件（B005）")
+    if pp.matches_critical_edit(dst):
+        return ToolResult(success=False, error=f"禁止通过复制/移动覆盖关键系统文件 {dst}（B012）")
 
     fs = TargetFileAccess(executor)
     src_path = fs.expand(src)

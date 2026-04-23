@@ -4,11 +4,17 @@ import base64
 import json
 from pathlib import Path
 
+from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.app.config import AppConfig
+from sysdialogue.app.jobs import run_scheduled_job
 from sysdialogue.runtime.capability_probe import CapabilityProbe
+from sysdialogue.security import path_policies as path_policies
+from sysdialogue.security.risk_classifier import classify
 from sysdialogue.tools import auth_keys as auth_keys_module
 from sysdialogue.tools.auth_keys import _public_key_fingerprint, manage_authorized_keys
 from sysdialogue.tools.config_validate import validate_config
 from sysdialogue.tools.cron_jobs import manage_cron
+from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
 
 from tests.helpers import RecordingExecutor
@@ -109,6 +115,19 @@ def test_manage_cron_rolls_back_index_when_install_fails(
     assert json.loads(index_path.read_text(encoding="utf-8")) == {}
 
 
+def test_manage_cron_rejects_invalid_scope() -> None:
+    result = manage_cron(
+        RecordingExecutor(),
+        action="create",
+        scope="typo",
+        schedule="*/5 * * * *",
+        job_target={"kind": "tool", "name": "get_system_info", "args": {}},
+    )
+
+    assert result.success is False
+    assert "scope" in result.error
+
+
 def test_manage_firewall_iptables_delete_uses_delete_op_and_policy() -> None:
     executor = RecordingExecutor()
 
@@ -184,3 +203,105 @@ def test_validate_config_supports_fstab_and_cron_static_checks(tmp_path: Path) -
     invalid = validate_config(executor, str(cron_path), target_type="cron")
     assert invalid.success is False
     assert "cron" in invalid.error
+
+
+def test_linux_path_policies_do_not_depend_on_host_os_separators() -> None:
+    assert path_policies.normalize("/etc/passwd") == "/etc/passwd"
+    assert path_policies.matches_system_dir("/etc/passwd") is True
+    assert path_policies.matches_container_sensitive_bind("/etc/ssh/sshd_config") is True
+
+    decision = classify(
+        "copy_move_path",
+        {"src": "/tmp/source", "dst": "/etc/passwd", "action": "copy"},
+        env_profile={},
+    )
+    assert decision.level == "BLOCK"
+    assert decision.rule_ids == ["B012"]
+
+    result = copy_move_path(RecordingExecutor(), "/tmp/source", "/etc/passwd", action="copy")
+    assert result.success is False
+    assert "B012" in result.error
+
+
+def test_scheduled_workflow_rejects_high_risk_steps_before_execution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "risky.yaml").write_text(
+        """
+name: risky
+parameters: []
+steps:
+  - id: stop_service
+    type: tool_call
+    tool: manage_service
+    args:
+      name: nginx
+      action: stop
+""".lstrip(),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / ".sysdialogue"
+    state_dir.mkdir()
+    (state_dir / "cron_index.json").write_text(
+        json.dumps(
+            {
+                "job_risky": {
+                    "job_id": "job_risky",
+                    "scope": "user",
+                    "schedule": "* * * * *",
+                    "enabled": True,
+                    "job_target": {"kind": "workflow", "name": "risky", "args": {}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = run_scheduled_job(AppConfig(workflows_dir=str(workflows_dir)), "job_risky")
+
+    assert code == 2
+
+
+def test_conversation_trim_keeps_complete_tool_result_pairs() -> None:
+    manager = ConversationManager(max_messages=5)
+    messages: list[dict] = []
+    for idx in range(3):
+        tool_id = f"tool_{idx}"
+        messages.extend(
+            [
+                {"role": "user", "content": f"request {idx}"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": "get_system_info",
+                            "input": {},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": "{}",
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": f"done {idx}"},
+            ]
+        )
+
+    manager.commit_turn(messages)
+
+    assert len(manager.history) == 4
+    assert manager.history[0] == {"role": "user", "content": "request 2"}
+    assert manager.history[2]["content"][0]["type"] == "tool_result"
