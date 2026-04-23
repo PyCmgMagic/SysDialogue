@@ -1,0 +1,106 @@
+"""ConfirmModal — WARN-HIGH 操作确认弹窗。"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal
+from textual.screen import ModalScreen
+from textual.widgets import Button, Static
+
+if TYPE_CHECKING:
+    from sysdialogue.security.approval_rules import ConfirmationRequest
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """WARN-HIGH 操作确认。返回 True=批准 / False=拒绝。"""
+
+    CSS = """
+    ConfirmModal {
+        align: center middle;
+    }
+    #modal_box {
+        width: 80%;
+        max-width: 90;
+        height: auto;
+        max-height: 80%;
+        border: heavy $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #modal_title {
+        text-align: center;
+        text-style: bold;
+        background: $warning 30%;
+        padding: 0 1;
+    }
+    #modal_body {
+        height: auto;
+        padding: 1 0;
+    }
+    #modal_buttons {
+        height: 3;
+        align: center middle;
+    }
+    #modal_buttons Button {
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("enter", "approve", "批准"),
+        Binding("escape", "deny", "拒绝"),
+        Binding("y", "approve", show=False),
+        Binding("n", "deny", show=False),
+    ]
+
+    def __init__(self, request: "ConfirmationRequest"):
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("⚠️  操作确认 — WARN-HIGH", id="modal_title"),
+            Static(self._render_body(), id="modal_body"),
+            Horizontal(
+                Button("批准 (Enter)", id="btn_approve", variant="warning"),
+                Button("拒绝 (Esc)", id="btn_deny", variant="default"),
+                id="modal_buttons",
+            ),
+            id="modal_box",
+        )
+
+    def _render_body(self) -> str:
+        r = self.request
+        try:
+            args_str = json.dumps(r.args, ensure_ascii=False, indent=2)
+        except Exception:
+            args_str = str(r.args)
+        rule_ids = ", ".join(r.risk.rule_ids) if r.risk.rule_ids else "-"
+        rollback = r.rollback_hint or r.risk.rollback_hint or "无自动回滚方案"
+        return (
+            f"工具：{r.tool}\n"
+            f"风险等级：{r.risk.level}\n"
+            f"规则 ID：{rule_ids}\n"
+            f"\n"
+            f"原因：{r.risk.reason}\n"
+            f"\n"
+            f"参数：\n{args_str}\n"
+            f"\n"
+            f"回滚方案：{rollback}"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_approve":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_approve(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
