@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -25,11 +25,12 @@ class ConfirmModal(ModalScreen[bool]):
     #modal_box {
         width: 80%;
         max-width: 90;
-        height: auto;
+        height: 80%;
         max-height: 80%;
         border: heavy $warning;
         background: $surface;
         padding: 1 2;
+        layout: vertical;
     }
     #modal_title {
         text-align: center;
@@ -37,13 +38,21 @@ class ConfirmModal(ModalScreen[bool]):
         background: $warning 30%;
         padding: 0 1;
     }
+    #modal_body_scroll {
+        height: 1fr;
+        border: round $warning 35%;
+        margin-top: 1;
+        padding: 1 0;
+    }
     #modal_body {
         height: auto;
-        padding: 1 0;
+        padding: 0 1;
     }
     #modal_buttons {
         height: 3;
         align: center middle;
+        dock: bottom;
+        margin-top: 1;
     }
     #modal_buttons Button {
         margin: 0 2;
@@ -64,7 +73,10 @@ class ConfirmModal(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static("⚠️  操作确认 — WARN-HIGH", id="modal_title"),
-            Static(self._render_body(), id="modal_body"),
+            ScrollableContainer(
+                Static(self._render_body(), id="modal_body"),
+                id="modal_body_scroll",
+            ),
             Horizontal(
                 Button("批准 (Enter)", id="btn_approve", variant="warning"),
                 Button("拒绝 (Esc)", id="btn_deny", variant="default"),

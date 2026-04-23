@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sysdialogue.tools.meta_tools import (
+    META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
+    META_PROPOSE_DYNAMIC_TOOL,
     META_SET_EXECUTION_MODE,
     META_TOOL_SCHEMAS,
 )
@@ -263,7 +265,12 @@ class ReActRunner:
             task,
             "task_finished" if status in ("completed", "partial", "need_info", "blocked") else "task_failed",
             args.get("summary", ""),
-            {"status": status},
+            {
+                "status": status,
+                "next_steps": args.get("next_steps") or [],
+                "remaining_risks": args.get("remaining_risks") or [],
+                "no_action_reason": args.get("no_action_reason") or "",
+            },
         )
         return _tool_result(
             tool_use_id,
@@ -291,6 +298,24 @@ class ReActRunner:
                 if success and workflow_name in READ_ONLY_WORKFLOWS:
                     task.verified = True
                     task.last_verification_step = task.tool_steps
+            return
+
+        if name == META_PROPOSE_DYNAMIC_TOOL:
+            task.observed = True
+            return
+
+        if name == META_EXECUTE_DYNAMIC_TOOL:
+            payload = _parse_tool_result_json(result_block)
+            changes_state = bool(payload.get("changes_state", True))
+            task.observed = True
+            if not success:
+                if changes_state:
+                    task.failed_mutations.append(_tool_action_key(name, args))
+                return
+            if changes_state:
+                task.acted = True
+                task.changed_state = True
+                task.last_action_step = task.tool_steps
             return
 
         if not success:
@@ -499,6 +524,17 @@ def _tool_result(tool_use_id: str, content: str, *, is_error: bool) -> dict:
         "content": content,
         "is_error": is_error,
     }
+
+
+def _parse_tool_result_json(result_block: dict) -> dict:
+    content = result_block.get("content") or "{}"
+    if not isinstance(content, str):
+        return {}
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _block_type(block) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 META_SET_EXECUTION_MODE = "set_execution_mode"
 META_PROPOSE_DYNAMIC_TOOL = "propose_dynamic_tool"
+META_EXECUTE_DYNAMIC_TOOL = "execute_dynamic_tool"
 META_FINISH_TASK = "finish_task"
 
 
@@ -76,6 +77,11 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "type": "string",
                 "enum": ["WARN-LOW", "WARN-HIGH", "UNKNOWN"],
             },
+            "changes_state": {
+                "type": "boolean",
+                "default": True,
+                "description": "该工具是否会修改目标系统状态；只读诊断工具应设置为 false",
+            },
             "reversible": {"type": "boolean"},
         },
         "required": [
@@ -86,6 +92,33 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
             "risk_assessment",
             "estimated_risk",
         ],
+    },
+}
+
+
+EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
+    "name": META_EXECUTE_DYNAMIC_TOOL,
+    "description": (
+        "执行已注册的 DynTool。仅在 --dev/开发模式可用；执行前仍会经过 "
+        "CommandSafetyChecker、静态语义风险映射和用户确认。"
+        "通常先调用 propose_dynamic_tool，读取返回的 tool_id，再调用本工具。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tool_id": {"type": "string", "description": "propose_dynamic_tool 返回的 dyn_* ID"},
+            "args": {
+                "type": "object",
+                "description": "DynTool 参数值，按注册时 params 定义传入",
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 300,
+                "default": 30,
+            },
+        },
+        "required": ["tool_id", "args"],
     },
 }
 
@@ -119,7 +152,13 @@ FINISH_TASK_SCHEMA: dict = {
 META_TOOL_SCHEMAS: list[dict] = [
     SET_EXECUTION_MODE_SCHEMA,
     PROPOSE_DYNAMIC_TOOL_SCHEMA,
+    EXECUTE_DYNAMIC_TOOL_SCHEMA,
     FINISH_TASK_SCHEMA,
 ]
 
-META_TOOL_NAMES = {META_SET_EXECUTION_MODE, META_PROPOSE_DYNAMIC_TOOL, META_FINISH_TASK}
+META_TOOL_NAMES = {
+    META_SET_EXECUTION_MODE,
+    META_PROPOSE_DYNAMIC_TOOL,
+    META_EXECUTE_DYNAMIC_TOOL,
+    META_FINISH_TASK,
+}

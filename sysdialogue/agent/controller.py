@@ -20,6 +20,7 @@ from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.tools.meta_tools import (
+    META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
     META_PROPOSE_DYNAMIC_TOOL,
     META_SET_EXECUTION_MODE,
@@ -174,6 +175,8 @@ class AgentController:
             return self._handle_set_execution_mode(args, tool_use_id)
         if name == META_PROPOSE_DYNAMIC_TOOL:
             return self._handle_propose_dynamic_tool(args, tool_use_id)
+        if name == META_EXECUTE_DYNAMIC_TOOL:
+            return self._handle_execute_dynamic_tool(args, tool_use_id)
         if name == META_FINISH_TASK:
             return _tool_result_block(
                 tool_use_id,
@@ -395,6 +398,7 @@ class AgentController:
                 consequences=args.get("consequences", ""),
                 risk_assessment=args.get("risk_assessment", ""),
                 estimated_risk=args.get("estimated_risk", "UNKNOWN"),
+                changes_state=bool(args.get("changes_state", True)),
                 reversible=args.get("reversible", False),
             )
         except (ValueError, RuntimeError) as e:
@@ -419,9 +423,126 @@ class AgentController:
             json.dumps({
                 "tool_id": dt["tool_id"], "name": dt["name"],
                 "estimated_risk": dt["estimated_risk"],
-                "note": "已注册为 UNKNOWN 级；执行前须经 CommandSafetyChecker + 用户确认。",
+                "changes_state": dt.get("changes_state", True),
+                "note": "已注册为 UNKNOWN 级；如需执行，请继续调用 execute_dynamic_tool；执行前须经 CommandSafetyChecker + 用户确认。",
             }, ensure_ascii=False),
             is_error=False,
+        )
+
+    def _handle_execute_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
+        if self.dynamic_registry is None:
+            self.audit_log.log_decision(
+                tool=META_EXECUTE_DYNAMIC_TOOL, args=args,
+                risk_level="BLOCK", rule_ids=["DYN000"],
+                reason="DynamicToolRegistry 未注入",
+                decision="dynamic_tool_unavailable",
+                env_profile_id=self._env_profile_id,
+            )
+            return _tool_result_block(
+                tool_use_id,
+                "DynTool 执行器不可用；请用 --dev 启动，或确认 runtime 已注入 DynamicToolRegistry。",
+                is_error=True,
+            )
+
+        tool_id = args.get("tool_id", "")
+        dyn_args = args.get("args") or {}
+        timeout = int(args.get("timeout") or 30)
+
+        def confirm_dynamic(payload: dict) -> bool:
+            reason = (
+                f"DynTool 将执行：{payload.get('tool_name')}；"
+                f"命令 argv={payload.get('cmd')}；"
+                f"影响：{payload.get('consequences') or '未说明'}"
+            )
+            decision = RiskDecision(
+                level="WARN-HIGH",
+                rule_ids=["DYN001"],
+                reason=reason,
+                requires_confirmation=True,
+                rollback_hint="DynTool 无通用自动回滚；请仅批准你理解影响面的命令。",
+            )
+            self._emit_task_event(
+                "confirmation_requested",
+                f"{META_EXECUTE_DYNAMIC_TOOL} requires confirmation (WARN-HIGH)",
+                {
+                    "tool": META_EXECUTE_DYNAMIC_TOOL,
+                    "risk_level": decision.level,
+                    "rule_ids": decision.rule_ids,
+                    "reason": decision.reason,
+                    "dynamic_payload": payload,
+                },
+            )
+            self.audit_log.log_decision(
+                tool=META_EXECUTE_DYNAMIC_TOOL,
+                args=payload,
+                risk_level=decision.level,
+                rule_ids=decision.rule_ids,
+                reason=decision.reason,
+                decision="dynamic_tool_confirmation",
+                env_profile_id=self._env_profile_id,
+            )
+            try:
+                ok = self.confirm_callback(
+                    ConfirmationRequest(
+                        tool=META_EXECUTE_DYNAMIC_TOOL,
+                        args=payload,
+                        risk=decision,
+                        rollback_hint=decision.rollback_hint,
+                    )
+                )
+            except Exception as exc:
+                self.audit_log.log_decision(
+                    tool=META_EXECUTE_DYNAMIC_TOOL,
+                    args=payload,
+                    risk_level=decision.level,
+                    rule_ids=decision.rule_ids,
+                    reason=f"confirm_callback 异常：{exc}",
+                    decision="confirm_error",
+                    env_profile_id=self._env_profile_id,
+                )
+                return False
+            self.audit_log.log_decision(
+                tool=META_EXECUTE_DYNAMIC_TOOL,
+                args=payload,
+                risk_level=decision.level,
+                rule_ids=decision.rule_ids,
+                reason=decision.reason,
+                decision="user_confirmed" if ok else "user_cancelled",
+                env_profile_id=self._env_profile_id,
+            )
+            return bool(ok)
+
+        result = self.dynamic_registry.execute(
+            tool_id,
+            dyn_args,
+            executor=self.executor,
+            env_profile=self.env_profile,
+            confirm_fn=confirm_dynamic,
+            timeout=timeout,
+        )
+        tool = self.dynamic_registry.get(tool_id)
+        changes_state = bool(tool.get("changes_state", True)) if tool else True
+        content = {
+            "success": result.success,
+            "blocked": result.blocked,
+            "cancelled": result.cancelled,
+            "output": result.output[:12000],
+            "exit_code": result.exit_code,
+            "reason": result.reason,
+            "cmd": result.cmd,
+            "final_risk": result.final_risk,
+            "changes_state": changes_state,
+        }
+        self.audit_log.log_command(
+            tool=META_EXECUTE_DYNAMIC_TOOL,
+            cmd=result.cmd,
+            exit_code=result.exit_code,
+            output_preview=(result.output or result.reason)[:1024],
+        )
+        return _tool_result_block(
+            tool_use_id,
+            json.dumps(content, ensure_ascii=False),
+            is_error=(not result.success),
         )
 
 

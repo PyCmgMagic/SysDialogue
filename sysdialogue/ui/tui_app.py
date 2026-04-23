@@ -11,8 +11,8 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
@@ -81,6 +81,20 @@ class SysDialogueTUI(App):
         border: round $primary 40%;
         padding: 0 1;
     }
+    #choice_bar {
+        height: auto;
+        min-height: 3;
+        padding: 0 1;
+        background: $accent 12%;
+        border: round $accent 45%;
+    }
+    #choice_bar.hidden {
+        display: none;
+    }
+    #choice_bar Button {
+        margin: 0 1 0 0;
+        max-width: 32;
+    }
     #status_bar {
         height: 1;
         background: $primary 20%;
@@ -108,12 +122,14 @@ class SysDialogueTUI(App):
         self._input_state: dict[str, Any] | None = None
         self._turn_failed = False
         self._turn_cancelled = False
+        self._choice_values: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Container(
             Vertical(
                 RichLog(id="conversation", highlight=True, markup=True, wrap=True),
+                Horizontal(id="choice_bar", classes="hidden"),
                 Input(
                     placeholder="输入运维需求（例：查看系统版本 / 重启 nginx）…",
                     id="user_input",
@@ -148,10 +164,31 @@ class SysDialogueTUI(App):
             return
         event.input.value = ""
         self._write_log(f"[bold green]> 你:[/bold green] {text}")
+        self._hide_choice_bar()
 
+        self._start_turn(text)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if not button_id.startswith("choice_"):
+            return
+        try:
+            index = int(button_id.split("_", 1)[1])
+            text = self._choice_values[index]
+        except (IndexError, ValueError):
+            return
+        input_box = self.query_one("#user_input", Input)
+        if input_box.disabled:
+            return
+        self._write_log(f"[bold green]> 你选择:[/bold green] {text}")
+        self._hide_choice_bar()
+        self._start_turn(text)
+
+    def _start_turn(self, text: str) -> None:
         self._turn_failed = False
         self._turn_cancelled = False
-        event.input.disabled = True
+        input_box = self.query_one("#user_input", Input)
+        input_box.disabled = True
         self._set_status("思考中…")
 
         def worker() -> None:
@@ -217,11 +254,17 @@ class SysDialogueTUI(App):
         stage = getattr(event, "stage", "event")
         message = getattr(event, "message", "")
         data = getattr(event, "data", {}) or {}
+        if stage == "task_started":
+            self.call_from_thread(self._hide_choice_bar)
         if stage == "task_failed":
             if data.get("status") == "cancelled":
                 self._turn_cancelled = True
             else:
                 self._turn_failed = True
+        if stage == "task_finished":
+            choices = _choices_from_task_event(data)
+            if choices:
+                self.call_from_thread(lambda: self._show_choice_bar(choices))
 
         def write() -> None:
             self._write_event(stage, message, data)
@@ -270,6 +313,7 @@ class SysDialogueTUI(App):
             "result": result,
             "resolved": False,
             "screen": None,
+            "request": req,
         }
         self._confirm_state = state
 
@@ -334,6 +378,7 @@ class SysDialogueTUI(App):
             return
         current["resolved"] = True
         current["result"]["ok"] = bool(approved)
+        req = current.get("request")
         if dismiss and current.get("screen") is not None:
             try:
                 current["screen"].dismiss(bool(approved))
@@ -342,6 +387,8 @@ class SysDialogueTUI(App):
         current["event"].set()
         if self._confirm_state is current:
             self._confirm_state = None
+        if req is not None:
+            self._write_log(_format_confirmation_result(req, approved))
         self._refresh_runtime_status()
 
     def _resolve_input_state(
@@ -407,6 +454,30 @@ class SysDialogueTUI(App):
     def action_quit(self) -> None:
         self.exit()
 
+    def _show_choice_bar(self, choices: list[str]) -> None:
+        choice_bar = self.query_one("#choice_bar", Horizontal)
+        choice_bar.remove_children()
+        self._choice_values = choices[:3]
+        choice_bar.mount(Static("需要补充？", classes="choice_label"))
+        for index, choice in enumerate(self._choice_values):
+            choice_bar.mount(
+                Button(
+                    _choice_button_label(index, choice),
+                    id=f"choice_{index}",
+                    variant="primary" if index == 0 else "default",
+                )
+            )
+        choice_bar.remove_class("hidden")
+
+    def _hide_choice_bar(self) -> None:
+        try:
+            choice_bar = self.query_one("#choice_bar", Horizontal)
+            choice_bar.add_class("hidden")
+            choice_bar.remove_children()
+        except Exception:
+            pass
+        self._choice_values = []
+
 
 def _event_style(stage: str, data: dict[str, Any]) -> str:
     if stage == "task_failed" and data.get("status") == "cancelled":
@@ -450,6 +521,42 @@ def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str
             return "任务已取消，未继续执行后续工具。"
         return message or "任务未完成。"
     return message or stage
+
+
+def _format_confirmation_result(req: "ConfirmationRequest", approved: bool) -> Text:
+    text = Text()
+    if approved:
+        text.append("批阅 ", style="bold green")
+        text.append("| ", style="dim")
+        text.append(f"已批准 {req.tool}，继续执行。", style="green")
+    else:
+        text.append("批阅 ", style="bold yellow")
+        text.append("| ", style="dim")
+        text.append(f"已拒绝 {req.tool}，相关操作不会继续。", style="yellow")
+    return text
+
+
+def _choices_from_task_event(data: dict[str, Any]) -> list[str]:
+    status = data.get("status")
+    if status not in {"need_info", "blocked"}:
+        return []
+    raw_choices = data.get("choices") or data.get("next_steps") or []
+    choices: list[str] = []
+    for item in raw_choices:
+        text = str(item).strip()
+        if not text or text in choices:
+            continue
+        choices.append(text)
+        if len(choices) >= 3:
+            break
+    return choices
+
+
+def _choice_button_label(index: int, choice: str) -> str:
+    normalized = " ".join(choice.split())
+    if len(normalized) > 24:
+        normalized = normalized[:23] + "…"
+    return f"{index + 1}. {normalized}"
 
 
 def _looks_like_failure_reply(reply: str) -> bool:

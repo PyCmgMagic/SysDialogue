@@ -23,7 +23,9 @@ _EXECUTION_MODE_RULES = """【执行模式声明】
   - 用户请求单步直接执行：mode="direct" 或不调用 set_execution_mode
 
 当用户请求的操作可以由现有静态工具完成时，严禁调用 propose_dynamic_tool。
-propose_dynamic_tool 仅用于 37 个静态工具和内置 workflow 完全无法覆盖的全新能力。"""
+propose_dynamic_tool 仅用于 37 个静态工具和内置 workflow 完全无法覆盖的全新能力。
+开发模式下，propose_dynamic_tool 成功后会返回 tool_id；若用户目标需要继续执行，
+必须再调用 execute_dynamic_tool，并根据执行结果继续观察/验证/收口。"""
 
 
 _REACT_PROTOCOL = """【ReAct 任务协议】
@@ -69,12 +71,13 @@ def _render_env_profile(env_sanitized: dict) -> str:
 
 
 def _render_tools(registry: "ToolRegistry") -> str:
-    lines = ["【可用工具清单（37 个静态 + 3 个元工具）】"]
+    lines = ["【可用工具清单（37 个静态 + 4 个元工具）】"]
     for name, desc in registry.describe():
         head = desc.split("。")[0] if desc else ""
         lines.append(f"  - {name}: {head}")
     lines.append("  - set_execution_mode: 声明执行模式（plan/workflow/direct），见上方执行模式规则")
-    lines.append("  - propose_dynamic_tool: 提出新工具（竞赛模式关闭）")
+    lines.append("  - propose_dynamic_tool: 提出新 DynTool；开发模式下返回 tool_id")
+    lines.append("  - execute_dynamic_tool: 执行已注册 DynTool；开发模式下仍需安全检查和用户确认")
     lines.append("  - finish_task: ReAct 任务收口，所有任务最终必须调用")
     return "\n".join(lines)
 

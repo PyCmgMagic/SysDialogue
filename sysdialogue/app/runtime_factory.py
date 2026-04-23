@@ -11,6 +11,7 @@ from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.runtime.secure_runner import LocalExecutor, SafeExecutor
 from sysdialogue.runtime.ssh_adapter import RemoteExecutor, SSHConfig
+from sysdialogue.tools.dynamic_registry import DynamicToolRegistry
 from sysdialogue.tools.registry import default_registry
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ def create_runtime(
         audit_log=audit,
         registry=default_registry(),
         llm_client=llm_client,
+        dynamic_registry=DynamicToolRegistry(competition_mode=config.competition_mode),
         competition_mode=config.competition_mode,
         max_iterations=config.max_iterations,
         workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,

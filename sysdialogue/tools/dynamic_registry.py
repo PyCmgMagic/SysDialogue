@@ -52,6 +52,7 @@ class DynamicTool(TypedDict):
     created_for: str
     consequences: str
     risk_assessment: str
+    changes_state: bool
     usage_count: int
     safety_overrides: int
 
@@ -215,12 +216,19 @@ class DynamicToolRegistry:
         consequences: str,
         risk_assessment: str,
         estimated_risk: str,
+        changes_state: bool = True,
         reversible: bool = False,
         created_for: str = "",
     ) -> DynamicTool:
         """注册一个新 DynTool（竞赛模式仍允许注册但不可执行）。"""
+        if not name.strip():
+            raise ValueError("DynTool name 不能为空")
+        if not cmd_template:
+            raise ValueError("cmd_template 不能为空")
         if len(cmd_template) > 10:
             raise ValueError("cmd_template 元素数量超过 10")
+        if not isinstance(params, dict):
+            raise ValueError("params 必须是对象")
         for t in cmd_template:
             if len(t) > 256:
                 raise ValueError("cmd_template 元素长度超过 256")
@@ -243,6 +251,7 @@ class DynamicToolRegistry:
                 "created_for": created_for,
                 "consequences": consequences,
                 "risk_assessment": risk_assessment,
+                "changes_state": bool(changes_state),
                 "usage_count": 0,
                 "safety_overrides": 0,
             }
@@ -294,8 +303,21 @@ class DynamicToolRegistry:
                 reason=f"DynTool 不存在：{tool_id}",
             )
 
+        missing = _missing_required_args(tool, args)
+        if missing:
+            return DynToolResult(
+                success=False, blocked=True,
+                reason=f"DynTool 缺少必填参数：{', '.join(missing)}",
+            )
+
         # 渲染 cmd
         cmd = self._render(tool["cmd_template"], args)
+        unresolved = _unresolved_placeholders(cmd)
+        if unresolved:
+            return DynToolResult(
+                success=False, blocked=True, cmd=cmd,
+                reason=f"DynTool 命令仍包含未解析参数：{', '.join(unresolved)}",
+            )
 
         # 第一层：形态检查
         safety = check_command(cmd, env_profile)
@@ -386,3 +408,20 @@ class DynamicToolRegistry:
 
 def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
+
+
+def _missing_required_args(tool: DynamicTool, args: dict) -> list[str]:
+    missing: list[str] = []
+    for name, spec in (tool.get("params") or {}).items():
+        if not isinstance(spec, dict) or not spec.get("required", False):
+            continue
+        if args.get(name) in (None, ""):
+            missing.append(name)
+    return missing
+
+
+def _unresolved_placeholders(cmd: list[str]) -> list[str]:
+    unresolved: list[str] = []
+    for token in cmd:
+        unresolved.extend(re.findall(r"\{(\w+)\}", token))
+    return sorted(set(unresolved))

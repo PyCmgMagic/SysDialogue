@@ -9,7 +9,9 @@ from sysdialogue.agent.react_runner import _requires_environment_feedback
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
+from sysdialogue.tools.dynamic_registry import DynamicToolRegistry
 from sysdialogue.tools.registry import ToolDef, ToolRegistry
+from tests.helpers import RecordingExecutor
 
 
 class FakeLLM:
@@ -41,6 +43,25 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         registry=registry or ToolRegistry(),
         llm_client=llm,
         event_callback=events.append,
+    )
+    return controller, events
+
+
+def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
+    events = []
+    controller = AgentController(
+        executor=executor,
+        env_profile={"remote_mode": False, "current_user": "tester"},
+        audit_log=AuditLog(log_dir=str(tmp_path / "audit")),
+        registry=ToolRegistry(),
+        llm_client=llm,
+        confirm_callback=lambda req: True,
+        event_callback=events.append,
+        dynamic_registry=DynamicToolRegistry(
+            storage_path=str(tmp_path / "dynamic_tools.json"),
+            competition_mode=False,
+        ),
+        competition_mode=False,
     )
     return controller, events
 
@@ -388,3 +409,74 @@ def test_verified_workflow_can_complete_without_extra_validation_tool(tmp_path: 
     reply = controller.run_turn("修改配置并验证")
 
     assert "workflow 已完成" in reply
+
+
+def test_dynamic_tool_can_be_proposed_then_executed_in_dev_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import sysdialogue.tools.dynamic_registry as dynamic_registry_module
+
+    class FixedUUID:
+        hex = "abc12345deadbeef"
+
+        def __str__(self) -> str:
+            return "abc12345-dead-beef-0000-000000000000"
+
+    monkeypatch.setattr(dynamic_registry_module.uuid, "uuid4", lambda: FixedUUID())
+
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "propose_dynamic_tool",
+                {
+                    "intent_summary": "Echo a diagnostic token that no static tool exposes directly.",
+                    "proposed_tool_name": "echo_token",
+                    "cmd_template": ["echo", "{message}"],
+                    "params": {
+                        "message": {
+                            "type": "string",
+                            "description": "message to echo",
+                            "required": True,
+                        }
+                    },
+                    "consequences": "只读输出，不修改系统。",
+                    "risk_assessment": "SAFE shape, still requires dynamic confirmation.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                    "reversible": True,
+                },
+                tool_id="propose_1",
+            )
+        ],
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_id": "dyn_abc12345",
+                    "args": {"message": "hello"},
+                },
+                tool_id="execute_1",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "动态工具已执行。",
+                "evidence": ["execute_dynamic_tool output=hello"],
+                "verification": "命令返回 exit_code=0，且工具声明为只读。",
+            })
+        ],
+    ])
+
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("hello\n", 0) if cmd == ["echo", "hello"] else ("", 1)
+    )
+    controller, events = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("执行一个当前静态工具没有覆盖的 echo 诊断动作")
+
+    assert "动态工具已执行" in reply
+    assert executor.calls == [["echo", "hello"]]
+    assert "dynamic_tools.json" in str(controller.dynamic_registry.storage_path)
+    assert "confirmation_requested" in [event.stage for event in events]

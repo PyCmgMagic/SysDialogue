@@ -182,6 +182,13 @@ sysdialogue --help
 --port INTEGER             Web 监听端口，默认 8000
 ```
 
+关于 DynTool：
+
+- 默认竞赛模式下，模型只能使用 37 个静态工具和内置 workflow；`propose_dynamic_tool` / `execute_dynamic_tool` 会被安全策略限制。
+- 如果确实需要让模型为静态工具未覆盖的能力创建并执行临时工具，启动时加 `--dev`。
+- DynTool 执行不是裸奔：执行前仍会经过命令形态检查、静态语义风险映射、用户确认和审计记录。
+- 模型的正确流程是先调用 `propose_dynamic_tool` 注册工具，再读取返回的 `tool_id` 调用 `execute_dynamic_tool`。
+
 ## 5. 运行方式
 
 ### 5.1 自检模式：`--verify`

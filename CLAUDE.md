@@ -79,7 +79,7 @@ sysdialogue/
 ├── tools/                       ✅ 完成（37 个静态工具 + 元工具 + 注册表 + DynTool）
 │   ├── base.py                  # ToolResult
 │   ├── registry.py              # ToolDef + ToolRegistry + default_registry()（37 工具 JSON Schema 注册）
-│   ├── meta_tools.py            # SET_EXECUTION_MODE_SCHEMA + PROPOSE_DYNAMIC_TOOL_SCHEMA
+│   ├── meta_tools.py            # set_execution_mode / propose_dynamic_tool / execute_dynamic_tool / finish_task
 │   ├── dynamic_registry.py      # DynamicToolRegistry + StaticRuleMapper（竞赛态关闭，开发态三层链）
 │   ├── system_info.py           # get_system_info, get_disk_usage
 │   ├── process_ports.py         # list_processes, kill_process, get_port_status, get_network_info, find_files
