@@ -64,6 +64,11 @@ class RemoteExecutor(SafeExecutor):
             self._client.close()
             self._client = None
 
+    def open_sftp(self):
+        if self._client is None:
+            self.connect()
+        return self._client.open_sftp()  # type: ignore[union-attr]
+
     def __enter__(self) -> "RemoteExecutor":
         self.connect()
         return self

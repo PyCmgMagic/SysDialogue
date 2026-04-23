@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from urllib.parse import urlparse
 
 from sysdialogue.runtime.secure_runner import SafeExecutor
 from sysdialogue.tools.base import ToolResult
@@ -30,6 +31,30 @@ def _is_private_ip(host: str) -> bool:
         return False
 
 
+def _private_subnet_key(host: str) -> str | None:
+    if not host or host in _LOCALHOST_WHITELIST:
+        return None
+    try:
+        addr = ipaddress.ip_address(socket.gethostbyname(host))
+    except Exception:
+        return None
+    if not any(addr in net for net in _PRIVATE_NETWORKS):
+        return None
+    if addr.version == 4:
+        return str(ipaddress.ip_network(f"{addr}/24", strict=False))
+    return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+
+
+def _track_private_probe(_session_counters: dict | None, *hosts: str) -> None:
+    if _session_counters is None:
+        return
+    subnet_counts = _session_counters.setdefault("private_probe_subnets", {})
+    for host in hosts:
+        subnet_key = _private_subnet_key(host)
+        if subnet_key:
+            subnet_counts[subnet_key] = subnet_counts.get(subnet_key, 0) + 1
+
+
 def resolve_dns(
     executor: SafeExecutor,
     name: str,
@@ -46,6 +71,7 @@ def resolve_dns(
         _session_counters["resolve_dns"] = cnt
         if cnt > 40:
             return ToolResult(success=False, error="单次会话 DNS 解析超过 40 次（WL017），已拒绝")
+    _track_private_probe(_session_counters, name, resolver or "")
 
     # 尝试 dig → nslookup → getent
     cmd: list[str] | None = None
@@ -91,6 +117,7 @@ def check_endpoint(
         _session_counters["check_endpoint"] = cnt
         if cnt > 20:
             return ToolResult(success=False, error="单次会话探测超过 20 次（WL017），已拒绝")
+    _track_private_probe(_session_counters, host)
 
     kind = kind.lower()
 
@@ -118,7 +145,7 @@ def check_endpoint(
         url += path
         cmd = [
             "curl", "-s", "-o", "/dev/null",
-            "-w", "%{http_code}",
+            "-w", "%{http_code} %{redirect_url}",
             "--max-time", str(timeout),
             "-X", method,
         ]
@@ -127,14 +154,26 @@ def check_endpoint(
         cmd.append(url)
         out, code = executor.run(cmd, timeout=timeout + 5)
         traces.append(" ".join(cmd))
-        status_code = int(out.strip()) if out.strip().isdigit() else 0
+        parts = out.strip().split(maxsplit=1)
+        status_code = int(parts[0]) if parts and parts[0].isdigit() else 0
+        redirect_url = parts[1].strip() if len(parts) > 1 else ""
+        if redirect_url:
+            redirect_host = urlparse(redirect_url).hostname or ""
+            _track_private_probe(_session_counters, redirect_host)
+            if _is_private_ip(redirect_host):
+                return ToolResult(
+                    success=False,
+                    data={"http_status": status_code, "url": url, "redirect_url": redirect_url},
+                    error=f"WH025：HTTP 重定向目标进入私网地址段（{redirect_host}）",
+                    cmd_trace=traces,
+                )
         if expected_status is not None:
             success = (status_code == expected_status)
         else:
             success = (200 <= status_code < 400)
         return ToolResult(
             success=success,
-            data={"http_status": status_code, "url": url},
+            data={"http_status": status_code, "url": url, "redirect_url": redirect_url},
             error="" if success else f"HTTP 状态码 {status_code}",
             cmd_trace=traces,
         )

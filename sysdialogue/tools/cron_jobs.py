@@ -2,30 +2,45 @@
 
 from __future__ import annotations
 
-import json
-import os
-import re
 import uuid
-from pathlib import Path
 
 from sysdialogue.runtime.secure_runner import SafeExecutor
+from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
 
-_CRON_INDEX = Path(os.path.expanduser("~/.sysdialogue/cron_index.json"))
-_CRON_DIR = Path("/etc/cron.d")
+
+_SYSDIALOGUE_MARKER = "# sysdialogue:job:"
+_SYSTEM_CRON_DIR = "/etc/cron.d"
 
 
-def _load_index() -> dict:
-    if not _CRON_INDEX.exists():
+def cron_state_dir(executor: SafeExecutor) -> str:
+    fs = TargetFileAccess(executor)
+    return fs.join(fs.home_dir(), ".sysdialogue")
+
+
+def cron_index_path(executor: SafeExecutor) -> str:
+    fs = TargetFileAccess(executor)
+    return fs.join(cron_state_dir(executor), "cron_index.json")
+
+
+def load_cron_index(executor: SafeExecutor) -> dict:
+    fs = TargetFileAccess(executor)
+    index_path = cron_index_path(executor)
+    if not fs.exists(index_path):
         return {}
-    with open(_CRON_INDEX, encoding="utf-8") as f:
-        return json.load(f)
+    return fs.read_json(index_path)
 
 
-def _save_index(data: dict) -> None:
-    _CRON_INDEX.parent.mkdir(parents=True, exist_ok=True)
-    with open(_CRON_INDEX, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def get_cron_job(executor: SafeExecutor, job_id: str) -> dict | None:
+    return load_cron_index(executor).get(job_id)
+
+
+def cron_command(job_id: str) -> str:
+    return f"sysdialogue --run-scheduled-job {job_id}"
+
+
+def system_cron_path(job_id: str) -> str:
+    return f"{_SYSTEM_CRON_DIR}/sysdialogue-{job_id}"
 
 
 def manage_cron(
@@ -49,16 +64,21 @@ def manage_cron(
 
 
 def _list(executor: SafeExecutor, scope: str) -> ToolResult:
-    index = _load_index()
+    index = load_cron_index(executor)
     if scope == "user":
         cmd = ["crontab", "-l"]
     else:
-        cmd = ["ls", "-la", str(_CRON_DIR)]
+        cmd = ["ls", "-la", _SYSTEM_CRON_DIR]
     out, code = executor.run(cmd, timeout=5)
-    return ToolResult(success=(code == 0 or code == 1), data={"crontab": out, "managed": index}, cmd_trace=[" ".join(cmd)])
+    return ToolResult(
+        success=(code == 0 or code == 1),
+        data={"crontab": out, "managed": index},
+        cmd_trace=[" ".join(cmd)],
+    )
 
 
-def _create(executor: SafeExecutor, scope: str, schedule: str | None, job_target: dict | None) -> ToolResult:
+def _create(executor: SafeExecutor, scope: str, schedule: str | None,
+            job_target: dict | None) -> ToolResult:
     if not schedule:
         return ToolResult(success=False, error="create 需要 schedule 参数")
     if not job_target:
@@ -70,8 +90,8 @@ def _create(executor: SafeExecutor, scope: str, schedule: str | None, job_target
     if kind not in ("tool", "workflow"):
         return ToolResult(success=False, error="job_target.kind 只允许 'tool' 或 'workflow'")
 
-    bid = str(uuid.uuid4())[:8]
-    index = _load_index()
+    bid = f"job_{uuid.uuid4().hex[:8]}"
+    index = load_cron_index(executor)
     index[bid] = {
         "job_id": bid,
         "scope": scope,
@@ -79,14 +99,19 @@ def _create(executor: SafeExecutor, scope: str, schedule: str | None, job_target
         "job_target": job_target,
         "enabled": True,
     }
-    _save_index(index)
-    return ToolResult(success=True, data={"job_id": bid, "schedule": schedule, "job_target": job_target})
+    _save_and_sync(executor, index, bid)
+    return ToolResult(
+        success=True,
+        data=index[bid],
+        cmd_trace=[f"cron create {bid} {scope} {schedule}"],
+    )
 
 
-def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None, job_target: dict | None) -> ToolResult:
+def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None,
+            job_target: dict | None) -> ToolResult:
     if not job_id:
         return ToolResult(success=False, error="update 需要 job_id 参数")
-    index = _load_index()
+    index = load_cron_index(executor)
     if job_id not in index:
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
     if schedule:
@@ -98,24 +123,121 @@ def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None, jo
         if kind not in ("tool", "workflow"):
             return ToolResult(success=False, error="job_target.kind 只允许 'tool' 或 'workflow'")
         index[job_id]["job_target"] = job_target
-    _save_index(index)
-    return ToolResult(success=True, data=index[job_id])
+    _save_and_sync(executor, index, job_id)
+    return ToolResult(success=True, data=index[job_id], cmd_trace=[f"cron update {job_id}"])
 
 
 def _modify(executor: SafeExecutor, job_id: str | None, action: str) -> ToolResult:
     if not job_id:
         return ToolResult(success=False, error=f"{action} 需要 job_id 参数")
-    index = _load_index()
-    if job_id not in index:
+    index = load_cron_index(executor)
+    entry = index.get(job_id)
+    if entry is None:
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
+
     if action == "delete":
+        _remove_installed_job(executor, entry)
         del index[job_id]
-    elif action == "enable":
-        index[job_id]["enabled"] = True
-    elif action == "disable":
-        index[job_id]["enabled"] = False
-    _save_index(index)
-    return ToolResult(success=True, data=f"{action} 成功：{job_id}")
+        _save_index(executor, index)
+    else:
+        entry["enabled"] = (action == "enable")
+        _save_and_sync(executor, index, job_id)
+    return ToolResult(success=True, data=f"{action} 成功：{job_id}", cmd_trace=[f"cron {action} {job_id}"])
+
+
+def _save_index(executor: SafeExecutor, data: dict) -> None:
+    fs = TargetFileAccess(executor)
+    state_dir = cron_state_dir(executor)
+    fs.mkdir(state_dir, parents=True)
+    fs.write_json(cron_index_path(executor), data, atomic=True)
+
+
+def _save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None:
+    _save_index(executor, data)
+    _sync_installed_jobs(executor, data, data[job_id]["scope"])
+
+
+def _sync_installed_jobs(executor: SafeExecutor, data: dict, scope: str) -> None:
+    if scope == "user":
+        _sync_user_crontab(executor, data)
+        return
+    _sync_system_cron(executor, data)
+
+
+def _sync_user_crontab(executor: SafeExecutor, data: dict) -> None:
+    fs = TargetFileAccess(executor)
+    out, code = executor.run(["crontab", "-l"], timeout=5)
+    current_lines = [] if code != 0 else out.splitlines()
+    filtered = [line for line in current_lines if _SYSDIALOGUE_MARKER not in line]
+    managed = []
+    for entry in data.values():
+        if entry.get("scope") != "user" or not entry.get("enabled", True):
+            continue
+        managed.append(
+            f"{entry['schedule']} {cron_command(entry['job_id'])} {_SYSDIALOGUE_MARKER}{entry['job_id']}"
+        )
+
+    rendered_lines = filtered
+    if filtered and managed:
+        rendered_lines.append("")
+    rendered_lines.extend(managed)
+    content = "\n".join(line for line in rendered_lines if line is not None).strip()
+    if content:
+        content += "\n"
+
+    tmp_path = fs.join(cron_state_dir(executor), "user-crontab.tmp")
+    fs.mkdir(cron_state_dir(executor), parents=True)
+    fs.write_text(tmp_path, content, atomic=True)
+    try:
+        out_apply, code_apply = executor.run(["crontab", tmp_path], timeout=10)
+        if code_apply != 0:
+            raise OSError(out_apply or "crontab install failed")
+    finally:
+        if fs.exists(tmp_path):
+            fs.remove(tmp_path)
+
+
+def _sync_system_cron(executor: SafeExecutor, data: dict) -> None:
+    fs = TargetFileAccess(executor)
+    enabled_ids = set()
+    for entry in data.values():
+        if entry.get("scope") != "system":
+            continue
+        job_id = entry["job_id"]
+        cron_path = system_cron_path(job_id)
+        if entry.get("enabled", True):
+            content = (
+                "SHELL=/bin/sh\n"
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n\n"
+                f"{entry['schedule']} root {cron_command(job_id)}\n"
+            )
+            fs.write_text(cron_path, content, atomic=True)
+            fs.chmod(cron_path, 0o644)
+            enabled_ids.add(job_id)
+        elif fs.exists(cron_path):
+            fs.remove(cron_path)
+
+    ls_out, ls_code = executor.run(["ls", "-1", _SYSTEM_CRON_DIR], timeout=5)
+    if ls_code != 0:
+        return
+    for line in ls_out.splitlines():
+        if not line.startswith("sysdialogue-job_"):
+            continue
+        job_id = line.removeprefix("sysdialogue-")
+        if job_id not in enabled_ids and job_id not in data:
+            fs.remove(f"{_SYSTEM_CRON_DIR}/{line}")
+
+
+def _remove_installed_job(executor: SafeExecutor, entry: dict) -> None:
+    fs = TargetFileAccess(executor)
+    if entry.get("scope") == "system":
+        cron_path = system_cron_path(entry["job_id"])
+        if fs.exists(cron_path):
+            fs.remove(cron_path)
+        return
+    data = load_cron_index(executor)
+    data = {jid: item for jid, item in data.items() if jid != entry["job_id"]}
+    _sync_user_crontab(executor, data)
 
 
 def _valid_schedule(s: str) -> bool:

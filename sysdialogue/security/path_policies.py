@@ -262,6 +262,28 @@ def is_private_host(host: str) -> bool:
     return any(addr in net for net in _PRIVATE_NETWORKS)
 
 
+def private_subnet_key(host: str) -> str | None:
+    """将 host 解析到私网子网键，用于会话内批量探测计数。"""
+    if not host:
+        return None
+    h = host.strip().lower()
+    if h in _LOCALHOST_WHITELIST:
+        return None
+    try:
+        addr = ipaddress.ip_address(h)
+    except ValueError:
+        try:
+            resolved = socket.gethostbyname(h)
+            addr = ipaddress.ip_address(resolved)
+        except Exception:
+            return None
+    if not any(addr in net for net in _PRIVATE_NETWORKS):
+        return None
+    if addr.version == 4:
+        return str(ipaddress.ip_network(f"{addr}/24", strict=False))
+    return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+
+
 def matches_hosts_protected(hostname: str | None, ip_addrs: list[str] | None) -> bool:
     """B024：hostname/ip_addrs 是否命中 HOSTS_PROTECTED_ENTRIES。
 

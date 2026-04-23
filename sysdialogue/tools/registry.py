@@ -648,9 +648,9 @@ def _build_tool_defs() -> list[ToolDef]:
         ToolDef("list_directory", list_directory, SCHEMA_LIST_DIRECTORY),
         ToolDef("stat_path", stat_path, SCHEMA_STAT_PATH),
         ToolDef("search_file_content", search_file_content, SCHEMA_SEARCH_FILE_CONTENT),
-        # 配置变更闭环（无 executor）
-        ToolDef("backup_path", backup_path, SCHEMA_BACKUP_PATH, requires_executor=False),
-        ToolDef("replace_in_file", replace_in_file, SCHEMA_REPLACE_IN_FILE, requires_executor=False),
+        # 配置变更闭环
+        ToolDef("backup_path", backup_path, SCHEMA_BACKUP_PATH),
+        ToolDef("replace_in_file", replace_in_file, SCHEMA_REPLACE_IN_FILE),
         ToolDef("validate_config", validate_config, SCHEMA_VALIDATE_CONFIG),
         # 系统维护
         ToolDef("manage_cron", manage_cron, SCHEMA_MANAGE_CRON),

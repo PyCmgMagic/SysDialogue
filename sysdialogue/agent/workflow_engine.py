@@ -48,6 +48,7 @@ class WorkflowExecution:
     steps_state: dict[str, StepResult] = field(default_factory=dict)
     rolled_back: bool = False
     rollback_failed: bool = False
+    cancelled: bool = False
     final_status: str = "pending"  # pending|completed|rolled_back|failed|rollback_failed
     final_message: str = ""
 
@@ -57,6 +58,7 @@ class WorkflowExecution:
             "workflow_name": self.workflow_name,
             "final_status": self.final_status,
             "final_message": self.final_message,
+            "cancelled": self.cancelled,
             "steps": {
                 sid: {"status": r.status, "error": r.error}
                 for sid, r in self.steps_state.items()
@@ -227,6 +229,10 @@ class WorkflowEngine:
         try:
             ordered = self._topo_sort(steps)
             for step in ordered:
+                if self.controller.is_cancel_requested():
+                    execution.cancelled = True
+                    triggered_rollback = True
+                    break
                 sid = step["id"]
                 # 依赖短路：任何依赖标记为 failed → 本步标记为 failed（级联），
                 # 区别于 condition=false 的 skipped（后者视为"已成功完成"）
@@ -277,6 +283,10 @@ class WorkflowEngine:
                         triggered_rollback = True
                         break
                     # 默认失败策略：continue（后续 depends_on 短路会自然跳过）
+                if self.controller.is_cancel_requested():
+                    execution.cancelled = True
+                    triggered_rollback = True
+                    break
 
             # 回滚
             if triggered_rollback and rollback_steps:
@@ -295,10 +305,16 @@ class WorkflowEngine:
             )
         elif execution.rolled_back:
             execution.final_status = "rolled_back"
-            execution.final_message = self._render(
-                final_section.get("rollback_template", "已回滚到变更前状态。"),
-                execution, resolved_params,
-            )
+            if execution.cancelled:
+                execution.final_message = self._render(
+                    final_section.get("cancel_template", "当前工作流已取消，并已按回滚策略处理。"),
+                    execution, resolved_params,
+                )
+            else:
+                execution.final_message = self._render(
+                    final_section.get("rollback_template", "已回滚到变更前状态。"),
+                    execution, resolved_params,
+                )
         elif any(r.status == "failed" for r in execution.steps_state.values()):
             execution.final_status = "failed"
             execution.final_message = "工作流失败，部分步骤未完成。"
@@ -390,7 +406,12 @@ class WorkflowEngine:
 
         # 通过 controller 的安全门 + 工具执行
         from sysdialogue.security.risk_classifier import classify
-        decision = classify(tool, rendered_args, self.controller.env_profile)
+        decision = classify(
+            tool,
+            rendered_args,
+            self.controller.env_profile,
+            session_counters=self.controller._session_counters,
+        )
         self.controller.audit_log.log_decision(
             tool=tool, args=rendered_args,
             risk_level=decision.level, rule_ids=decision.rule_ids,

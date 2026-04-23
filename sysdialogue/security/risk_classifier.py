@@ -34,13 +34,19 @@ def _max(a: RiskDecision, b: RiskDecision) -> RiskDecision:
     return a
 
 
-def classify(tool: str, args: dict, env_profile: "EnvProfile | None" = None) -> RiskDecision:
+def classify(
+    tool: str,
+    args: dict,
+    env_profile: "EnvProfile | None" = None,
+    session_counters: dict | None = None,
+) -> RiskDecision:
     """判定工具调用风险。env_profile 可选，远程锁门检测需要。"""
     ep: EnvProfile = env_profile or {}
     fn = _CLASSIFIERS.get(tool)
     if fn is None:
         return RiskDecision(level="SAFE")
     result = fn(args, ep)
+    result = _apply_network_probe_risk(tool, args, result, session_counters)
     # 远程锁门检测（对所有工具叠加）
     lockout = lockout_assess(tool, args, ep)
     if _LEVEL_ORDER.get(lockout.level, 0) > _LEVEL_ORDER.get(result.level, 0):
@@ -53,6 +59,38 @@ def classify(tool: str, args: dict, env_profile: "EnvProfile | None" = None) -> 
     if result.level in ("WARN-HIGH", "BLOCK"):
         result.requires_confirmation = (result.level == "WARN-HIGH")
     return result
+
+
+def _apply_network_probe_risk(
+    tool: str,
+    args: dict,
+    current: RiskDecision,
+    session_counters: dict | None,
+) -> RiskDecision:
+    if tool not in ("resolve_dns", "check_endpoint"):
+        return current
+
+    hosts: list[str] = []
+    if tool == "resolve_dns":
+        hosts.extend([args.get("name", ""), args.get("resolver", "")])
+    else:
+        hosts.append(args.get("host", ""))
+
+    subnet_counts = (session_counters or {}).get("private_probe_subnets", {})
+    for host in hosts:
+        subnet_key = pp.private_subnet_key(host)
+        if not subnet_key:
+            continue
+        count = subnet_counts.get(subnet_key, 0) + 1
+        if count > 10:
+            return RiskDecision(
+                level="WARN-HIGH",
+                rule_ids=["WH025"],
+                reason=f"同一私网段 {subnet_key} 在本次会话内探测超过 10 次",
+                requires_confirmation=True,
+            )
+        return current
+    return current
 
 
 # --------------------------------------------------------------------------

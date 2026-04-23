@@ -1,160 +1,200 @@
-"""自检 (--verify) 与演示 (--demo) 入口。"""
+"""Self-check (--verify) and demo (--demo) entrypoints."""
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from sysdialogue.app.runtime_factory import create_runtime
 
 if TYPE_CHECKING:
     from sysdialogue.app.config import AppConfig
 
 
+def _safe_print(text: str = "") -> None:
+    """Write console output without crashing on GBK/legacy terminals."""
+    stream = sys.stdout
+    try:
+        stream.write(text + "\n")
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        data = (text + "\n").encode(encoding, errors="backslashreplace")
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            buffer.write(data)
+            buffer.flush()
+        else:
+            stream.write(data.decode(encoding, errors="ignore"))
+
+
 def run_verify(config: "AppConfig") -> int:
-    """自检模式 — 不调用 Claude API，只检查：
-    1. 探测 EnvProfile
-    2. 列出 37 个静态工具 + 元工具 Schema 注册数
-    3. 列出 10 个内置 workflow
-    4. 打印核心安全规则计数
-    5. 检查 API Key 是否配置
-    返回 exit code：0=ok / 非 0=问题。
-    """
-    print("=" * 60)
-    print(" SysDialogue v6 — 自检模式 (--verify)")
-    print("=" * 60)
+    """Run a no-API readiness check for the local or remote runtime."""
+    _safe_print("=" * 60)
+    _safe_print(" SysDialogue v6 - Self-check (--verify)")
+    _safe_print("=" * 60)
 
     issues: list[str] = []
 
-    # 1. EnvProfile 探测
+    # 1. EnvProfile probing
     try:
         from sysdialogue.runtime.capability_probe import (
-            CapabilityProbe, EnvProfileSanitizer,
+            CapabilityProbe,
+            EnvProfileSanitizer,
         )
         from sysdialogue.runtime.secure_runner import LocalExecutor
-        probe = CapabilityProbe(LocalExecutor(), remote_mode=config.remote_mode,
-                                ssh_port=config.ssh_port)
+
+        probe = CapabilityProbe(
+            LocalExecutor(),
+            remote_mode=config.remote_mode,
+            ssh_port=config.ssh_port,
+        )
         profile = probe.probe()
         sanitized = EnvProfileSanitizer.sanitize(profile)
-        print("\n[1/5] 环境画像（脱敏）：")
-        for k, v in sanitized.items():
-            print(f"  {k}: {v}")
-    except Exception as e:
-        issues.append(f"EnvProfile 探测失败：{e}")
-        print(f"  ✗ {e}")
+        _safe_print("\n[1/5] Sanitized environment profile:")
+        for key, value in sanitized.items():
+            _safe_print(f"  {key}: {value}")
+    except Exception as exc:
+        issues.append(f"EnvProfile probe failed: {exc}")
+        _safe_print(f"  [ERROR] {exc}")
 
-    # 2. ToolRegistry
+    # 2. Tool registry
     try:
-        from sysdialogue.tools.registry import default_registry
         from sysdialogue.tools.meta_tools import META_TOOL_SCHEMAS
+        from sysdialogue.tools.registry import default_registry
+
         reg = default_registry()
-        print(f"\n[2/5] 工具注册：{len(reg.all_schemas())} 个静态工具"
-              f" + {len(META_TOOL_SCHEMAS)} 个元工具")
+        _safe_print(
+            f"\n[2/5] Registered tools: {len(reg.all_schemas())} static"
+            f" + {len(META_TOOL_SCHEMAS)} meta"
+        )
         for name, desc in reg.describe()[:5]:
             head = desc.split("。")[0] if desc else ""
-            print(f"  - {name}: {head}")
-        print(f"  ... 共 {len(reg.names())} 个（完整列表省略）")
-    except Exception as e:
-        issues.append(f"ToolRegistry 加载失败：{e}")
+            _safe_print(f"  - {name}: {head}")
+        _safe_print(f"  ... total {len(reg.names())}")
+    except Exception as exc:
+        issues.append(f"ToolRegistry load failed: {exc}")
 
-    # 3. 内置 workflow
+    # 3. Built-in workflows
     try:
-        workflows_dir = Path(config.workflows_dir) if config.workflows_dir else \
-            Path(__file__).parent.parent / "workflows"
+        workflows_dir = (
+            Path(config.workflows_dir)
+            if config.workflows_dir
+            else Path(__file__).parent.parent / "workflows"
+        )
         yamls = sorted(workflows_dir.glob("*.yaml"))
-        print(f"\n[3/5] 内置工作流：{len(yamls)} 个")
-        for y in yamls:
-            print(f"  - {y.stem}")
+        _safe_print(f"\n[3/5] Built-in workflows: {len(yamls)}")
+        for workflow in yamls:
+            _safe_print(f"  - {workflow.stem}")
         if len(yamls) != 10:
-            issues.append(f"工作流数量异常：预期 10，实际 {len(yamls)}")
-    except Exception as e:
-        issues.append(f"Workflow 目录扫描失败：{e}")
+            issues.append(f"Workflow count mismatch: expected 10, got {len(yamls)}")
+    except Exception as exc:
+        issues.append(f"Workflow directory scan failed: {exc}")
 
-    # 4. 安全规则统计
+    # 4. Security rules
     try:
         from sysdialogue.security import risk_classifier as rc
-        from sysdialogue.security import command_safety as cs
-        print("\n[4/5] 安全规则：")
-        print(f"  - RiskClassifier 覆盖工具：{len(rc._CLASSIFIERS)} 个")
-        print("  - CommandSafetyChecker：CS001-CS009（9 条形态规则 + 远程锁门叠加）")
-        print("  - RemoteLockoutChecker：B010 / B015-B017 / WH023")
-    except Exception as e:
-        issues.append(f"安全规则模块加载失败：{e}")
 
-    # 5. API Key 检查
-    print("\n[5/5] 配置：")
-    print(f"  - 模型：{config.model}")
-    print(f"  - 竞赛模式：{config.competition_mode}")
-    print(f"  - 部署模式：{'远程' if config.remote_mode else '本地'}")
+        _safe_print("\n[4/5] Security rules:")
+        _safe_print(f"  - RiskClassifier coverage: {len(rc._CLASSIFIERS)} tools")
+        _safe_print("  - CommandSafetyChecker: CS001-CS009")
+        _safe_print("  - RemoteLockoutChecker: B010 / B015-B017 / WH023")
+    except Exception as exc:
+        issues.append(f"Security rule modules failed to load: {exc}")
+
+    # 5. Runtime config
+    _safe_print("\n[5/5] Config:")
+    _safe_print(f"  - model: {config.model}")
+    _safe_print(f"  - competition_mode: {config.competition_mode}")
+    _safe_print(f"  - deployment_mode: {'remote' if config.remote_mode else 'local'}")
     if config.api_key:
-        print(f"  - ANTHROPIC_API_KEY：已配置（{config.api_key[:8]}…）")
+        _safe_print(f"  - ANTHROPIC_API_KEY: configured ({config.api_key[:8]}...)")
     else:
-        print("  - ANTHROPIC_API_KEY：未配置（启动 TUI 前需要设置）")
-        issues.append("ANTHROPIC_API_KEY 未配置")
+        _safe_print("  - ANTHROPIC_API_KEY: missing (required for TUI/simple/web)")
+        issues.append("ANTHROPIC_API_KEY is not configured")
 
-    print("\n" + "=" * 60)
+    _safe_print("\n" + "=" * 60)
     if issues:
-        print(f"⚠️  自检发现 {len(issues)} 个问题：")
-        for i, msg in enumerate(issues, 1):
-            print(f"  {i}. {msg}")
-        print("=" * 60)
+        _safe_print(f"[WARN] Self-check found {len(issues)} issue(s):")
+        for index, message in enumerate(issues, 1):
+            _safe_print(f"  {index}. {message}")
+        _safe_print("=" * 60)
         return 1
-    print("✅ 自检通过，系统可启动。")
-    print("=" * 60)
+
+    _safe_print("[OK] Self-check passed.")
+    _safe_print("=" * 60)
     return 0
 
 
 def run_demo(config: "AppConfig") -> int:
-    """演示模式 — 不调用 Claude API，直接跑 security_audit 工作流展示 workflow 引擎。
+    """Run the built-in security_audit workflow without calling Claude."""
+    _safe_print("=" * 60)
+    _safe_print(" SysDialogue v6 - Demo mode (--demo)")
+    _safe_print(" Scenario: security_audit workflow (read-only inspection)")
+    _safe_print("=" * 60)
 
-    适合无 API Key 环境下的功能演示。
-    """
-    print("=" * 60)
-    print(" SysDialogue v6 — 演示模式 (--demo)")
-    print(" 场景：security_audit 工作流（只读巡查）")
-    print("=" * 60)
-
-    from sysdialogue.agent.controller import AgentController
-    from sysdialogue.agent.workflow_engine import WorkflowEngine
-    from sysdialogue.audit.trace_store import AuditLog
-    from sysdialogue.runtime.capability_probe import CapabilityProbe
-    from sysdialogue.runtime.secure_runner import LocalExecutor
-    from sysdialogue.tools.registry import default_registry
-
-    # 构造骨架（不需要真实 Claude）
-    audit = AuditLog(session_id="demo")
-    executor = LocalExecutor()
-    probe = CapabilityProbe(executor, remote_mode=config.remote_mode,
-                            ssh_port=config.ssh_port)
-    profile = probe.probe()
-
-    class _NullClaude:
-        def messages_create(self, *, system, messages, tools):
-            raise RuntimeError("演示模式不调用 Claude")
-
-    ctrl = AgentController(
-        executor=executor,
-        env_profile=profile,
-        audit_log=audit,
-        registry=default_registry(),
-        claude_client=_NullClaude(),
-        confirm_callback=lambda req: True,  # 演示模式自动批准
-        competition_mode=config.competition_mode,
+    runtime = create_runtime(
+        config,
+        session_id="demo",
+        require_api=False,
+        confirm_callback=lambda req: True,
     )
-    workflows_dir = config.workflows_dir or \
-        str(Path(__file__).parent.parent / "workflows")
-    engine = WorkflowEngine(controller=ctrl, workflows_dir=workflows_dir)
+    try:
+        profile = runtime.env_profile
+        if not config.remote_mode and not sys.platform.startswith("linux"):
+            _safe_print(
+                "\n[UNSUPPORTED] Local demo requires a Linux host. "
+                "Use --remote against a Linux machine or run the demo on Linux."
+            )
+            runtime.audit_log.log_final(
+                final_status="unsupported_host",
+                detail="local demo requires Linux host",
+            )
+            return 2
 
-    print("\n[运行] security_audit.yaml ...")
-    execution = engine.run("security_audit", {})
-    print(f"\n[结果] final_status = {execution.final_status}")
-    print(f"[结果] message = {execution.final_message}")
-    print("\n[步骤状态]")
-    for sid, r in execution.steps_state.items():
-        err = f" — {r.error}" if r.error else ""
-        print(f"  {sid}: {r.status}{err}")
+        if not config.remote_mode and profile.get("distro_id") == "unknown":
+            _safe_print(
+                "\n[UNSUPPORTED] The local environment does not look like a supported Linux runtime."
+            )
+            runtime.audit_log.log_final(
+                final_status="unsupported_host",
+                detail="unable to identify a supported Linux distribution",
+            )
+            return 2
 
-    print(f"\n[审计] 会话 ID：{audit.session_id}")
-    print(f"[审计] 日志路径：{audit.path}")
-    print("\n" + "=" * 60)
-    return 0 if execution.final_status in ("completed", "rolled_back") else 1
+        from sysdialogue.agent.workflow_engine import WorkflowEngine
+
+        workflows_dir = (
+            Path(config.workflows_dir)
+            if config.workflows_dir
+            else Path(__file__).parent.parent / "workflows"
+        )
+        engine = WorkflowEngine(
+            controller=runtime.controller,
+            workflows_dir=workflows_dir,
+        )
+
+        _safe_print("\n[RUN] security_audit.yaml ...")
+        execution = engine.run("security_audit", {})
+
+        _safe_print(f"\n[RESULT] final_status = {execution.final_status}")
+        _safe_print(f"[RESULT] message = {execution.final_message}")
+        _safe_print("\n[STEP STATUS]")
+        for step_id, result in execution.steps_state.items():
+            suffix = f" - {result.error}" if result.error else ""
+            _safe_print(f"  {step_id}: {result.status}{suffix}")
+
+        _safe_print(f"\n[AUDIT] session_id: {runtime.audit_log.session_id}")
+        _safe_print(f"[AUDIT] log_path: {runtime.audit_log.path}")
+        _safe_print("\n" + "=" * 60)
+
+        if execution.final_status in ("completed", "rolled_back"):
+            return 0
+
+        _safe_print(
+            "[ERROR] Demo workflow reached a failure state. "
+            "This indicates an engine/runtime problem rather than an unsupported host."
+        )
+        return 1
+    finally:
+        runtime.close()

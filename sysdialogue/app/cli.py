@@ -17,6 +17,9 @@ from pathlib import Path
 import click
 
 from sysdialogue.app.config import load_config
+from sysdialogue.app.jobs import run_scheduled_job
+from sysdialogue.app.runtime_factory import create_runtime
+from sysdialogue.app.simple_cli import run_simple_cli
 from sysdialogue.app.verify import run_demo, run_verify
 
 
@@ -31,10 +34,19 @@ from sysdialogue.app.verify import run_demo, run_verify
 @click.option("--env-file", type=click.Path(), help=".env 配置文件路径")
 @click.option("--workflows-dir", type=click.Path(),
               help="工作流 YAML 目录（默认 sysdialogue/workflows/）")
+@click.option("--run-scheduled-job", "scheduled_job_id",
+              help="执行已注册的计划任务（供 cron 调用）")
+@click.option("--simple", is_flag=True, help="启动 stdin/stdout 轻量 CLI")
+@click.option("--web", "web_mode", is_flag=True, help="启动轻量 Web 控制台")
+@click.option("--host", "web_host", default="127.0.0.1", show_default=True,
+              help="Web 控制台监听地址")
+@click.option("--port", "web_port", default=8000, show_default=True, type=int,
+              help="Web 控制台监听端口")
 def main(verify: bool, demo: bool, remote: str | None,
          ssh_key_file: str | None, dev: bool,
          model: str | None, env_file: str | None,
-         workflows_dir: str | None) -> None:
+         workflows_dir: str | None, scheduled_job_id: str | None,
+         simple: bool, web_mode: bool, web_host: str, web_port: int) -> None:
     """SysDialogue v6 — Linux 服务器运维智能代理。"""
 
     ssh_conf: dict = {}
@@ -69,6 +81,14 @@ def main(verify: bool, demo: bool, remote: str | None,
         sys.exit(run_verify(config))
     if demo:
         sys.exit(run_demo(config))
+    if scheduled_job_id:
+        sys.exit(run_scheduled_job(config, scheduled_job_id))
+    if simple:
+        sys.exit(run_simple_cli(config))
+    if web_mode:
+        from sysdialogue.web.app import run_web_server
+        run_web_server(config, host=web_host, port=web_port)
+        return
 
     # 启动 TUI
     if not config.api_key:
@@ -85,48 +105,13 @@ def main(verify: bool, demo: bool, remote: str | None,
 
 
 def _run_tui(config) -> None:
-    from sysdialogue.agent.controller import AgentController, ClaudeClient
-    from sysdialogue.audit.trace_store import AuditLog
-    from sysdialogue.runtime.capability_probe import CapabilityProbe
-    from sysdialogue.runtime.secure_runner import LocalExecutor
-    from sysdialogue.tools.registry import default_registry
     from sysdialogue.ui.tui_app import run_tui
 
-    if config.remote_mode:
-        from sysdialogue.runtime.ssh_adapter import RemoteExecutor, SSHConfig
-        ssh_cfg = SSHConfig(
-            host=config.ssh_host,
-            port=config.ssh_port,
-            username=config.ssh_user,
-            key_filename=config.ssh_key_file or None,
-        )
-        executor = RemoteExecutor(ssh_cfg)
-        executor.connect()
-    else:
-        executor = LocalExecutor()
-
-    probe = CapabilityProbe(executor,
-                            remote_mode=config.remote_mode,
-                            ssh_port=config.ssh_port)
-    env_profile = probe.probe()
-
-    audit = AuditLog()
-    claude = ClaudeClient(api_key=config.api_key, model=config.model)
-    controller = AgentController(
-        executor=executor,
-        env_profile=env_profile,
-        audit_log=audit,
-        registry=default_registry(),
-        claude_client=claude,
-        competition_mode=config.competition_mode,
-        max_iterations=config.max_iterations,
-        workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,
-    )
+    runtime = create_runtime(config, require_api=True)
     try:
-        run_tui(controller)
+        run_tui(runtime.controller)
     finally:
-        if config.remote_mode and hasattr(executor, "disconnect"):
-            executor.disconnect()
+        runtime.close()
 
 
 if __name__ == "__main__":

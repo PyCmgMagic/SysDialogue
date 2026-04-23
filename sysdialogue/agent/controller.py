@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from sysdialogue.agent.conversation import ConversationManager
 from sysdialogue.agent.prompt import build_system_prompt
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
@@ -91,6 +93,7 @@ class AgentController:
     dynamic_registry: Any = None  # 可选 DynamicToolRegistry 实例（dev 模式）
     competition_mode: bool = True
     max_iterations: int = 25
+    conversation_manager: ConversationManager | None = None
 
     # 运行时状态
     _session_counters: dict = field(default_factory=dict)
@@ -98,13 +101,17 @@ class AgentController:
     _env_profile_id: str | None = None
     _workflow_engine: "WorkflowEngine | None" = None
     _planning_engine: "PlanningEngine | None" = None
+    _cancel_event: threading.Event = field(default_factory=threading.Event)
+    _env_sanitized: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
+        self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
-            env_sanitized, self.registry, self.competition_mode
+            self._env_sanitized, self.registry, self.competition_mode
         )
-        self._env_profile_id = self.audit_log.log_env_profile(env_sanitized)
+        self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
+        if self.conversation_manager is None:
+            self.conversation_manager = ConversationManager()
 
     def _get_workflow_engine(self) -> "WorkflowEngine":
         if self._workflow_engine is None:
@@ -128,12 +135,16 @@ class AgentController:
 
     def run_turn(self, user_message: str) -> str:
         """单轮对话：返回 assistant 最终自然语言回复。"""
-        messages: list = [{"role": "user", "content": user_message}]
+        self.clear_cancel()
+        messages = self.conversation_manager.prepare_turn(user_message)
         all_tools = self.registry.all_schemas() + META_TOOL_SCHEMAS
 
         for _ in range(self.max_iterations):
+            if self.is_cancel_requested():
+                self.conversation_manager.commit_turn(messages)
+                return "当前执行已取消。"
             response = self.claude_client.messages_create(
-                system=self._system_prompt,
+                system=self._current_system_prompt(),
                 messages=messages,
                 tools=all_tools,
             )
@@ -142,12 +153,16 @@ class AgentController:
 
             stop_reason = getattr(response, "stop_reason", None)
             if stop_reason != "tool_use":
+                self.conversation_manager.commit_turn(messages)
                 return _extract_text(content)
 
             tool_result_blocks = []
             for block in content:
                 if _block_type(block) != "tool_use":
                     continue
+                if self.is_cancel_requested():
+                    self.conversation_manager.commit_turn(messages)
+                    return "当前执行已取消。"
                 name = _block_attr(block, "name")
                 args = _block_attr(block, "input") or {}
                 tool_use_id = _block_attr(block, "id")
@@ -156,6 +171,7 @@ class AgentController:
 
             messages.append({"role": "user", "content": tool_result_blocks})
 
+        self.conversation_manager.commit_turn(messages)
         return "（达到最大迭代次数，请分步重试或精简需求）"
 
     # ------------------------------------------------------------------
@@ -180,7 +196,12 @@ class AgentController:
             return _tool_result_block(tool_use_id, f"未注册工具：{name}", is_error=True)
 
         # 安全门判定
-        decision: RiskDecision = classify(name, args, self.env_profile)
+        decision: RiskDecision = classify(
+            name,
+            args,
+            self.env_profile,
+            session_counters=self._session_counters,
+        )
         self.audit_log.log_decision(
             tool=name, args=args, risk_level=decision.level,
             rule_ids=decision.rule_ids, reason=decision.reason,
@@ -228,6 +249,8 @@ class AgentController:
             session_counters=self._session_counters,
             env_profile=self.env_profile,
         )
+        if result.success:
+            self.conversation_manager.observe_tool_success(name, args, result)
         self.audit_log.log_command(
             tool=name,
             cmd=result.cmd_trace,
@@ -263,6 +286,7 @@ class AgentController:
                 return _tool_result_block(tool_use_id, str(e), is_error=True)
             except ValueError as e:
                 return _tool_result_block(tool_use_id, f"参数错误：{e}", is_error=True)
+            self.conversation_manager.observe_workflow(wf_name, wf_params, execution)
             summary = execution.summary()
             summary["message"] = execution.final_message
             return _tool_result_block(
@@ -299,6 +323,23 @@ class AgentController:
             tool_use_id,
             "已声明 direct 模式，可直接调用工具。",
             is_error=False,
+        )
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+
+    def clear_cancel(self) -> None:
+        self._cancel_event.clear()
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_event.is_set()
+
+    def _current_system_prompt(self) -> str:
+        return build_system_prompt(
+            self._env_sanitized,
+            self.registry,
+            self.competition_mode,
+            context_summary=self.conversation_manager.render_context(),
         )
 
     def _handle_propose_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:

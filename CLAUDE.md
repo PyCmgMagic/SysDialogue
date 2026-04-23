@@ -1,8 +1,8 @@
 # SysDialogue v6 — 开发交接文档
 
 > 设计文档：`framework/claudeplan6.md`（1684 行，19 章，完整独立设计，无需参考历史版本）
-> 当前状态：**全部 14 个 Task 实现完毕**，可通过 `python -m sysdialogue.app.cli --verify/--demo/(无参启动 TUI)` 运行。
-> 剩余事项：真机 Linux 验证、演示材料准备。
+> 当前状态：v6 主骨架、远程目标机文件访问、`--run-scheduled-job`、`--simple`、Web 控制台、ConversationManager、TUI 取消/输入链路均已落地；Linux 真机链路仍需最终验收。
+> 当前入口：`python -m sysdialogue.app.cli --verify/--demo/--simple/--web/(无参启动 TUI)`，Windows 本地 `--demo` 会明确返回“不支持本地 Linux 巡检演示”而非模糊失败。
 
 ---
 
@@ -11,6 +11,36 @@
 SysDialogue v6：面向 Linux 服务器运维场景的操作系统智能代理。用户用自然语言输入运维需求，代理在受控工具体系内规划执行，所有操作经过安全门拦截和审计记录。
 
 **核心原则**：Static-first / Workflow-first / Preview-Backup-Validate / EnvProfile-driven / DynTool-last
+
+---
+
+## 当前开发基线与执行约束
+
+**唯一设计基线**：后续开发默认以 `framework/claudeplan6.md` 为准。`framework/plan_archive/` 中的历史 plan 只作为背景参考；如果历史 plan 与 v6 设计冲突，一律以 v6 为准。
+
+**Git-first 开发约束**（每次开始一轮新开发时默认执行）：
+
+1. **先检查仓库状态**：先看 `git status --short --branch`，确认当前分支、是否存在未提交改动、是否有未跟踪文件。
+2. **先同步再改动**：随后执行 `git fetch --all --prune`；若当前分支存在 upstream 且 worktree 干净，再执行 `git pull --rebase`，确保基于最新代码开发。
+3. **脏工作区禁止盲拉取**：若存在未提交改动、merge/rebase 未完成或冲突，禁止直接 `pull`、`stash`、`reset --hard`。应先暂停并说明现场状态，再由用户决定是先提交 checkpoint、先清理，还是在当前基础上继续。
+4. **改动前先建立版本边界**：较大任务优先放到独立分支开发，建议分支名使用 `codex/<topic>`；小任务至少要记录当前分支与 `HEAD` 提交，保证回溯清晰。
+5. **改动后先验证再提交**：完成修改后先跑最小必要验证，再检查 `git diff` / `git status`；提交时只暂存与本任务直接相关的文件，commit message 保持单一目的。
+6. **危险 Git 操作必须显式授权**：未经用户明确许可，不执行 `git reset --hard`、`git clean -fd`、`git checkout -- <file>`、强制推送或改写共享历史。
+7. **每轮结束汇报版本信息**：说明本次工作基于哪个分支、同步是否成功、是否存在未提交改动，以及本轮变更涉及哪些文件。
+
+**推荐入口**：开发前先运行 `python scripts/git_preflight.py`。该脚本会自动完成状态检查、`fetch`，并且只会在工作区干净时执行 `git pull --rebase`。
+
+---
+
+## 近期对齐更新（2026-04-23）
+
+- **远程目标机文件访问统一化**：新增 `sysdialogue/runtime/target_fs.py`，`file_ops.py`、`backup_restore.py`、`config_validate.py`、`hosts_entries.py`、`cron_jobs.py` 统一通过目标机文件访问层读写，本地/远程语义保持一致。
+- **计划任务闭环**：`manage_cron` 现在除了维护 JSON 索引外，还会同步安装 user/system cron；CLI 新增 `--run-scheduled-job <job_id>` 非交互入口。
+- **会话上下文与多入口复用**：新增 `ConversationManager`、`runtime_factory.py`、`jobs.py`、`simple_cli.py`，TUI / Simple CLI / Web 共用同一套 controller/runtime 组装方式。
+- **Web 控制台最小可用版**：新增 `sysdialogue/web/`，提供 `GET /`、`GET /api/session/{id}/state`、`POST /turn`、`POST /confirm`、`POST /cancel`。
+- **TUI 交互对齐**：`Ctrl+C` 改为取消当前执行并触发 workflow rollback 链路，`Ctrl+D` 退出应用；新增 `InputModal`，支持单行/多行输入请求。
+- **安全与规则补齐**：补上 WH025 批量私网探测升级和 HTTP/TLS 重定向入私网拦截，完成 authorized_keys fingerprint 删除、iptables `-D` 删除路径与 `supports_system_cron` 判定修正。
+- **测试与开发体验**：新增 `tests/` 与 `requirements-dev.txt`；`--verify` 改为编码安全输出，Windows/GBK 终端不会因 emoji 崩溃。
 
 ---
 
@@ -114,6 +144,15 @@ python -m sysdialogue.app.cli --verify
 # 演示模式（不调 API）— 本地跑 security_audit 工作流展示引擎
 python -m sysdialogue.app.cli --demo
 
+# 轻量命令行模式（需 API Key）
+python -m sysdialogue.app.cli --simple
+
+# Web 控制台（需 API Key）
+python -m sysdialogue.app.cli --web --host 127.0.0.1 --port 8000
+
+# cron/调度器回调入口
+python -m sysdialogue.app.cli --run-scheduled-job <job_id>
+
 # 启动 TUI（需 ANTHROPIC_API_KEY）
 export ANTHROPIC_API_KEY=...
 python -m sysdialogue.app.cli
@@ -211,6 +250,15 @@ class SafetyDecision:
 
 ## 已知限制与设计取舍（真机验证时注意）
 
+> 2026-04-23 更正：下面这组清单是早期交接时记录的“待补缺口”，其中远程 backup/hosts、真实 cron 安装、authorized_keys fingerprint 删除、WH025、iptables `-D` 路径都已经完成。后续判断请以本节新增说明和仓库当前实现为准，不要再把下面旧条目当成现状。
+>
+> 当前真实限制主要是：
+> 1. Linux 真机端到端验收仍未完成，尤其是 `safe_config_patch` / `rollback_config` / `container_rollout` / `scheduled_health_check`。
+> 2. 远程 `cron.d` 权限、不同发行版行为、SSH 靶机锁门规则仍需真机复核。
+> 3. Web 会话目前是进程内存态，没有单独数据库持久化。
+> 4. Windows 本地 `--demo` 按设计返回 unsupported，需要在 Linux 本机或 `--remote` 到 Linux 主机上跑完整演示。
+> 5. `kill_process` 依然采用保守 WARN-HIGH 判定。
+
 以下项为**当前实现的已知缺口**，不影响核心通路但需要在真机环境或演示时留意：
 
 1. **`backup_restore.py` 仅支持本地模式**：`backup_path` 直接操作本机 `~/.sysdialogue/backups/`，远程 SSH 模式下备份的是**控制端**而非目标机文件。若需远程备份，应改为通过 executor 执行 `tar czf` 并落在目标机。
@@ -225,6 +273,15 @@ class SafetyDecision:
 ---
 
 ## 验证状态（本轮 mock 测试总计 39+ 项全部通过）
+
+> 2026-04-23 最新验证结论：
+> - 新增/修改的 controller/runtime/tools/ui/web/tests 已全部 `py_compile` 通过。
+> - `python -m sysdialogue.app.cli --verify` 在当前 Windows/GBK 终端可稳定输出，不再因 emoji 崩溃；当前仅因缺少 `ANTHROPIC_API_KEY` 返回 1。
+> - `python -m sysdialogue.app.cli --demo` 在当前 Windows 本地会明确返回 unsupported host，而不是 workflow 失败。
+> - `python -c "from sysdialogue.web.app import create_web_app ..."` 已确认 Web app 可构建并注册路由。
+> - `pytest` 当前 7 项测试全部通过，覆盖 WH025 升级、私网重定向拦截、authorized_keys fingerprint 删除、cron 安装、iptables delete、CapabilityProbe cron 能力判定。
+>
+> 下方表格是历史 mock 验证记录，可保留参考，但不应替代上面的最新结论。
 
 | 层 | 验证内容 |
 |---|---|
@@ -264,6 +321,8 @@ d3c29a5 feat: 项目脚手架 — pyproject.toml, requirements, package structur
 ---
 
 ## 下一步建议
+
+> 2026-04-23 更正：当前不再是“设计内已无空缺”的纯演示阶段，代码层面对齐工作已完成主线，但仍需要 Linux 真机验收和少量展示层补强。以下列表继续作为后续推进建议。
 
 已无**设计内**的功能空缺。剩余工作都是真机验证与演示层面：
 

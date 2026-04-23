@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
-import re
-from pathlib import Path
-
+import base64
+import hashlib
 from sysdialogue.runtime.secure_runner import SafeExecutor
+from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
 
 _PUBLIC_KEY_PREFIXES = (
@@ -21,15 +20,28 @@ def _is_public_key(s: str) -> bool:
     return any(s.startswith(p) for p in _PUBLIC_KEY_PREFIXES)
 
 
-def _auth_keys_path(username: str) -> Path | None:
+def _public_key_fingerprint(public_key: str) -> str | None:
     try:
-        import pwd
-        pw = pwd.getpwnam(username)
-        return Path(pw.pw_dir) / ".ssh" / "authorized_keys"
-    except (ImportError, KeyError):
-        if username == "root":
-            return Path("/root/.ssh/authorized_keys")
-        return Path(f"/home/{username}/.ssh/authorized_keys")
+        parts = public_key.strip().split()
+        if len(parts) < 2:
+            return None
+        blob = base64.b64decode(parts[1].encode("ascii"))
+        digest = hashlib.sha256(blob).digest()
+        encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+        return f"SHA256:{encoded}"
+    except Exception:
+        return None
+
+
+def _auth_keys_path(executor: SafeExecutor, username: str) -> str:
+    out, code = executor.run(["getent", "passwd", username], timeout=5)
+    if code == 0 and out:
+        entry = out.splitlines()[0].split(":")
+        if len(entry) >= 6 and entry[5]:
+            return f"{entry[5]}/.ssh/authorized_keys"
+    if username == "root":
+        return "/root/.ssh/authorized_keys"
+    return f"/home/{username}/.ssh/authorized_keys"
 
 
 def manage_authorized_keys(
@@ -43,53 +55,57 @@ def manage_authorized_keys(
     if username == "root" and action in ("add", "remove"):
         return ToolResult(success=False, error="禁止通过自动化通路修改 root 公钥（B028）")
 
-    key_path = _auth_keys_path(username)
-    if key_path is None:
-        return ToolResult(success=False, error=f"无法确定用户 {username} 的 authorized_keys 路径")
+    fs = TargetFileAccess(executor)
+    key_path = _auth_keys_path(executor, username)
+    key_dir = fs.dirname(key_path)
 
     if action == "list":
-        cmd = ["cat", str(key_path)]
-        out, code = executor.run(cmd, timeout=5)
-        if code != 0:
-            return ToolResult(success=True, data="（无授权公钥）", cmd_trace=[" ".join(cmd)])
-        return ToolResult(success=True, data=out, cmd_trace=[" ".join(cmd)])
+        if not fs.exists(key_path):
+            return ToolResult(success=True, data="（无授权公钥）", cmd_trace=[f"target_fs.read_text {key_path}"])
+        out = fs.read_text(key_path, encoding="utf-8", errors="replace")
+        return ToolResult(success=True, data=out, cmd_trace=[f"target_fs.read_text {key_path}"])
 
     if action == "add":
         if not public_key:
             return ToolResult(success=False, error="add 需要 public_key 参数")
         if not _is_public_key(public_key):
             return ToolResult(success=False, error="输入内容不是有效公钥格式（B023）")
-        # 确保目录存在
-        cmd_mkdir = ["mkdir", "-p", str(key_path.parent)]
-        executor.run(cmd_mkdir, timeout=5)
-        cmd_chmod = ["chmod", "700", str(key_path.parent)]
-        executor.run(cmd_chmod, timeout=5)
-        # 追加公钥（避免重复）
-        read_cmd = ["cat", str(key_path)]
-        existing, _ = executor.run(read_cmd, timeout=5)
+        fs.mkdir(key_dir, parents=True)
+        fs.chmod(key_dir, 0o700)
+        existing = fs.read_text(key_path, encoding="utf-8", errors="replace") if fs.exists(key_path) else ""
         pk = public_key.strip()
-        if pk in existing:
+        existing_lines = [line.strip() for line in existing.splitlines() if line.strip()]
+        if pk in existing_lines:
             return ToolResult(success=True, data="公钥已存在，无需重复添加")
-        cmd = ["bash", "-c", f"echo {repr(pk)} >> {key_path}"]
-        out, code = executor.run(cmd, timeout=5)
-        return ToolResult(success=(code == 0), data="公钥已添加" if code == 0 else out, cmd_trace=[" ".join(cmd)])
+        content = existing
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += pk + "\n"
+        fs.write_text(key_path, content, atomic=True)
+        fs.chmod(key_path, 0o600)
+        return ToolResult(success=True, data="公钥已添加", cmd_trace=[f"target_fs.write_text {key_path}"])
 
     if action == "remove":
         if not public_key and not fingerprint:
             return ToolResult(success=False, error="remove 需要 public_key 或 fingerprint 参数")
-        cmd = ["cat", str(key_path)]
-        existing, code = executor.run(cmd, timeout=5)
-        if code != 0:
+        if not fs.exists(key_path):
             return ToolResult(success=False, error="authorized_keys 文件不存在或不可读")
+        existing = fs.read_text(key_path, encoding="utf-8", errors="replace")
+        lines = existing.splitlines()
         if public_key:
-            new_content = "\n".join(l for l in existing.splitlines() if public_key.strip() not in l)
+            new_lines = [line for line in lines if public_key.strip() not in line]
         else:
-            new_content = existing  # fingerprint 删除需要 ssh-keygen -l 比对，暂简化
-        tmp = str(key_path) + ".tmp"
-        cmd_write = ["bash", "-c", f"cat > {tmp} << 'ENDSSHKEYS'\n{new_content}\nENDSSHKEYS"]
-        executor.run(cmd_write, timeout=5)
-        cmd_mv = ["mv", tmp, str(key_path)]
-        out, code = executor.run(cmd_mv, timeout=5)
-        return ToolResult(success=(code == 0), data="公钥已移除" if code == 0 else out, cmd_trace=[" ".join(cmd_mv)])
+            wanted = fingerprint.strip()
+            new_lines = []
+            for line in lines:
+                line_fp = _public_key_fingerprint(line)
+                if line_fp != wanted:
+                    new_lines.append(line)
+        new_content = "\n".join(line for line in new_lines if line.strip())
+        if new_content:
+            new_content += "\n"
+        fs.write_text(key_path, new_content, atomic=True)
+        fs.chmod(key_path, 0o600)
+        return ToolResult(success=True, data="公钥已移除", cmd_trace=[f"target_fs.write_text {key_path}"])
 
     return ToolResult(success=False, error=f"未知 action: {action}")

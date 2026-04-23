@@ -1,12 +1,4 @@
-"""SysDialogue TUI 主界面 — 五区布局 + 快捷键 + AgentController 后台线程驱动。
-
-区域：
-  1. 顶部：标题栏 + 快捷键提示
-  2. 主区：对话历史（RichLog）
-  3. 输入区：单行文本输入
-  4. 右侧：可切换审计/环境面板（F3/F4）
-  5. 底部：状态栏（idle / thinking / confirming）
-"""
+"""SysDialogue TUI main interface."""
 
 from __future__ import annotations
 
@@ -16,12 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Vertical
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
+from sysdialogue.ui.input_modal import InputModal
 
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
@@ -29,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class SysDialogueTUI(App):
-    """SysDialogue v6 TUI 主应用。"""
+    """SysDialogue v6 Textual application."""
 
     CSS = """
     Screen {
@@ -55,10 +48,6 @@ class SysDialogueTUI(App):
         border: round $primary 40%;
         padding: 0 1;
     }
-    #input_area {
-        height: 3;
-        padding: 0 1;
-    }
     #status_bar {
         height: 1;
         background: $primary 20%;
@@ -69,30 +58,30 @@ class SysDialogueTUI(App):
     BINDINGS = [
         Binding("f3", "toggle_audit", "审计"),
         Binding("f4", "toggle_env", "环境"),
-        Binding("ctrl+c", "quit", "退出"),
+        Binding("ctrl+c", "cancel_current", "取消"),
+        Binding("ctrl+d", "quit", "退出"),
         Binding("ctrl+l", "clear_log", "清屏"),
     ]
 
     def __init__(self, controller: "AgentController"):
         super().__init__()
         self.controller = controller
-        # 注入交互回调
         controller.confirm_callback = self._confirm_callback
         controller.input_callback = self._input_callback
-        self._right_panel_mode = "audit"  # "audit" | "env"
+        self._right_panel_mode = "audit"
         self._worker: threading.Thread | None = None
-
-    # ------------------------------------------------------------------
-    # 布局
-    # ------------------------------------------------------------------
+        self._confirm_state: dict[str, Any] | None = None
+        self._input_state: dict[str, Any] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Container(
             Vertical(
                 RichLog(id="conversation", highlight=True, markup=True, wrap=True),
-                Input(placeholder="输入运维需求（例：查看系统版本 / 重启 nginx）…",
-                      id="user_input"),
+                Input(
+                    placeholder="输入运维需求（例：查看系统版本 / 重启 nginx）…",
+                    id="user_input",
+                ),
                 id="left_pane",
             ),
             Vertical(
@@ -107,39 +96,23 @@ class SysDialogueTUI(App):
     def on_mount(self) -> None:
         self.title = "SysDialogue v6"
         self.sub_title = "Linux 运维智能代理"
-        log = self.query_one("#conversation", RichLog)
-        log.write(
+        self._write_log(
             "[bold cyan]欢迎使用 SysDialogue v6[/bold cyan]\n"
             "输入自然语言运维需求，Enter 发送。\n"
-            "F3 切换审计面板 / F4 切换环境画像 / Ctrl+C 退出。\n"
+            "F3 切换审计面板 / F4 切换环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。\n"
         )
         self.query_one("#user_input", Input).focus()
 
-    # ------------------------------------------------------------------
-    # 输入处理
-    # ------------------------------------------------------------------
-
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # 如果正在 workflow input 劫持中，优先处理
-        if self._input_hijack is not None:
-            hijack = self._input_hijack
-            self._input_hijack = None
-            try:
-                hijack(event)
-            except Exception as e:
-                log = self.query_one("#conversation", RichLog)
-                log.write(f"[red]input hijack 异常：{e}[/red]")
+        if event.input.id != "user_input":
             return
 
         text = (event.value or "").strip()
         if not text:
             return
         event.input.value = ""
+        self._write_log(f"[bold green]> 你:[/bold green] {text}")
 
-        log = self.query_one("#conversation", RichLog)
-        log.write(f"[bold green]> 你:[/bold green] {text}")
-
-        # 禁用输入，开后台线程
         event.input.disabled = True
         self._set_status("思考中…")
 
@@ -154,18 +127,23 @@ class SysDialogueTUI(App):
         self._worker.start()
 
     def _on_turn_done(self, reply: str) -> None:
-        log = self.query_one("#conversation", RichLog)
-        log.write(f"[bold magenta]SysDialogue:[/bold magenta] {reply}\n")
-        # 刷新审计面板
+        self._worker = None
+        self._write_log(f"[bold magenta]SysDialogue:[/bold magenta] {reply}\n")
+        self._refresh_audit_panel()
+        input_box = self.query_one("#user_input", Input)
+        input_box.disabled = False
+        input_box.focus()
+        self._set_status("就绪")
+
+    def _write_log(self, text: str) -> None:
+        self.query_one("#conversation", RichLog).write(text)
+
+    def _refresh_audit_panel(self) -> None:
         try:
-            ap = self.query_one(AuditPanel)
-            ap.refresh_data()
+            panel = self.query_one(AuditPanel)
+            panel.refresh_data()
         except Exception:
             pass
-        inp = self.query_one("#user_input", Input)
-        inp.disabled = False
-        inp.focus()
-        self._set_status("就绪")
 
     def _set_status(self, text: str) -> None:
         try:
@@ -173,58 +151,121 @@ class SysDialogueTUI(App):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # 交互回调（供 AgentController / WorkflowEngine 使用）
-    # ------------------------------------------------------------------
+    def _refresh_runtime_status(self) -> None:
+        if self.controller.is_cancel_requested():
+            self._set_status("取消中…")
+        elif self._confirm_state is not None:
+            self._set_status("等待确认")
+        elif self._input_state is not None:
+            self._set_status("等待输入")
+        elif self._worker is not None and self._worker.is_alive():
+            self._set_status("思考中…")
+        else:
+            self._set_status("就绪")
 
     def _confirm_callback(self, req: "ConfirmationRequest") -> bool:
-        """同步回调：在 worker 线程中被调用，通过 event 阻塞等 modal 返回。"""
         event = threading.Event()
-        result: dict[str, Any] = {"ok": False}
+        result: dict[str, bool] = {"ok": False}
+        state: dict[str, Any] = {
+            "event": event,
+            "result": result,
+            "resolved": False,
+            "screen": None,
+        }
+        self._confirm_state = state
 
         def show() -> None:
+            if state["resolved"]:
+                return
+            self._write_log(
+                f"[yellow]需要确认:[/yellow] {req.tool} ({req.risk.level})"
+            )
+            self._refresh_runtime_status()
+            modal = ConfirmModal(req)
+            state["screen"] = modal
+
             def on_close(approved: bool | None) -> None:
-                result["ok"] = bool(approved)
-                event.set()
-            self.push_screen(ConfirmModal(req), on_close)
+                self._resolve_confirm_state(bool(approved), state=state)
+
+            self.push_screen(modal, on_close)
 
         self.call_from_thread(show)
         event.wait()
         return result["ok"]
 
     def _input_callback(self, prompt: str, multiline: bool) -> str:
-        """同步 input 回调：TUI 下通过 prompt 在对话区展示，等待用户下一次 Input 提交。
-
-        简化实现：一次性请求，不支持多行。后续可换为 Modal 对话框。
-        """
         event = threading.Event()
         result: dict[str, str] = {"value": ""}
+        state: dict[str, Any] = {
+            "event": event,
+            "result": result,
+            "resolved": False,
+            "screen": None,
+        }
+        self._input_state = state
 
         def show() -> None:
-            log = self.query_one("#conversation", RichLog)
-            log.write(f"[yellow]🔸 请输入:[/yellow] {prompt}")
+            if state["resolved"]:
+                return
+            mode = "多行" if multiline else "单行"
+            self._write_log(f"[yellow]需要输入:[/yellow] {prompt} ({mode})")
+            self._refresh_runtime_status()
+            modal = InputModal(prompt=prompt, multiline=multiline)
+            state["screen"] = modal
 
-            inp = self.query_one("#user_input", Input)
-            # 临时把 Input 的 submitted 事件处理劫持到这里
-            def on_submit(ev: Input.Submitted) -> None:
-                result["value"] = ev.value or ""
-                ev.input.value = ""
-                event.set()
-                # 取消劫持
-                self._input_hijack = None
+            def on_close(value: str | None) -> None:
+                self._resolve_input_state(value or "", state=state)
 
-            self._input_hijack = on_submit
+            self.push_screen(modal, on_close)
 
         self.call_from_thread(show)
-        event.wait(timeout=300)  # 最长等 5 分钟
+        if not event.wait(timeout=300):
+            self.call_from_thread(lambda: self._resolve_input_state("", state=state, dismiss=True))
         return result["value"]
 
-    # 默认劫持为 None；on_input_submitted 先检查
-    _input_hijack: Any = None
+    def _resolve_confirm_state(
+        self,
+        approved: bool,
+        *,
+        state: dict[str, Any] | None = None,
+        dismiss: bool = False,
+    ) -> None:
+        current = state or self._confirm_state
+        if current is None or current["resolved"]:
+            return
+        current["resolved"] = True
+        current["result"]["ok"] = bool(approved)
+        if dismiss and current.get("screen") is not None:
+            try:
+                current["screen"].dismiss(bool(approved))
+            except Exception:
+                pass
+        current["event"].set()
+        if self._confirm_state is current:
+            self._confirm_state = None
+        self._refresh_runtime_status()
 
-    # ------------------------------------------------------------------
-    # 快捷键动作
-    # ------------------------------------------------------------------
+    def _resolve_input_state(
+        self,
+        value: str,
+        *,
+        state: dict[str, Any] | None = None,
+        dismiss: bool = False,
+    ) -> None:
+        current = state or self._input_state
+        if current is None or current["resolved"]:
+            return
+        current["resolved"] = True
+        current["result"]["value"] = value
+        if dismiss and current.get("screen") is not None:
+            try:
+                current["screen"].dismiss(value)
+            except Exception:
+                pass
+        current["event"].set()
+        if self._input_state is current:
+            self._input_state = None
+        self._refresh_runtime_status()
 
     def action_toggle_audit(self) -> None:
         self._switch_right_panel("audit")
@@ -232,18 +273,34 @@ class SysDialogueTUI(App):
     def action_toggle_env(self) -> None:
         self._switch_right_panel("env")
 
+    def action_cancel_current(self) -> None:
+        busy = (
+            (self._worker is not None and self._worker.is_alive())
+            or self._confirm_state is not None
+            or self._input_state is not None
+        )
+        if not busy:
+            self._write_log("[yellow]当前没有正在执行的任务。[/yellow]")
+            return
+
+        self.controller.request_cancel()
+        self._write_log("[yellow]已请求取消当前执行。[/yellow]")
+        self._set_status("取消中…")
+        self._resolve_confirm_state(False, dismiss=True)
+        self._resolve_input_state("", dismiss=True)
+
     def _switch_right_panel(self, mode: str) -> None:
         right = self.query_one("#right_pane", Vertical)
         right.remove_children()
         if mode == "env":
             right.mount(EnvPanel(self.controller.env_profile))
             self._right_panel_mode = "env"
-        else:
-            ap = AuditPanel(self.controller.audit_log)
-            right.mount(ap)
-            # mount 完成后刷新数据
-            self.call_later(ap.refresh_data)
-            self._right_panel_mode = "audit"
+            return
+
+        panel = AuditPanel(self.controller.audit_log)
+        right.mount(panel)
+        self.call_later(panel.refresh_data)
+        self._right_panel_mode = "audit"
 
     def action_clear_log(self) -> None:
         self.query_one("#conversation", RichLog).clear()
@@ -253,6 +310,6 @@ class SysDialogueTUI(App):
 
 
 def run_tui(controller: "AgentController") -> None:
-    """对外入口：用给定 controller 启动 TUI。"""
+    """Launch the TUI with the provided controller."""
     app = SysDialogueTUI(controller)
     app.run()

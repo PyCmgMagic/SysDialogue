@@ -15,6 +15,8 @@ dependencies = [
     "pyyaml>=6.0.1",
     "filelock>=3.13.0",
     "jinja2>=3.1.4",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
     "rich>=13.7.0",
     "click>=8.1.7",
     "python-dotenv>=1.0.1",
@@ -22,6 +24,11 @@ dependencies = [
 
 [project.scripts]
 sysdialogue = "sysdialogue.app.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

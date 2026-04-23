@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 from sysdialogue.runtime.secure_runner import SafeExecutor
+from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
 
 HOSTS_FILE = "/etc/hosts"
-_PROTECTED = {("127.0.0.1", "localhost"), ("::1", "localhost")}
 
 
 def manage_hosts_entries(
@@ -20,18 +17,22 @@ def manage_hosts_entries(
     comment: str | None = None,
 ) -> ToolResult:
     """管理 /etc/hosts 条目（list/add/update/delete）。"""
+    fs = TargetFileAccess(executor)
+    hosts_path = fs.expand(HOSTS_FILE)
+
     if action == "list":
-        cmd = ["cat", HOSTS_FILE]
-        out, code = executor.run(cmd, timeout=5)
-        return ToolResult(success=(code == 0), data=out, cmd_trace=[" ".join(cmd)])
+        try:
+            content = fs.read_text(hosts_path, encoding="utf-8", errors="replace")
+        except Exception as e:
+            return ToolResult(success=False, error=str(e))
+        return ToolResult(success=True, data=content, cmd_trace=[f"target_fs.read_text {hosts_path}"])
 
     # 受保护条目检查
     if hostname and hostname.lower() == "localhost":
         return ToolResult(success=False, error="禁止修改 localhost 受保护条目（B024）")
 
-    p = Path(HOSTS_FILE)
     try:
-        content = p.read_text(encoding="utf-8")
+        content = fs.read_text(hosts_path, encoding="utf-8", errors="replace")
     except Exception as e:
         return ToolResult(success=False, error=str(e))
 
@@ -63,23 +64,16 @@ def manage_hosts_entries(
     else:
         return ToolResult(success=False, error=f"未知 action: {action}")
 
-    tmp = HOSTS_FILE + ".tmp"
     try:
-        import os
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        os.replace(tmp, HOSTS_FILE)
+        fs.write_text(hosts_path, new_content, atomic=True)
     except Exception as e:
-        # 清理残留的 .tmp 文件，避免磁盘泄漏
-        try:
-            import os as _os
-            if _os.path.exists(tmp):
-                _os.unlink(tmp)
-        except OSError:
-            pass
         return ToolResult(success=False, error=str(e))
 
-    return ToolResult(success=True, data=f"/etc/hosts {action} 成功")
+    return ToolResult(
+        success=True,
+        data=f"{hosts_path} {action} 成功",
+        cmd_trace=[f"target_fs.write_text {hosts_path}"],
+    )
 
 
 def _line_matches(line: str, hostname: str) -> bool:

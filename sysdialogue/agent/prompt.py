@@ -70,15 +70,21 @@ def build_system_prompt(
     env_sanitized: dict,
     registry: "ToolRegistry",
     competition_mode: bool = True,
+    context_summary: str | None = None,
 ) -> str:
     """构造注入 Claude 的 system prompt。"""
-    return "\n\n".join([
+    sections = [
         "你是 SysDialogue，一个面向 Linux 服务器运维场景的操作系统智能代理。"
         "用户用自然语言描述运维需求，你在受控工具体系内规划并执行，所有操作经过安全门和审计。",
         _HARD_CONSTRAINTS,
         _render_env_profile(env_sanitized),
+    ]
+    if context_summary:
+        sections.append("【跨轮可复用上下文】\n" + context_summary)
+    sections.extend([
         _EXECUTION_MODE_RULES,
         _SAFETY_SUMMARY,
         _competition_note(competition_mode),
         _render_tools(registry),
     ])
+    return "\n\n".join(sections)

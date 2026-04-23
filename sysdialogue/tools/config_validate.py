@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import yaml
 
 from sysdialogue.runtime.secure_runner import SafeExecutor
+from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
 
 _SUPPORTED_TYPES = {
@@ -22,8 +22,9 @@ def validate_config(
     target_type: str = "auto",
 ) -> ToolResult:
     """校验配置文件语法。"""
-    p = Path(path)
-    if not p.exists():
+    fs = TargetFileAccess(executor)
+    target_path = fs.expand(path)
+    if not fs.exists(target_path):
         return ToolResult(success=False, error=f"文件不存在：{path}")
 
     if target_type == "auto":
@@ -32,7 +33,7 @@ def validate_config(
     traces: list[str] = []
 
     if target_type == "nginx":
-        cmd = ["nginx", "-t", "-c", path]
+        cmd = ["nginx", "-t", "-c", target_path]
         out, code = executor.run(cmd, timeout=10)
         traces.append(" ".join(cmd))
         return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=traces)
@@ -44,19 +45,19 @@ def validate_config(
         return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=traces)
 
     if target_type == "sshd":
-        cmd = ["sshd", "-t", "-f", path]
+        cmd = ["sshd", "-t", "-f", target_path]
         out, code = executor.run(cmd, timeout=10)
         traces.append(" ".join(cmd))
         return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=traces)
 
     if target_type == "sudoers":
-        cmd = ["visudo", "-c", "-f", path]
+        cmd = ["visudo", "-c", "-f", target_path]
         out, code = executor.run(cmd, timeout=10)
         traces.append(" ".join(cmd))
         return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=traces)
 
     if target_type == "systemd-unit":
-        cmd = ["systemd-analyze", "verify", path]
+        cmd = ["systemd-analyze", "verify", target_path]
         out, code = executor.run(cmd, timeout=10)
         traces.append(" ".join(cmd))
         return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=traces)
@@ -69,17 +70,17 @@ def validate_config(
 
     if target_type == "json":
         try:
-            content = p.read_text(encoding="utf-8")
+            content = fs.read_text(target_path, encoding="utf-8", errors="replace")
             json.loads(content)
-            return ToolResult(success=True, data="JSON 语法合法", cmd_trace=[])
+            return ToolResult(success=True, data="JSON 语法合法", cmd_trace=[f"target_fs.read_text {target_path}"])
         except json.JSONDecodeError as e:
             return ToolResult(success=False, error=f"JSON 解析错误：{e}", cmd_trace=[])
 
     if target_type == "yaml":
         try:
-            content = p.read_text(encoding="utf-8")
+            content = fs.read_text(target_path, encoding="utf-8", errors="replace")
             yaml.safe_load(content)
-            return ToolResult(success=True, data="YAML 语法合法", cmd_trace=[])
+            return ToolResult(success=True, data="YAML 语法合法", cmd_trace=[f"target_fs.read_text {target_path}"])
         except yaml.YAMLError as e:
             return ToolResult(success=False, error=f"YAML 解析错误：{e}", cmd_trace=[])
 
@@ -92,9 +93,9 @@ def validate_config(
             except ImportError:
                 return ToolResult(success=False, error="tomllib/tomli 未安装，无法校验 TOML")
         try:
-            content = p.read_bytes()
+            content = fs.read_bytes(target_path)
             tomllib.loads(content.decode())
-            return ToolResult(success=True, data="TOML 语法合法", cmd_trace=[])
+            return ToolResult(success=True, data="TOML 语法合法", cmd_trace=[f"target_fs.read_bytes {target_path}"])
         except Exception as e:
             return ToolResult(success=False, error=f"TOML 解析错误：{e}", cmd_trace=[])
 

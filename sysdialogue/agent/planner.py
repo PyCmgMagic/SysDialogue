@@ -112,7 +112,12 @@ class PlanningEngine:
                 continue
 
             # 风险预判定
-            decision = classify(step.tool, step.args, self.controller.env_profile)
+            decision = classify(
+                step.tool,
+                step.args,
+                self.controller.env_profile,
+                session_counters=self.controller._session_counters,
+            )
             step.actual_risk = decision.level
             step.rule_ids = decision.rule_ids
             step.reason = decision.reason

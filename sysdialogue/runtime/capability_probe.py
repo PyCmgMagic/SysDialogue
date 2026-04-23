@@ -252,10 +252,8 @@ class CapabilityProbe:
 
         p["config_validators"] = validators
 
-        out, code = self._run(["crontab", "-l"])
-        p["supports_system_cron"] = True  # crontab 工具本身存在即认为支持
-
         avail = p.get("available_cmds", {})
+        p["supports_system_cron"] = bool(avail.get("crontab"))
         p["mount_capable"] = bool(avail.get("mount"))
 
     def _probe_dns_tools(self, p: EnvProfile) -> None:

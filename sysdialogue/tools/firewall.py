@@ -135,8 +135,15 @@ def _iptables(executor, action, target, direction, policy) -> ToolResult:
         chain = "INPUT" if direction == "in" else "OUTPUT"
         pol = (policy or "DROP").upper()
         cmd = ["iptables", "-P", chain, pol]
-    elif action in ("allow", "deny"):
-        op = "-A" if action == "allow" else "-I"
+    elif action in ("allow", "deny", "delete"):
+        if action == "delete" and not target:
+            return ToolResult(success=False, error="iptables delete 需要 target 参数")
+        if action == "allow":
+            op = "-A"
+        elif action == "deny":
+            op = "-I"
+        else:
+            op = "-D"
         chain = "INPUT" if direction == "in" else "OUTPUT"
         cmd = ["iptables", op, chain]
         if target:
@@ -147,7 +154,13 @@ def _iptables(executor, action, target, direction, policy) -> ToolResult:
                 cmd += ["-s", source]
             if port:
                 cmd += ["-p", proto, "--dport", str(port)]
-            jump = "-j ACCEPT" if action == "allow" else "-j DROP"
+            if action != "delete" and target.get("service") and not port:
+                return ToolResult(success=False, error="iptables 规则变更需要明确 port 参数")
+            if action == "delete":
+                delete_policy = (policy or "drop").upper()
+                jump = f"-j {'ACCEPT' if delete_policy == 'ACCEPT' else delete_policy}"
+            else:
+                jump = "-j ACCEPT" if action == "allow" else "-j DROP"
             cmd += jump.split()
     else:
         return ToolResult(success=False, error=f"iptables 不支持 {action}")
