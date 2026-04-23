@@ -322,7 +322,9 @@ python -m sysdialogue.app.cli --web --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000
 ```
 
-远程目标机：
+连接远程目标机时，Web 服务仍然启动在当前控制端本机；`--remote` 只表示后端工具通过 SSH/SFTP 作用于目标 Linux 主机，不需要在目标机上单独启动 Web 服务。
+
+本机 Web 控制台连接远程目标机：
 
 ```powershell
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519 --web --host 127.0.0.1 --port 8000
