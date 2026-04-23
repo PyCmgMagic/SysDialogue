@@ -3,7 +3,9 @@
     "allow": [
       "Bash(dir \"D:\\\\project\\\\Nexus\\\\Nexus\")",
       "Read(//mnt/d/project/Nexus/**)",
-      "Read(//Users/**)"
+      "Read(//Users/**)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
