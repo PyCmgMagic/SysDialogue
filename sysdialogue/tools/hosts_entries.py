@@ -63,13 +63,20 @@ def manage_hosts_entries(
     else:
         return ToolResult(success=False, error=f"未知 action: {action}")
 
+    tmp = HOSTS_FILE + ".tmp"
     try:
-        tmp = HOSTS_FILE + ".tmp"
         import os
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(new_content)
         os.replace(tmp, HOSTS_FILE)
     except Exception as e:
+        # 清理残留的 .tmp 文件，避免磁盘泄漏
+        try:
+            import os as _os
+            if _os.path.exists(tmp):
+                _os.unlink(tmp)
+        except OSError:
+            pass
         return ToolResult(success=False, error=str(e))
 
     return ToolResult(success=True, data=f"/etc/hosts {action} 成功")

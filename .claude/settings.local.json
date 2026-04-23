@@ -5,7 +5,9 @@
       "Read(//mnt/d/project/Nexus/**)",
       "Read(//Users/**)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python *)",
+      "Bash(pip install *)"
     ]
   }
 }
