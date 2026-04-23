@@ -24,12 +24,17 @@
 6. 动态工具机制（DynTool）
 7. EnvProfile 完整定义
 8. 安全规则全量
-9. 工作流体系
+9. 工作流体系（含 9.5 资源锁与并发控制）
 10. 关键 Schema 设计
 11. 模块文件清单
 12. 开发优先级
 13. 演示场景设计
 14. 结论
+15. 系统解释策略与输出处理
+16. 交互形态与用户体验
+17. 测试与验证方案
+18. 失败策略
+19. 提交材料清单
 
 ---
 
@@ -802,7 +807,7 @@ def assess_cmd(cmd, env_profile) -> LockoutRisk:
 
 ## 九、工作流体系
 
-### 9.1 Workflow Schema（v5.3 扩展后支持四种 step type）
+### 9.1 Workflow Schema（v5.3 扩展后支持五种 step type）
 
 ```yaml
 name: 模板名称
@@ -980,11 +985,11 @@ steps:
      args: {path: "{{file_path}}", search: "{{search_text}}", replace: "{{replace_text}}", create_backup: false, expected_matches: 1},
      depends_on: [s5], lock_scope: "file:{{file_path}}", on_fail: rollback}
   - {id: s7, type: tool_call, tool: validate_config, args: {target_type: "{{validator}}", path: "{{file_path}}"}, depends_on: [s6], on_fail: rollback}
-  - {id: s8, type: tool_call, tool: manage_service, args: {action: reload, name: "{{service_name}}"}, depends_on: [s7], condition: "{{service_name is not none}}", on_fail: rollback}
+  - {id: s8, type: tool_call, tool: manage_service, args: {action: reload, name: "{{service_name}}"}, depends_on: [s7], condition: "{{service_name is not none and service_name != ''}}", on_fail: rollback}
   # s9 同时依赖 s7（保证校验通过）和 s8（若 s8 被 condition 跳过，按"已完成"处理，s9 自身 condition 控制是否执行）
   - {id: s9, type: tool_call, tool: check_endpoint,
      args: {kind: "{{verify_kind}}", host: "{{verify_host}}", port: {{verify_port}}},
-     depends_on: [s7, s8], condition: "{{verify_host is not none and verify_port is not none}}", on_fail: rollback}
+     depends_on: [s7, s8], condition: "{{verify_host is not none and verify_host != '' and verify_port is not none}}", on_fail: rollback}
 
 rollback:
   - {id: r1, type: tool_call, tool: backup_path, args: {action: restore, backup_id: "{{s5.result.backup_id}}", path: "{{file_path}}"}, on_fail: continue}
@@ -1056,7 +1061,7 @@ final:
 
 #### `scheduled_health_check.yaml` — 定时健康巡检
 
-执行顺序：**创建 workflow 型 cron 任务 → 周期性执行 check_endpoint**
+执行顺序：**创建 tool 型 cron 任务（周期调用 `check_endpoint`）**
 
 ```yaml
 name: 定时健康巡检
@@ -1080,6 +1085,29 @@ steps:
     depends_on: [s1]
   - {id: s3, type: display, template: "已创建计划任务（ID: {{s2.result.job_id}}），将按 {{schedule}} 定期检查 {{endpoint_host}}:{{endpoint_port}}。", depends_on: [s2]}
 ```
+
+### 9.5 资源锁与并发控制
+
+为避免多轮会话或并发请求对同一资源重复写入，WorkflowEngine 在执行变更型步骤前申请资源锁，步骤完成（含回滚链全部执行完）后释放。
+
+**锁作用域格式与适用对象：**
+
+| 锁类型 | 格式 | 典型触发工具 |
+|---|---|---|
+| 文件锁 | `file:/path/to/file` | `write_file`、`replace_in_file`、`backup_path(restore)` |
+| 服务锁 | `service:<name>` | `manage_service(start\|stop\|restart\|reload\|enable\|disable)` |
+| 用户锁 | `user:<username>` | `create_user`、`delete_user`、`modify_user_groups`、`manage_authorized_keys` |
+| 计划任务锁 | `cron:<job_id>` | `manage_cron(update\|delete\|enable\|disable)` |
+
+**锁语义约定：**
+
+- 同一锁作用域上，不允许同时有两个变更型 step 持有锁；
+- 只读操作（`read_file`、`manage_service(status)`、`list_*`）不持锁，不阻塞；
+- 锁在 `on_fail: rollback` 的回滚链全部完成后才释放；
+- 申请锁超时（默认 30s）时，当前 step 以 `FAILED`（reason: `resource_locked`）终止，WorkflowEngine 向用户报告资源被占用并提示稍后手动重试；不复用 `NEED_INFO`（后者专指参数不足或目标不明确）；
+- 锁记录写入 AuditLog，锁 ID 与 `plan_id` / `workflow_id` 关联，便于调试溯源。
+
+> Workflow Schema（见 9.1 节）中 step 的 `lock_scope` 字段是 WorkflowEngine 向锁管理器申请锁的语义声明，不是可选标签——凡 step 定义了 `lock_scope`，执行前必须持有对应锁。
 
 ---
 
@@ -1434,7 +1462,7 @@ P3（体验与审计增强）
 
 ## 十四、结论
 
-v5.4 将静态工具面从 12 个（v4.1）扩展到 37 个，完整覆盖了以下运维能力层次：
+v6 在 v5.4 基础上完成三轮安全审计修复，静态工具面维持 37 个，完整覆盖以下运维能力层次：
 
 | 能力层次 | 具体能力 | 工具编号 |
 |---|---|---|
@@ -1446,7 +1474,7 @@ v5.4 将静态工具面从 12 个（v4.1）扩展到 37 个，完整覆盖了以
 | 系统维护 | 计划任务、sysctl、归档、挂载 | 28-29, 32-33 |
 | 现代运维 | 容器、SSH 公钥、hosts、重启关机 | 34-37 |
 
-配合 10 个内置工作流（覆盖配置变更闭环、用户管理、容器发布、周期巡检），SysDialogue v5.4 实现了：
+配合 10 个内置工作流（覆盖配置变更闭环、用户管理、容器发布、周期巡检），SysDialogue v6 实现了：
 
 - **可控**：所有操作通过语义静态工具表达，风险规则精确覆盖，BLOCK 不可绕过；
 - **可解释**：每次工具调用有结构化风险依据，每次操作有审计轨迹；
@@ -1454,3 +1482,203 @@ v5.4 将静态工具面从 12 个（v4.1）扩展到 37 个，完整覆盖了以
 - **可演示**：静态工具 + 内置工作流覆盖主演示路径，DynTool 退到真正的边角能力兜底。
 
 **关键承诺不变：安全门不可绕过。** 任何操作通路的 BLOCK 均为硬拒绝，不提供用户覆盖入口。
+
+---
+
+## 十五、系统解释策略与输出处理
+
+### 15.1 三层解释框架
+
+系统面向用户的自然语言解释分三层输出：
+
+| 层次 | 时机 | 内容要素 |
+|---|---|---|
+| 计划解释 | 执行前 | 选择了哪个工具或工作流、为什么选、预期影响面、风险等级 |
+| 风险解释 | WARN-HIGH 时必须；BLOCK 时必须 | 命中了哪条安全规则（ID）、保护对象、允许或拒绝的理由、可选替代方案 |
+| 结果解释 | 执行后 | 做了什么、成功/失败/回滚、验证结论、审计记录入口 |
+
+**反馈风格原则：**
+
+- 先说结论，再说依据；
+- 变更类操作先说风险，再说步骤；
+- 失败时明确区分"执行失败"、"验证失败"、"回滚失败"三种状态；
+- 底层命令不出现在主回复中，降级为审计证据（`command_trace` 字段 / F3 面板）。
+
+### 15.2 大输出处理策略
+
+工具返回大体积结果（大目录、大文件、大日志）时，统一按以下规则处理：
+
+| 场景 | 处理方式 |
+|---|---|
+| 目录条目超出 `max_entries` | 截断并提示总数，建议缩小范围或加 `pattern` 过滤 |
+| 文件内容超出 `max_bytes`（8192B） | 返回前 N 行摘要，提示用 `mode: range/head/tail` 分段读取 |
+| 日志超出 `lines` 限制 | 返回最新 N 行并提示完整内容已写入审计文件 |
+| 进程/端口列表过长 | 优先展示资源占用 Top N，完整列表写审计 |
+
+**OutputSanitizer 统一脱敏（全部工具输出必须经过）：**
+
+- 正则扫描 IP/密码/Token 等凭证模式；
+- 命中 `SENSITIVE_CREDENTIAL_PATHS` 的路径内容整体屏蔽；
+- 脱敏操作本身写入 AuditLog（记录"已脱敏字段"，不记录原值）。
+
+---
+
+## 十六、交互形态与用户体验
+
+### 16.1 主界面形态
+
+| 形态 | 适用场景 | 优先级 |
+|---|---|---|
+| Web 控制台 | 答辩演示、视频录制、远程管理 | 参赛主展示形态（P1）|
+| TUI（Textual） | 本地部署、SSH 直连、无 Web 环境 | 参赛备用形态（P1）|
+| Simple CLI（`--simple`） | 无 TUI 依赖的轻量接入、CI 自测 | 备用（P2）|
+
+> Web 控制台更适合展示 diff 预览、执行时间线和风险确认弹窗；答辩和演示视频优先用 Web 形态。TUI 保留完整功能作为本地/SSH 场景主入口。
+
+### 16.2 界面区域划分（五区）
+
+无论 Web 还是 TUI，主界面包含以下五个功能区：
+
+1. **对话输入区**：自然语言输入框，支持多轮上下文；
+2. **计划预览区**：即将执行的工具链或工作流步骤、风险等级摘要；
+3. **风险确认区**：WARN-HIGH 时展示规则 ID、影响对象、回滚方案及确认/拒绝按钮；
+4. **执行时间线区**：每步执行结果、验证状态、耗时；
+5. **结果总结区**：自然语言总结、建议操作、回滚入口。
+
+**TUI 快捷键映射（Textual）：**
+
+| 快捷键 | 功能 |
+|---|---|
+| F3 | 切换审计日志面板（`AuditLog` JSONL 视图） |
+| F4 | 切换环境画像面板（`EnvProfile` 摘要） |
+| Ctrl+C | 取消当前执行中工作流（触发 on_fail: rollback） |
+| Enter | 提交输入 / 确认 WARN-HIGH 弹窗 |
+| Esc | 拒绝 WARN-HIGH 弹窗（记录 `user_cancelled`） |
+
+### 16.3 去命令行化叙事
+
+系统主界面不展示命令字符串，优先表达：
+
+- **我要做什么**（计划摘要）
+- **会影响什么**（影响对象与范围）
+- **为什么这样做**（工具/工作流选择理由）
+- **执行后状态如何**（结果与验证）
+- **是否安全 / 是否已验证**（风险等级与验证结论）
+
+命令字符串只出现在：AuditLog `command_trace` 字段、F3 审计面板、导出复现包中。
+
+### 16.4 多轮对话上下文
+
+ConversationManager 维护 session context，支持跨轮参数引用，不依赖模型记忆：
+
+- "刚才那个服务再 reload 一下" → 复用上轮 `service_name`
+- "把上一步的配置恢复回来" → 引用上轮 `backup_id`
+- "再检查一下 8081 端口" → 复用上轮 `host`
+- "给刚创建的用户加一把 SSH 公钥" → 引用上轮 `username`
+
+---
+
+## 十七、测试与验证方案
+
+### 17.1 验证环境
+
+| 环境 | 包管理 | 防火墙 | 用途 |
+|---|---|---|---|
+| openEuler 22.03 LTS | DNF | firewalld | 演示环境 A，`--verify` 自检通过后可用 |
+| Ubuntu 22.04 LTS | APT | UFW | 演示环境 B，`--verify` 自检通过后可用 |
+
+### 17.2 测试维度
+
+| 维度 | 重点验证内容 |
+|---|---|
+| 基础功能 | 查询资源、检索文件、查看端口、创建普通用户 |
+| 环境感知 | 不同发行版下包管理、服务管理、防火墙适配（EnvProfile 驱动） |
+| 高风险防御 | B001-B031 全量 BLOCK 命中；危险提权、敏感凭证、痕迹清除拒绝 |
+| 安全规则一致性 | 相似语义下风险判定与执行路径一致（WH/WL 规则） |
+| 连续任务闭环 | `safe_config_patch` 含 reload + 连通性验证；`container_rollout` 含回滚 |
+| 稳定性 | 超时、权限不足、校验失败、回滚失败、资源锁超时 |
+| 大模型边界 | 不输出裸命令；不绕过安全门；competition mode 下不触发 DynTool |
+
+### 17.3 自测产物要求
+
+每个场景至少输出：
+
+- 原始自然语言输入；
+- 解析后结构化意图（IntentSchema）；
+- EnvProfile 摘要；
+- 计划与风险等级（RiskDecisionSchema）；
+- 实际执行工具与 `command_trace`；
+- 执行结果与验证结论；
+- 对应审计 JSONL trace；
+- 截图或录屏片段。
+
+### 17.4 演示视频节奏模板
+
+```text
+自然语言输入
+→ 系统解释意图理解结果
+→ 展示执行计划与风险等级
+→ 真实执行（含 WARN-HIGH 确认弹窗）
+→ 展示验证结果
+→ 自然语言总结闭环
+```
+
+### 17.5 故障注入测试矩阵
+
+| 注入点 | 注入方式 | 期望行为 |
+|---|---|---|
+| `replace_in_file` 找不到匹配 | `expected_matches=1` 但实际 0 | 失败不写入，触发 rollback |
+| `validate_config` 校验失败 | 写入语法错误配置 | 触发 rollback，恢复备份，反馈"验证失败已回滚" |
+| 回滚本身失败（backup_id 不存在） | 删除 backup 文件后触发回滚 | 输出人工介入提示及备份 ID；AuditLog 标记 `rollback_failed` |
+| 资源锁超时 | 手动持有锁后发起同资源操作 | 返回 `NEED_INFO`，提示"资源 X 正被另一操作占用" |
+| 远程模式 SSH 断连 | kill SSH 进程 | RemoteExecutor 捕获异常，任务标记 `FAILED` |
+| BLOCK 规则命中 | 请求 `read_file(/etc/shadow)` | 立即拒绝，不进入执行层，AuditLog 记录 BLOCK + 规则 ID |
+| competition mode DynTool 拦截 | Claude 尝试调用 `propose_dynamic_tool` | 系统层拦截，提示"竞赛模式下不允许动态工具" |
+
+---
+
+## 十八、失败策略
+
+当系统无法在安全边界内完成任务时，按以下优先级响应：
+
+1. **解释原因**：明确说明命中了哪条安全规则（ID）或哪个执行步骤失败；
+2. **提供替代方案**：若存在更安全的路径实现相同目标，主动给出（例：请求 `write_file(/etc/nginx/nginx.conf, mode=overwrite)` → 建议改用 `safe_config_patch` 工作流，包含备份 + `replace_in_file` + `validate_config` 闭环；对于 `CRITICAL_EDIT_PATHS` 中的 `/etc/sudoers`、`/etc/ssh/sshd_config` 等，所有自动化写入通路均为 BLOCK，系统应明确说明需人工操作，不提供任何变通路径）；
+3. **说明能力边界**：明确当前版本不支持的操作，不给模糊答复；
+4. **保护系统状态**：失败时不留下半完成的变更；若已有写入则触发回滚。
+
+### 18.1 失败类型与处理方式
+
+| 失败类型 | 触发场景 | 系统行为 |
+|---|---|---|
+| BLOCK（安全拒绝） | 命中 B001-B031 | 立即拒绝；说明规则 ID 和保护对象；不进入执行层 |
+| NEED_INFO（信息不足） | 参数缺失、目标不明 | 询问最小必要信息；不执行任何工具调用 |
+| 执行失败（含资源锁超时） | 工具报错、执行超时；资源锁申请超时（reason: `resource_locked`） | 标记步骤失败；若 `on_fail: rollback` 则触发回滚链；资源锁冲突场景向用户报告占用情况并提示手动重试 |
+| 验证失败 | `validate_config` / `check_endpoint` 失败 | 触发回滚；反馈"修改后验证未通过，已自动回滚" |
+| 回滚失败 | `backup_path(restore)` 失败 | 进入人工处理状态；输出备份 ID；AuditLog 标记 `rollback_failed` |
+| DynTool 在 competition mode 触发 | Claude 调用 `propose_dynamic_tool` | 系统层拦截；提示"竞赛模式下不允许动态工具" |
+
+### 18.2 不可恢复状态的最低承诺
+
+当回滚失败、系统无法自动恢复时，无论如何必须做到：
+
+- 不静默失败；
+- 在用户侧展示备份 ID 和受影响文件路径；
+- 写入 AuditLog `final_status: rollback_failed`；
+- 给出手动恢复操作指引（`backup_path(action=restore, backup_id=…)`）。
+
+---
+
+## 十九、提交材料清单
+
+| 类别 | 产物 | 说明 |
+|---|---|---|
+| 代码 | 完整源代码（`sysdialogue/` 全部模块） | 按第十一节模块清单组织 |
+| 工具定义 | 37 个静态工具 JSON Schema | `tools/*.py` 中 `input_schema` 导出 |
+| 工作流定义 | 10 个内置 Workflow YAML | `workflows/*.yaml` |
+| 核心 Prompt | SystemPrompt 完整文本 | 含 EnvProfile 注入模板、执行模式规则、安全规则摘要 |
+| 架构设计文档 | 本文档（`claudeplan6.md`） | 含六层架构、37 工具、31 BLOCK 规则、工作流体系 |
+| 演示视频 | 覆盖第十三节 10 个演示场景 | 每场景含输入→计划→确认→执行→验证完整闭环 |
+| 自测场景说明 | 第十七节 17.3 格式的 10 份场景产物 | 含 IntentSchema、AuditTrace、截图/录屏 |
+| 审计日志样例 | 至少 3 个典型场景的 JSONL 审计文件 | 包含 SAFE、WARN-HIGH 确认、BLOCK 拒绝各一份 |
+| 环境搭建说明 | openEuler + Ubuntu 两套复现步骤 | 含依赖安装、API Key 配置、`--verify` 验证输出 |
+| 开源依赖清单 | `requirements.txt` + 许可证说明 | 标注 Textual / Paramiko / Pydantic 等主要依赖 |
