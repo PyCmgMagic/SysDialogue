@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -228,6 +229,8 @@ def test_plain_text_responses_trigger_react_correction_then_failure(tmp_path: Pa
     assert len(llm.calls) == 3
     assert "ReAct protocol correction" in llm.calls[1]["messages"][-1]["content"]
     assert "ReAct protocol correction" in llm.calls[2]["messages"][-1]["content"]
+    persisted_history = json.dumps(controller.conversation_manager.history, ensure_ascii=False)
+    assert "ReAct protocol correction" not in persisted_history
     assert [event.stage for event in events].count("correction") == 2
 
 

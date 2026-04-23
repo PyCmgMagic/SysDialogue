@@ -171,7 +171,11 @@ class ReActRunner:
                 empty_action_turns += 1
                 if empty_action_turns <= 2:
                     correction = _react_correction_message(user_message, _extract_text(content))
-                    messages.append({"role": "user", "content": correction})
+                    messages.append({
+                        "role": "user",
+                        "content": correction,
+                        "sysdialogue_internal": True,
+                    })
                     self._emit(task, "correction", "Model did not use ReAct tools; correction injected.", {
                         "attempt": empty_action_turns,
                     })
@@ -333,7 +337,11 @@ class ReActRunner:
     def _commit_final(self, messages: list[dict], task: TaskRun) -> None:
         if task.final_reply:
             messages.append({"role": "assistant", "content": [{"type": "text", "text": task.final_reply}]})
-        self.controller.conversation_manager.commit_turn(messages)
+        persisted_messages = [
+            message for message in messages
+            if not message.get("sysdialogue_internal")
+        ]
+        self.controller.conversation_manager.commit_turn(persisted_messages)
 
     def _emit(self, task: TaskRun, stage: str, message: str, data: dict[str, Any] | None = None) -> None:
         event = TaskEvent(stage=stage, message=message, data=data or {})

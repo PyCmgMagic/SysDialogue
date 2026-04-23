@@ -11,29 +11,41 @@ from sysdialogue.tools.base import ToolResult
 
 _SYSDIALOGUE_MARKER = "# sysdialogue:job:"
 _SYSTEM_CRON_DIR = "/etc/cron.d"
+_SYSTEM_STATE_DIR = "/var/lib/sysdialogue"
 _VALID_SCOPES = {"user", "system"}
 
 
-def cron_state_dir(executor: SafeExecutor) -> str:
+def cron_state_dir(executor: SafeExecutor, scope: str = "user") -> str:
+    if scope == "system":
+        return _SYSTEM_STATE_DIR
     fs = TargetFileAccess(executor)
     return fs.join(fs.home_dir(), ".sysdialogue")
 
 
-def cron_index_path(executor: SafeExecutor) -> str:
+def cron_index_path(executor: SafeExecutor, scope: str = "user") -> str:
     fs = TargetFileAccess(executor)
-    return fs.join(cron_state_dir(executor), "cron_index.json")
+    return fs.join(cron_state_dir(executor, scope), "cron_index.json")
 
 
-def load_cron_index(executor: SafeExecutor) -> dict:
+def load_cron_index(executor: SafeExecutor, scope: str | None = None) -> dict:
+    if scope is None:
+        merged: dict = {}
+        for candidate in ("user", "system"):
+            merged.update(load_cron_index(executor, candidate))
+        return merged
     fs = TargetFileAccess(executor)
-    index_path = cron_index_path(executor)
+    index_path = cron_index_path(executor, scope)
     if not fs.exists(index_path):
         return {}
     return fs.read_json(index_path)
 
 
 def get_cron_job(executor: SafeExecutor, job_id: str) -> dict | None:
-    return load_cron_index(executor).get(job_id)
+    for scope in ("user", "system"):
+        entry = load_cron_index(executor, scope).get(job_id)
+        if entry is not None:
+            return entry
+    return None
 
 
 def cron_command(job_id: str) -> str:
@@ -67,7 +79,7 @@ def manage_cron(
 
 
 def _list(executor: SafeExecutor, scope: str) -> ToolResult:
-    index = load_cron_index(executor)
+    index = load_cron_index(executor, scope)
     if scope == "user":
         cmd = ["crontab", "-l"]
     else:
@@ -94,7 +106,7 @@ def _create(executor: SafeExecutor, scope: str, schedule: str | None,
         return ToolResult(success=False, error="job_target.kind 只允许 'tool' 或 'workflow'")
 
     bid = f"job_{uuid.uuid4().hex[:8]}"
-    index = load_cron_index(executor)
+    index = load_cron_index(executor, scope)
     index[bid] = {
         "job_id": bid,
         "scope": scope,
@@ -106,7 +118,7 @@ def _create(executor: SafeExecutor, scope: str, schedule: str | None,
         _save_and_sync(executor, index, bid)
     except Exception as e:
         index.pop(bid, None)
-        _safe_save_index(executor, index)
+        _safe_save_index(executor, index, scope)
         return ToolResult(success=False, error=f"计划任务安装失败：{e}")
     return ToolResult(
         success=True,
@@ -119,7 +131,10 @@ def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None,
             job_target: dict | None) -> ToolResult:
     if not job_id:
         return ToolResult(success=False, error="update 需要 job_id 参数")
-    index = load_cron_index(executor)
+    loaded = _load_index_for_job(executor, job_id)
+    if loaded is None:
+        return ToolResult(success=False, error=f"job_id {job_id} 不存在")
+    scope, index = loaded
     if job_id not in index:
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
     original = dict(index[job_id])
@@ -144,17 +159,22 @@ def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None,
 def _modify(executor: SafeExecutor, job_id: str | None, action: str) -> ToolResult:
     if not job_id:
         return ToolResult(success=False, error=f"{action} 需要 job_id 参数")
-    index = load_cron_index(executor)
+    loaded = _load_index_for_job(executor, job_id)
+    if loaded is None:
+        return ToolResult(success=False, error=f"job_id {job_id} 不存在")
+    scope, index = loaded
     entry = index.get(job_id)
     if entry is None:
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
 
     if action == "delete":
+        original = dict(index)
         try:
-            _remove_installed_job(executor, entry)
             del index[job_id]
-            _save_index(executor, index)
+            _save_index(executor, index, scope)
+            _remove_installed_job(executor, entry, remaining_index=index)
         except Exception as e:
+            _safe_save_index(executor, original, scope)
             return ToolResult(success=False, error=f"计划任务删除失败：{e}")
     else:
         original = dict(entry)
@@ -168,21 +188,32 @@ def _modify(executor: SafeExecutor, job_id: str | None, action: str) -> ToolResu
     return ToolResult(success=True, data=f"{action} 成功：{job_id}", cmd_trace=[f"cron {action} {job_id}"])
 
 
-def _save_index(executor: SafeExecutor, data: dict) -> None:
+def _load_index_for_job(executor: SafeExecutor, job_id: str | None) -> tuple[str, dict] | None:
+    if not job_id:
+        return None
+    for scope in ("user", "system"):
+        index = load_cron_index(executor, scope)
+        if job_id in index:
+            return scope, index
+    return None
+
+
+def _save_index(executor: SafeExecutor, data: dict, scope: str = "user") -> None:
     fs = TargetFileAccess(executor)
-    state_dir = cron_state_dir(executor)
+    state_dir = cron_state_dir(executor, scope)
     fs.mkdir(state_dir, parents=True)
-    fs.write_json(cron_index_path(executor), data, atomic=True)
+    fs.write_json(cron_index_path(executor, scope), data, atomic=True)
 
 
 def _save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None:
-    _save_index(executor, data)
-    _sync_installed_jobs(executor, data, data[job_id]["scope"])
+    scope = data[job_id]["scope"]
+    _save_index(executor, data, scope)
+    _sync_installed_jobs(executor, data, scope)
 
 
-def _safe_save_index(executor: SafeExecutor, data: dict) -> None:
+def _safe_save_index(executor: SafeExecutor, data: dict, scope: str = "user") -> None:
     try:
-        _save_index(executor, data)
+        _save_index(executor, data, scope)
     except Exception:
         pass
 
@@ -267,15 +298,22 @@ def _sync_system_cron(executor: SafeExecutor, data: dict) -> None:
             fs.remove(f"{_SYSTEM_CRON_DIR}/{line}")
 
 
-def _remove_installed_job(executor: SafeExecutor, entry: dict) -> None:
+def _remove_installed_job(
+    executor: SafeExecutor,
+    entry: dict,
+    *,
+    remaining_index: dict | None = None,
+) -> None:
     fs = TargetFileAccess(executor)
     if entry.get("scope") == "system":
         cron_path = system_cron_path(entry["job_id"])
         if fs.exists(cron_path):
             fs.remove(cron_path)
         return
-    data = load_cron_index(executor)
-    data = {jid: item for jid, item in data.items() if jid != entry["job_id"]}
+    data = remaining_index
+    if data is None:
+        data = load_cron_index(executor, "user")
+        data = {jid: item for jid, item in data.items() if jid != entry["job_id"]}
     _sync_user_crontab(executor, data)
 
 

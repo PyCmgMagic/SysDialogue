@@ -40,6 +40,10 @@ class StepResult:
         return self.status == "failed"
 
 
+class WorkflowTemplateError(ValueError):
+    """Raised when workflow Jinja interpolation cannot be rendered safely."""
+
+
 @dataclass
 class WorkflowExecution:
     workflow_id: str
@@ -246,7 +250,20 @@ class WorkflowEngine:
                     continue
 
                 # condition 计算
-                if not self._eval_condition(step, execution, resolved_params):
+                try:
+                    condition_ok = self._eval_condition(step, execution, resolved_params)
+                except WorkflowTemplateError as e:
+                    result = StepResult(step_id=sid, status="failed", error=str(e))
+                    execution.steps_state[sid] = result
+                    self._log_step(
+                        wf_id, sid, step.get("type", "tool_call"), "failed",
+                        detail={"error": result.error},
+                    )
+                    if step.get("on_fail") == "rollback":
+                        triggered_rollback = True
+                        break
+                    continue
+                if not condition_ok:
                     execution.steps_state[sid] = StepResult(
                         step_id=sid, status="skipped", error="condition=false 跳过",
                     )
@@ -254,9 +271,21 @@ class WorkflowEngine:
                     continue
 
                 # lock_scope 申请
-                lock_scope = self._render(
-                    step.get("lock_scope", ""), execution, resolved_params,
-                ).strip() if step.get("lock_scope") else ""
+                try:
+                    lock_scope = self._render(
+                        step.get("lock_scope", ""), execution, resolved_params,
+                    ).strip() if step.get("lock_scope") else ""
+                except WorkflowTemplateError as e:
+                    result = StepResult(step_id=sid, status="failed", error=str(e))
+                    execution.steps_state[sid] = result
+                    self._log_step(
+                        wf_id, sid, step.get("type", "tool_call"), "failed",
+                        detail={"error": result.error},
+                    )
+                    if step.get("on_fail") == "rollback":
+                        triggered_rollback = True
+                        break
+                    continue
                 if lock_scope:
                     ok = self.locks.acquire(lock_scope, timeout=self.lock_timeout)
                     if not ok:
@@ -271,7 +300,10 @@ class WorkflowEngine:
                         break
                     acquired_locks.append(lock_scope)
 
-                result = self._execute_step(step, execution, resolved_params)
+                try:
+                    result = self._execute_step(step, execution, resolved_params)
+                except WorkflowTemplateError as e:
+                    result = StepResult(step_id=sid, status="failed", error=str(e))
                 execution.steps_state[sid] = result
                 self._log_step(
                     wf_id, sid, step.get("type", "tool_call"), result.status,
@@ -297,33 +329,37 @@ class WorkflowEngine:
                 self.locks.release(scope)
 
         # 终态决定
-        if execution.rollback_failed:
-            execution.final_status = "rollback_failed"
-            execution.final_message = self._render(
-                final_section.get("rollback_failed_template", "自动回滚失败，请人工介入。"),
-                execution, resolved_params,
-            )
-        elif execution.rolled_back:
-            execution.final_status = "rolled_back"
-            if execution.cancelled:
+        try:
+            if execution.rollback_failed:
+                execution.final_status = "rollback_failed"
                 execution.final_message = self._render(
-                    final_section.get("cancel_template", "当前工作流已取消，并已按回滚策略处理。"),
+                    final_section.get("rollback_failed_template", "自动回滚失败，请人工介入。"),
                     execution, resolved_params,
                 )
+            elif execution.rolled_back:
+                execution.final_status = "rolled_back"
+                if execution.cancelled:
+                    execution.final_message = self._render(
+                        final_section.get("cancel_template", "当前工作流已取消，并已按回滚策略处理。"),
+                        execution, resolved_params,
+                    )
+                else:
+                    execution.final_message = self._render(
+                        final_section.get("rollback_template", "已回滚到变更前状态。"),
+                        execution, resolved_params,
+                    )
+            elif any(r.status == "failed" for r in execution.steps_state.values()):
+                execution.final_status = "failed"
+                execution.final_message = "工作流失败，部分步骤未完成。"
             else:
+                execution.final_status = "completed"
                 execution.final_message = self._render(
-                    final_section.get("rollback_template", "已回滚到变更前状态。"),
+                    final_section.get("success_template", "工作流执行完成。"),
                     execution, resolved_params,
                 )
-        elif any(r.status == "failed" for r in execution.steps_state.values()):
+        except WorkflowTemplateError as e:
             execution.final_status = "failed"
-            execution.final_message = "工作流失败，部分步骤未完成。"
-        else:
-            execution.final_status = "completed"
-            execution.final_message = self._render(
-                final_section.get("success_template", "工作流执行完成。"),
-                execution, resolved_params,
-            )
+            execution.final_message = str(e)
 
         self.controller.audit_log.log_final(
             workflow_id=wf_id,
@@ -354,14 +390,30 @@ class WorkflowEngine:
                 )
                 self._log_step(wf_id, sid, step.get("type", "tool_call"), "skipped")
                 continue
-            if not self._eval_condition(step, execution, params):
+            try:
+                condition_ok = self._eval_condition(step, execution, params)
+            except WorkflowTemplateError as e:
+                result = StepResult(step_id=sid, status="failed", error=str(e))
+                execution.steps_state[sid] = result
+                self._log_step(
+                    wf_id, sid, step.get("type", "tool_call"), "failed",
+                    detail={"error": result.error},
+                )
+                any_failed = True
+                if step.get("on_fail") != "continue":
+                    break
+                continue
+            if not condition_ok:
                 execution.steps_state[sid] = StepResult(
                     step_id=sid, status="skipped", error="condition=false 跳过",
                 )
                 self._log_step(wf_id, sid, step.get("type", "tool_call"), "skipped")
                 continue
 
-            result = self._execute_step(step, execution, params)
+            try:
+                result = self._execute_step(step, execution, params)
+            except WorkflowTemplateError as e:
+                result = StepResult(step_id=sid, status="failed", error=str(e))
             # 回滚步骤状态统一标记为 rolled_back（若成功）或保留 failed
             if result.status == "completed":
                 result.status = "rolled_back"
@@ -590,7 +642,8 @@ class WorkflowEngine:
             tpl = self._jinja.from_string(template)
             return tpl.render(**self._build_context(execution, params))
         except Exception as e:
-            return f"[插值错误：{e}]"
+            preview = template.replace("\n", "\\n")[:160]
+            raise WorkflowTemplateError(f"模板插值失败：{e}；template={preview!r}") from e
 
     def _render_args(self, args: Any, execution: WorkflowExecution, params: dict) -> Any:
         """递归插值 args 结构，保留非字符串类型原样。"""

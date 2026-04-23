@@ -112,7 +112,14 @@ def _scheduled_workflow_rejection(controller, workflow_name: str, workflow_args:
         if step_type != "tool_call":
             continue
         tool = step.get("tool", "")
-        rendered_args = engine._render_args(step.get("args") or {}, execution, resolved_params)
+        try:
+            rendered_args = engine._render_args(step.get("args") or {}, execution, resolved_params)
+        except ValueError as exc:
+            return RiskDecision(
+                level="BLOCK",
+                rule_ids=["B026"],
+                reason=f"计划任务 workflow 步骤 {step_id} 预检模板渲染失败：{exc}",
+            )
         decision = classify(
             tool,
             rendered_args,

@@ -11,9 +11,10 @@ from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.security import path_policies as path_policies
 from sysdialogue.security.risk_classifier import classify
 from sysdialogue.tools import auth_keys as auth_keys_module
+from sysdialogue.tools import cron_jobs as cron_jobs_module
 from sysdialogue.tools.auth_keys import _public_key_fingerprint, manage_authorized_keys
 from sysdialogue.tools.config_validate import validate_config
-from sysdialogue.tools.cron_jobs import manage_cron
+from sysdialogue.tools.cron_jobs import get_cron_job, manage_cron
 from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
 
@@ -86,6 +87,48 @@ def test_manage_cron_create_updates_index_and_installs_user_crontab(
     assert job_id in index_data
     assert f"sysdialogue --run-scheduled-job {job_id}" in captured["installed"]
     assert f"# sysdialogue:job:{job_id}" in captured["installed"]
+
+
+def test_manage_cron_system_scope_uses_global_index_when_home_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    system_cron_dir = tmp_path / "etc_cron_d"
+    system_state_dir = tmp_path / "var_lib_sysdialogue"
+    creator_home = tmp_path / "creator"
+    runtime_home = tmp_path / "root"
+    monkeypatch.setattr(cron_jobs_module, "_SYSTEM_CRON_DIR", str(system_cron_dir))
+    monkeypatch.setattr(cron_jobs_module, "_SYSTEM_STATE_DIR", str(system_state_dir))
+    monkeypatch.setenv("HOME", str(creator_home))
+    monkeypatch.setenv("USERPROFILE", str(creator_home))
+
+    def handler(cmd: list[str], timeout: int):
+        if cmd == ["ls", "-1", str(system_cron_dir)]:
+            if not system_cron_dir.exists():
+                return ("", 1)
+            return ("\n".join(p.name for p in system_cron_dir.iterdir()), 0)
+        return ("", 0)
+
+    creator_executor = RecordingExecutor(handler=handler)
+    result = manage_cron(
+        creator_executor,
+        action="create",
+        scope="system",
+        schedule="*/10 * * * *",
+        job_target={"kind": "tool", "name": "get_system_info", "args": {}},
+    )
+
+    assert result.success is True
+    job_id = result.data["job_id"]
+    assert (system_state_dir / "cron_index.json").exists()
+    assert not (creator_home / ".sysdialogue" / "cron_index.json").exists()
+    assert (system_cron_dir / f"sysdialogue-{job_id}").exists()
+
+    monkeypatch.setenv("HOME", str(runtime_home))
+    monkeypatch.setenv("USERPROFILE", str(runtime_home))
+    runtime_job = get_cron_job(RecordingExecutor(handler=handler), job_id)
+    assert runtime_job is not None
+    assert runtime_job["scope"] == "system"
 
 
 def test_manage_cron_rolls_back_index_when_install_fails(
