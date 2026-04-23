@@ -68,6 +68,8 @@ def create_runtime(
 
     if claude_client is None:
         if require_api:
+            if not config.api_key:
+                raise RuntimeError("ANTHROPIC_API_KEY is required for this entrypoint")
             claude_client = ClaudeClient(api_key=config.api_key, model=config.model)
         else:
             claude_client = NullClaudeClient()

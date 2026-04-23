@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 import click
 
@@ -84,24 +83,32 @@ def main(verify: bool, demo: bool, remote: str | None,
     if scheduled_job_id:
         sys.exit(run_scheduled_job(config, scheduled_job_id))
     if simple:
+        _require_api_key(config, "Simple CLI")
         sys.exit(run_simple_cli(config))
     if web_mode:
+        _require_api_key(config, "Web 控制台")
         from sysdialogue.web.app import run_web_server
         run_web_server(config, host=web_host, port=web_port)
         return
 
     # 启动 TUI
-    if not config.api_key:
-        click.secho(
-            "错误：未配置 ANTHROPIC_API_KEY，无法启动 TUI。\n"
-            "  - 设置环境变量：export ANTHROPIC_API_KEY=...\n"
-            "  - 或创建 .env 文件并 --env-file 指定\n"
-            "  - 不调 API 可用 --verify 或 --demo 模式",
-            fg="red", err=True,
-        )
-        sys.exit(2)
+    _require_api_key(config, "TUI")
 
     _run_tui(config)
+
+
+def _require_api_key(config, entrypoint: str) -> None:
+    if config.api_key:
+        return
+    click.secho(
+        f"错误：未配置 ANTHROPIC_API_KEY，无法启动 {entrypoint}。\n"
+        "  - 设置环境变量：export ANTHROPIC_API_KEY=...\n"
+        "  - 或创建 .env 文件并 --env-file 指定\n"
+        "  - 不调 API 可用 --verify、--demo 或 --run-scheduled-job 模式",
+        fg="red",
+        err=True,
+    )
+    sys.exit(2)
 
 
 def _run_tui(config) -> None:

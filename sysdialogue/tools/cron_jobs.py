@@ -99,7 +99,12 @@ def _create(executor: SafeExecutor, scope: str, schedule: str | None,
         "job_target": job_target,
         "enabled": True,
     }
-    _save_and_sync(executor, index, bid)
+    try:
+        _save_and_sync(executor, index, bid)
+    except Exception as e:
+        index.pop(bid, None)
+        _safe_save_index(executor, index)
+        return ToolResult(success=False, error=f"计划任务安装失败：{e}")
     return ToolResult(
         success=True,
         data=index[bid],
@@ -114,6 +119,7 @@ def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None,
     index = load_cron_index(executor)
     if job_id not in index:
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
+    original = dict(index[job_id])
     if schedule:
         if not _valid_schedule(schedule):
             return ToolResult(success=False, error=f"无效的 cron 表达式：{schedule}")
@@ -123,7 +129,12 @@ def _update(executor: SafeExecutor, job_id: str | None, schedule: str | None,
         if kind not in ("tool", "workflow"):
             return ToolResult(success=False, error="job_target.kind 只允许 'tool' 或 'workflow'")
         index[job_id]["job_target"] = job_target
-    _save_and_sync(executor, index, job_id)
+    try:
+        _save_and_sync(executor, index, job_id)
+    except Exception as e:
+        index[job_id] = original
+        _safe_save_and_sync(executor, index, job_id)
+        return ToolResult(success=False, error=f"计划任务更新失败：{e}")
     return ToolResult(success=True, data=index[job_id], cmd_trace=[f"cron update {job_id}"])
 
 
@@ -136,12 +147,21 @@ def _modify(executor: SafeExecutor, job_id: str | None, action: str) -> ToolResu
         return ToolResult(success=False, error=f"job_id {job_id} 不存在")
 
     if action == "delete":
-        _remove_installed_job(executor, entry)
-        del index[job_id]
-        _save_index(executor, index)
+        try:
+            _remove_installed_job(executor, entry)
+            del index[job_id]
+            _save_index(executor, index)
+        except Exception as e:
+            return ToolResult(success=False, error=f"计划任务删除失败：{e}")
     else:
+        original = dict(entry)
         entry["enabled"] = (action == "enable")
-        _save_and_sync(executor, index, job_id)
+        try:
+            _save_and_sync(executor, index, job_id)
+        except Exception as e:
+            index[job_id] = original
+            _safe_save_and_sync(executor, index, job_id)
+            return ToolResult(success=False, error=f"计划任务 {action} 失败：{e}")
     return ToolResult(success=True, data=f"{action} 成功：{job_id}", cmd_trace=[f"cron {action} {job_id}"])
 
 
@@ -155,6 +175,20 @@ def _save_index(executor: SafeExecutor, data: dict) -> None:
 def _save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None:
     _save_index(executor, data)
     _sync_installed_jobs(executor, data, data[job_id]["scope"])
+
+
+def _safe_save_index(executor: SafeExecutor, data: dict) -> None:
+    try:
+        _save_index(executor, data)
+    except Exception:
+        pass
+
+
+def _safe_save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None:
+    try:
+        _save_and_sync(executor, data, job_id)
+    except Exception:
+        pass
 
 
 def _sync_installed_jobs(executor: SafeExecutor, data: dict, scope: str) -> None:

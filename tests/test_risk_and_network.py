@@ -26,6 +26,18 @@ def test_wh025_escalates_after_more_than_ten_private_probes() -> None:
     assert "10.0.0.0/24" in decision.reason
 
 
+def test_wh025_checks_resolver_even_when_query_name_is_private() -> None:
+    decision = classify(
+        "resolve_dns",
+        {"name": "10.0.1.10", "resolver": "10.0.0.53"},
+        env_profile={},
+        session_counters={"private_probe_subnets": {"10.0.0.0/24": 10}},
+    )
+
+    assert decision.level == "WARN-HIGH"
+    assert decision.rule_ids == ["WH025"]
+
+
 def test_check_endpoint_blocks_redirects_into_private_network() -> None:
     counters: dict = {}
     executor = RecordingExecutor(

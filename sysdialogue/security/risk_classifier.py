@@ -89,7 +89,6 @@ def _apply_network_probe_risk(
                 reason=f"同一私网段 {subnet_key} 在本次会话内探测超过 10 次",
                 requires_confirmation=True,
             )
-        return current
     return current
 
 

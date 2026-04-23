@@ -99,6 +99,20 @@ def validate_config(
         except Exception as e:
             return ToolResult(success=False, error=f"TOML 解析错误：{e}", cmd_trace=[])
 
+    if target_type == "fstab":
+        content = fs.read_text(target_path, encoding="utf-8", errors="replace")
+        errors = _validate_fstab_lines(content)
+        if errors:
+            return ToolResult(success=False, error="; ".join(errors), cmd_trace=[f"target_fs.read_text {target_path}"])
+        return ToolResult(success=True, data="fstab 静态格式合法", cmd_trace=[f"target_fs.read_text {target_path}"])
+
+    if target_type == "cron":
+        content = fs.read_text(target_path, encoding="utf-8", errors="replace")
+        errors = _validate_cron_lines(content)
+        if errors:
+            return ToolResult(success=False, error="; ".join(errors), cmd_trace=[f"target_fs.read_text {target_path}"])
+        return ToolResult(success=True, data="cron 静态格式合法", cmd_trace=[f"target_fs.read_text {target_path}"])
+
     return ToolResult(success=False, error=f"不支持的配置类型：{target_type}")
 
 
@@ -127,3 +141,46 @@ def _detect_type(path: str) -> str:
     if "fstab" in p:
         return "fstab"
     return "unknown"
+
+
+def _validate_fstab_lines(content: str) -> list[str]:
+    errors: list[str] = []
+    for line_no, raw_line in enumerate(content.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            errors.append(f"第 {line_no} 行 fstab 字段不足 4 个")
+    return errors
+
+
+def _validate_cron_lines(content: str) -> list[str]:
+    errors: list[str] = []
+    env_prefixes = ("SHELL=", "PATH=", "MAILTO=", "HOME=", "LOGNAME=")
+    nicknames = {
+        "@reboot", "@yearly", "@annually", "@monthly", "@weekly",
+        "@daily", "@midnight", "@hourly",
+    }
+    for line_no, raw_line in enumerate(content.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(env_prefixes):
+            continue
+        parts = line.split()
+        if parts[0] in nicknames:
+            if len(parts) < 2:
+                errors.append(f"第 {line_no} 行 cron 缺少命令")
+            continue
+        if len(parts) < 6:
+            errors.append(f"第 {line_no} 行 cron 至少需要 5 个时间字段和命令")
+            continue
+        if not all(_looks_like_cron_field(field) for field in parts[:5]):
+            errors.append(f"第 {line_no} 行 cron 时间字段格式异常")
+    return errors
+
+
+def _looks_like_cron_field(field: str) -> bool:
+    allowed = set("0123456789*,/-")
+    return bool(field) and all(ch in allowed for ch in field)

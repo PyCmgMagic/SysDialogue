@@ -7,6 +7,7 @@ from pathlib import Path
 from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.tools import auth_keys as auth_keys_module
 from sysdialogue.tools.auth_keys import _public_key_fingerprint, manage_authorized_keys
+from sysdialogue.tools.config_validate import validate_config
 from sysdialogue.tools.cron_jobs import manage_cron
 from sysdialogue.tools.firewall import manage_firewall
 
@@ -81,6 +82,33 @@ def test_manage_cron_create_updates_index_and_installs_user_crontab(
     assert f"# sysdialogue:job:{job_id}" in captured["installed"]
 
 
+def test_manage_cron_rolls_back_index_when_install_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    def handler(cmd: list[str], timeout: int):
+        if cmd == ["crontab", "-l"]:
+            return ("", 1)
+        if cmd and cmd[0] == "crontab" and len(cmd) == 2:
+            return ("install failed", 1)
+        return ("", 0)
+
+    result = manage_cron(
+        RecordingExecutor(handler=handler),
+        action="create",
+        scope="user",
+        schedule="*/5 * * * *",
+        job_target={"kind": "tool", "name": "get_system_info", "args": {}},
+    )
+
+    assert result.success is False
+    index_path = tmp_path / ".sysdialogue" / "cron_index.json"
+    assert json.loads(index_path.read_text(encoding="utf-8")) == {}
+
+
 def test_manage_firewall_iptables_delete_uses_delete_op_and_policy() -> None:
     executor = RecordingExecutor()
 
@@ -140,3 +168,19 @@ def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -
 
     profile_without_cron = CapabilityProbe(RecordingExecutor(handler=no_crontab_handler)).probe()
     assert profile_without_cron["supports_system_cron"] is False
+
+
+def test_validate_config_supports_fstab_and_cron_static_checks(tmp_path: Path) -> None:
+    executor = RecordingExecutor()
+    fstab_path = tmp_path / "fstab"
+    fstab_path.write_text("/dev/sda1 / ext4 defaults 0 1\n", encoding="utf-8")
+    cron_path = tmp_path / "sysdialogue"
+    cron_path.write_text("SHELL=/bin/sh\n*/5 * * * * sysdialogue --verify\n", encoding="utf-8")
+
+    assert validate_config(executor, str(fstab_path), target_type="fstab").success is True
+    assert validate_config(executor, str(cron_path), target_type="cron").success is True
+
+    cron_path.write_text("* * * sysdialogue --verify\n", encoding="utf-8")
+    invalid = validate_config(executor, str(cron_path), target_type="cron")
+    assert invalid.success is False
+    assert "cron" in invalid.error
