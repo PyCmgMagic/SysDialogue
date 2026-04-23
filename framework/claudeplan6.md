@@ -1,8 +1,16 @@
-# SysDialogue — v5.4 完整设计文档
+# SysDialogue — v6 完整设计文档
 
-> 版本定位：综合 v4.1 → v5.3 → v5.4 的完整独立设计文档，无需参考历史版本  
+> 版本定位：在 v5.4 基础上经过三轮安全审计修复，综合 v4.1 → v5.3 → v5.4 → v6 的完整独立设计文档，无需参考历史版本  
 > 核心原则：**Static-first / Workflow-first / Preview-Backup-Validate / EnvProfile-driven / DynTool-last**  
 > 目标：将尽量多的高频运维场景固化为静态语义工具，让系统更强、更稳、更可控，满足"自主与可控、可解释、可验证"要求
+>
+> **v6 相对 v5.4 的变更摘要（安全审计修复）**：
+> - **安全规则**：新增 B028-B031（root公钥/容器特权/容器主机网络/敏感目录枚举）；WH022-WH025（关键服务reload/防火墙reload/系统目录copy/私网批量探测）；WL016-WL017（私网探测/探测超频）；8.1.1 节统一规则设计约定（优先级/路径规范化/SSH别名/BLOCK不可覆盖）
+> - **工具 Schema**：`manage_archive` 补 `source_path` 及 `create` 强制约束；`manage_cron` update 拆出独立 allOf 要求 `job_id`；`manage_container` 加 `additionalProperties:false`，排除 privileged/network_mode/exec
+> - **Workflow Schema**：参数类型枚举扩展至 `text/enum/text_list/integer/boolean/object`（含插值语义说明）；补充 `approval` step type；`condition` 跳过语义明确（视为已成功完成）
+> - **工作流修复**：`safe_config_patch` 拆解 `verify_endpoint` 对象参数为三个标量、整数插值去引号、端口非空双重 condition、二次回滚兜底；`container_rollout` 整数插值去引号、补完整 rollback/final 段；`scheduled_health_check` 端口类型改 `integer` 并去引号
+> - **SSRF 防护**：统一私网探测分级语义（单次→WL016，批量/重定向→WH025），消除原文"禁止"/"WARN-HIGH"/"WARN-LOW"三处矛盾；工具总表最高风险更新为 WARN-HIGH
+> - **EnvProfile**：`ssh_port` 刷新绑定 sshd_config 写入事件而非不存在的配置键；SystemPrompt 注入前加 `EnvProfileSanitizer`；探测失败字段置 `"unknown"`
 
 ---
 
