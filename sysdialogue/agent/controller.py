@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.prompt import build_system_prompt
@@ -23,9 +24,14 @@ from sysdialogue.tools.meta_tools import (
 )
 
 if TYPE_CHECKING:
+    from sysdialogue.agent.planner import PlanningEngine
+    from sysdialogue.agent.workflow_engine import WorkflowEngine
     from sysdialogue.runtime.capability_probe import EnvProfile
     from sysdialogue.runtime.secure_runner import SafeExecutor
     from sysdialogue.tools.registry import ToolRegistry
+
+
+_DEFAULT_WORKFLOWS_DIR = Path(__file__).parent.parent / "workflows"
 
 
 # --------------------------------------------------------------------------
@@ -78,6 +84,10 @@ class AgentController:
     confirm_callback: Callable[[ConfirmationRequest], bool] = field(
         default=lambda req: False
     )
+    input_callback: Callable[[str, bool], str] = field(
+        default=lambda prompt, multiline: ""
+    )
+    workflows_dir: Path | None = None
     competition_mode: bool = True
     max_iterations: int = 25
 
@@ -85,6 +95,8 @@ class AgentController:
     _session_counters: dict = field(default_factory=dict)
     _system_prompt: str | None = None
     _env_profile_id: str | None = None
+    _workflow_engine: "WorkflowEngine | None" = None
+    _planning_engine: "PlanningEngine | None" = None
 
     def __post_init__(self) -> None:
         env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
@@ -92,6 +104,22 @@ class AgentController:
             env_sanitized, self.registry, self.competition_mode
         )
         self._env_profile_id = self.audit_log.log_env_profile(env_sanitized)
+
+    def _get_workflow_engine(self) -> "WorkflowEngine":
+        if self._workflow_engine is None:
+            from sysdialogue.agent.workflow_engine import WorkflowEngine
+            self._workflow_engine = WorkflowEngine(
+                controller=self,
+                workflows_dir=self.workflows_dir or _DEFAULT_WORKFLOWS_DIR,
+                input_callback=self.input_callback,
+            )
+        return self._workflow_engine
+
+    def _get_planning_engine(self) -> "PlanningEngine":
+        if self._planning_engine is None:
+            from sysdialogue.agent.planner import PlanningEngine
+            self._planning_engine = PlanningEngine(controller=self)
+        return self._planning_engine
 
     # ------------------------------------------------------------------
     # 主入口
@@ -217,19 +245,60 @@ class AgentController:
 
     def _handle_set_execution_mode(self, args: dict, tool_use_id: str) -> dict:
         mode = args.get("mode", "direct")
+
+        if mode == "workflow":
+            wf_name = args.get("workflow_name", "") or ""
+            wf_params = args.get("workflow_params") or {}
+            self.audit_log.log_decision(
+                tool=META_SET_EXECUTION_MODE, args=args,
+                risk_level="SAFE", rule_ids=[],
+                reason=f"workflow 路由：{wf_name}", decision="workflow_start",
+                env_profile_id=self._env_profile_id,
+            )
+            try:
+                engine = self._get_workflow_engine()
+                execution = engine.run(wf_name, wf_params)
+            except FileNotFoundError as e:
+                return _tool_result_block(tool_use_id, str(e), is_error=True)
+            except ValueError as e:
+                return _tool_result_block(tool_use_id, f"参数错误：{e}", is_error=True)
+            summary = execution.summary()
+            summary["message"] = execution.final_message
+            return _tool_result_block(
+                tool_use_id,
+                json.dumps(summary, ensure_ascii=False),
+                is_error=(execution.final_status in ("failed", "rollback_failed")),
+            )
+
+        if mode == "plan":
+            plan_steps = args.get("plan_steps") or []
+            planner = self._get_planning_engine()
+            frozen = planner.freeze(plan_steps)
+            self.audit_log.log_decision(
+                tool=META_SET_EXECUTION_MODE, args=args,
+                risk_level="SAFE", rule_ids=[],
+                reason=f"plan 冻结 {frozen.plan_id}", decision="plan_frozen",
+                plan_id=frozen.plan_id,
+                env_profile_id=self._env_profile_id,
+            )
+            return _tool_result_block(
+                tool_use_id,
+                json.dumps(frozen.summary(), ensure_ascii=False) + "\n\n" + frozen.display_text(),
+                is_error=False,
+            )
+
+        # direct 或未指定
         self.audit_log.log_decision(
             tool=META_SET_EXECUTION_MODE, args=args,
             risk_level="SAFE", rule_ids=[],
-            reason=f"set_execution_mode={mode}（Task 10 打桩）",
-            decision="set_execution_mode_ack",
+            reason=f"set_execution_mode={mode}", decision="set_execution_mode_ack",
             env_profile_id=self._env_profile_id,
         )
-        msg = {
-            "plan": "已记录 plan 模式意图；PlanningEngine 尚未接入（Task 11 完成后路由）。请继续按步骤调用工具。",
-            "workflow": f"已记录 workflow={args.get('workflow_name','')}；WorkflowEngine 尚未接入（Task 11）。",
-            "direct": "已声明 direct 模式，可直接调用工具。",
-        }.get(mode, "已记录执行模式声明。")
-        return _tool_result_block(tool_use_id, msg, is_error=False)
+        return _tool_result_block(
+            tool_use_id,
+            "已声明 direct 模式，可直接调用工具。",
+            is_error=False,
+        )
 
     def _handle_propose_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
         if self.competition_mode:
