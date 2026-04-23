@@ -9,6 +9,7 @@ from sysdialogue.ui.tui_app import (
     _format_event_message,
     _looks_like_failure_reply,
 )
+from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
 from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision
 
@@ -74,3 +75,50 @@ def test_tui_confirmation_result_is_user_visible() -> None:
     assert "批阅" in approved
     assert "已批准 manage_service" in approved
     assert "已拒绝 manage_service" in denied
+
+
+def test_tui_error_presentation_keeps_technical_details_foldable() -> None:
+    traceback_text = "Traceback (most recent call last):\nValueError: boom"
+    presentation = present_error(traceback_text)
+
+    assert "未处理异常" in presentation.summary
+    assert "ValueError: boom" in presentation.summary
+    assert presentation.detail == traceback_text
+    assert presentation.suggestions
+
+
+def test_task_timeline_card_groups_react_events() -> None:
+    card = TaskTimelineCard("检查系统版本和负载")
+    card.apply_event("task_started", "raw", {})
+    card.apply_event(
+        "model_response",
+        "raw model response",
+        {
+            "analysis_summary": "模型选择下一步调用：get_system_info。",
+            "visible_text_preview": "我会先观察系统。",
+        },
+    )
+    card.apply_event("tool_started", "raw", {"tool": "get_system_info", "args_preview": "{}"})
+    card.apply_event(
+        "tool_finished",
+        "raw",
+        {"tool": "get_system_info", "success": True, "output_preview": "hostname=testbox"},
+    )
+    card.apply_event("verification", "只读系统信息已返回。", {})
+    card.apply_event(
+        "task_finished",
+        "raw",
+        {
+            "status": "completed",
+            "summary": "系统信息检查完成。",
+            "evidence": ["hostname=testbox"],
+            "verification": "只读系统信息已返回。",
+        },
+    )
+
+    state = card.snapshot()
+    assert state["status"] == "已完成"
+    assert any("模型选择下一步调用" in item for item in state["thinking"])
+    assert any("get_system_info" in item for item in state["tools"])
+    assert any("只读系统信息" in item for item in state["verification"])
+    assert any("系统信息检查完成" in item for item in state["results"])

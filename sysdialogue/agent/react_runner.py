@@ -157,7 +157,16 @@ class ReActRunner:
                     "请检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL 是否正确，"
                     "以及该 OpenAI-compatible 服务是否支持 Chat Completions / tool_calls。"
                 )
-                self._emit(task, "task_failed", "LLM call failed", {"error": str(exc)})
+                self._emit(task, "task_failed", "LLM call failed", {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "error_summary": "模型服务调用失败，任务已停止。",
+                    "error_detail": str(exc),
+                    "next_steps": [
+                        "检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL",
+                        "确认 OpenAI-compatible 服务支持 Chat Completions tool_calls",
+                    ],
+                })
                 self._commit_final(messages, task)
                 return task.final_reply
 
@@ -167,6 +176,9 @@ class ReActRunner:
             self._emit(task, "model_response", _model_response_summary(content), {
                 "iteration": iteration + 1,
                 "tool_count": len(tool_blocks),
+                "tool_names": [str(_block_attr(block, "name") or "") for block in tool_blocks],
+                "analysis_summary": _analysis_summary(content),
+                "visible_text_preview": _visible_text_preview(content),
             })
 
             if not tool_blocks:
@@ -242,7 +254,11 @@ class ReActRunner:
 
         task.final_status = "failed"
         task.final_reply = "达到最大 ReAct 迭代次数，请缩小任务范围或分步重试。"
-        self._emit(task, "task_failed", "Maximum ReAct iterations reached.")
+        self._emit(task, "task_failed", "Maximum ReAct iterations reached.", {
+            "status": "failed",
+            "error_summary": "达到最大 ReAct 迭代次数，任务未完成。",
+            "next_steps": ["缩小任务范围", "把目标拆成更明确的单步请求"],
+        })
         self._commit_final(messages, task)
         return task.final_reply
 
@@ -267,6 +283,10 @@ class ReActRunner:
             args.get("summary", ""),
             {
                 "status": status,
+                "summary": args.get("summary", ""),
+                "evidence": args.get("evidence") or [],
+                "verification": args.get("verification") or "",
+                "changed_state": bool(args.get("changed_state")),
                 "next_steps": args.get("next_steps") or [],
                 "remaining_risks": args.get("remaining_risks") or [],
                 "no_action_reason": args.get("no_action_reason") or "",
@@ -342,9 +362,13 @@ class ReActRunner:
         if name == META_SET_EXECUTION_MODE and args.get("mode") == "workflow":
             self._emit(task, "workflow_started", f"Workflow started: {args.get('workflow_name', '')}", {
                 "workflow_name": args.get("workflow_name", ""),
+                "args_preview": _preview_json(args),
             })
             return
-        self._emit(task, "tool_started", f"Tool started: {name}", {"tool": name})
+        self._emit(task, "tool_started", f"Tool started: {name}", {
+            "tool": name,
+            "args_preview": _preview_json(args),
+        })
 
     def _emit_tool_finished(self, task: TaskRun, name: str, args: dict, result_block: dict) -> None:
         success = not result_block.get("is_error")
@@ -352,11 +376,13 @@ class ReActRunner:
             self._emit(task, "workflow_finished", f"Workflow finished: {args.get('workflow_name', '')}", {
                 "workflow_name": args.get("workflow_name", ""),
                 "success": success,
+                **_tool_result_display_data(result_block),
             })
             return
         self._emit(task, "tool_finished", f"Tool finished: {name}", {
             "tool": name,
             "success": success,
+            **_tool_result_display_data(result_block),
         })
 
     def _commit_final(self, messages: list[dict], task: TaskRun) -> None:
@@ -492,6 +518,78 @@ def _model_response_summary(content: list) -> str:
         return "Model requested tools: " + ", ".join(str(name) for name in tool_names)
     text = " ".join(str(_block_attr(block, "text") or "") for block in content if _block_type(block) == "text")
     return (text[:160] if text else "Model returned no tool calls.")
+
+
+def _analysis_summary(content: list) -> str:
+    tool_names = [str(_block_attr(block, "name") or "") for block in content if _block_type(block) == "tool_use"]
+    visible_text = _visible_text_preview(content)
+    if tool_names:
+        names = ", ".join(name for name in tool_names if name)
+        if visible_text:
+            return f"模型给出可见分析摘要，并选择下一步调用：{names}。"
+        return f"模型选择下一步调用：{names}。"
+    if visible_text:
+        return "模型返回了可见文本，但还没有调用工具或 finish_task。"
+    return "模型没有返回可执行动作。"
+
+
+def _visible_text_preview(content: list, limit: int = 800) -> str:
+    parts = [
+        str(_block_attr(block, "text") or "").strip()
+        for block in content
+        if _block_type(block) == "text"
+    ]
+    text = "\n".join(part for part in parts if part)
+    return _truncate(text, limit)
+
+
+def _tool_result_display_data(result_block: dict) -> dict:
+    content = result_block.get("content") or ""
+    raw_preview = _truncate(str(content), 1800)
+    parsed = _parse_tool_result_json(result_block)
+    success = not result_block.get("is_error")
+    output = (
+        parsed.get("output")
+        or parsed.get("error")
+        or parsed.get("reason")
+        or parsed.get("message")
+        or parsed.get("data")
+        or ""
+    )
+    if isinstance(output, (dict, list)):
+        output_preview = _preview_json(output)
+    else:
+        output_preview = _truncate(str(output), 1000)
+    error_summary = "" if success else _friendly_tool_error(parsed, raw_preview)
+    return {
+        "output_preview": output_preview,
+        "error_summary": error_summary,
+        "raw_result_preview": raw_preview,
+    }
+
+
+def _friendly_tool_error(parsed: dict, raw_preview: str) -> str:
+    for key in ("error", "reason", "message"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return _truncate(value.strip(), 240)
+    if raw_preview:
+        return _truncate(raw_preview.strip(), 240)
+    return "工具返回失败，但没有提供详细错误。"
+
+
+def _preview_json(value, limit: int = 1000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        text = str(value)
+    return _truncate(text, limit)
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
 
 
 def _is_mutating_tool(name: str, args: dict) -> bool:

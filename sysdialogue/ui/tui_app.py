@@ -11,13 +11,14 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Button, Footer, Header, Input, RichLog, Static
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, Footer, Header, Input, Static
 
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
 from sysdialogue.ui.input_modal import InputModal
+from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
 
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
@@ -123,12 +124,13 @@ class SysDialogueTUI(App):
         self._turn_failed = False
         self._turn_cancelled = False
         self._choice_values: list[str] = []
+        self._current_card: TaskTimelineCard | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Container(
             Vertical(
-                RichLog(id="conversation", highlight=True, markup=True, wrap=True),
+                VerticalScroll(id="conversation"),
                 Horizontal(id="choice_bar", classes="hidden"),
                 Input(
                     placeholder="输入运维需求（例：查看系统版本 / 重启 nginx）…",
@@ -149,9 +151,16 @@ class SysDialogueTUI(App):
         self.title = "SysDialogue v6"
         self.sub_title = "Linux 运维智能代理"
         self._write_log(
-            "[bold cyan]欢迎使用 SysDialogue v6[/bold cyan]\n"
-            "输入自然语言运维需求，Enter 发送。\n"
-            "F3 切换审计面板 / F4 切换环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。\n"
+            Panel(
+                Markdown(
+                    "**欢迎使用 SysDialogue v6**\n\n"
+                    "输入自然语言运维需求，Enter 发送。\n\n"
+                    "F3 切换审计面板 / F4 切换环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。"
+                ),
+                title="SysDialogue",
+                border_style="cyan",
+                padding=(0, 1),
+            )
         )
         self.query_one("#user_input", Input).focus()
 
@@ -163,7 +172,6 @@ class SysDialogueTUI(App):
         if not text:
             return
         event.input.value = ""
-        self._write_log(f"[bold green]> 你:[/bold green] {text}")
         self._hide_choice_bar()
 
         self._start_turn(text)
@@ -180,13 +188,13 @@ class SysDialogueTUI(App):
         input_box = self.query_one("#user_input", Input)
         if input_box.disabled:
             return
-        self._write_log(f"[bold green]> 你选择:[/bold green] {text}")
         self._hide_choice_bar()
         self._start_turn(text)
 
     def _start_turn(self, text: str) -> None:
         self._turn_failed = False
         self._turn_cancelled = False
+        self._begin_task_card(text)
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = True
         self._set_status("思考中…")
@@ -206,11 +214,11 @@ class SysDialogueTUI(App):
     def _on_turn_done(self, reply: str, is_error: bool = False) -> None:
         self._worker = None
         if is_error or _looks_like_failure_reply(reply) or self._turn_failed:
-            self._write_error(reply)
+            self._finish_current_card(reply, is_error=True)
         elif self._turn_cancelled:
-            self._write_warning(reply, title="任务已取消")
+            self._finish_current_card(reply, is_error=False, cancelled=True)
         else:
-            self._write_assistant(reply)
+            self._finish_current_card(reply, is_error=False)
         self._refresh_audit_panel()
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = False
@@ -218,7 +226,33 @@ class SysDialogueTUI(App):
         self._set_status("就绪")
 
     def _write_log(self, renderable) -> None:
-        self.query_one("#conversation", RichLog).write(renderable)
+        self.query_one("#conversation", VerticalScroll).mount(
+            Static(renderable, classes="log_line")
+        )
+
+    def _begin_task_card(self, goal: str) -> None:
+        if self._current_card is not None:
+            self._current_card._collapse_after_finish()
+        card = TaskTimelineCard(goal)
+        self._current_card = card
+        self.query_one("#conversation", VerticalScroll).mount(card)
+
+    def _finish_current_card(
+        self,
+        reply: str,
+        *,
+        is_error: bool,
+        cancelled: bool = False,
+    ) -> None:
+        if self._current_card is None:
+            if is_error:
+                self._write_error(reply)
+            elif cancelled:
+                self._write_warning(reply, title="任务已取消")
+            else:
+                self._write_assistant(reply)
+            return
+        self._current_card.finish_with_reply(reply, is_error=is_error, cancelled=cancelled)
 
     def _write_assistant(self, reply: str) -> None:
         self._write_log(
@@ -272,6 +306,9 @@ class SysDialogueTUI(App):
         self.call_from_thread(write)
 
     def _write_event(self, stage: str, message: str, data: dict[str, Any]) -> None:
+        if self._current_card is not None:
+            self._current_card.apply_event(stage, message, data)
+            return
         label = _EVENT_LABELS.get(stage, "事件")
         style = _event_style(stage, data)
         text = Text()
@@ -320,9 +357,10 @@ class SysDialogueTUI(App):
         def show() -> None:
             if state["resolved"]:
                 return
-            self._write_log(
-                f"[yellow]需要确认:[/yellow] {req.tool} ({req.risk.level})"
-            )
+            if self._current_card is not None:
+                self._current_card.add_notice(f"等待用户批阅：{req.tool} ({req.risk.level})")
+            else:
+                self._write_log(f"[yellow]需要确认:[/yellow] {req.tool} ({req.risk.level})")
             self._refresh_runtime_status()
             modal = ConfirmModal(req)
             state["screen"] = modal
@@ -351,7 +389,10 @@ class SysDialogueTUI(App):
             if state["resolved"]:
                 return
             mode = "多行" if multiline else "单行"
-            self._write_log(f"[yellow]需要输入:[/yellow] {prompt} ({mode})")
+            if self._current_card is not None:
+                self._current_card.add_notice(f"需要补充输入：{prompt}（{mode}）")
+            else:
+                self._write_log(f"[yellow]需要输入:[/yellow] {prompt} ({mode})")
             self._refresh_runtime_status()
             modal = InputModal(prompt=prompt, multiline=multiline)
             state["screen"] = modal
@@ -388,7 +429,11 @@ class SysDialogueTUI(App):
         if self._confirm_state is current:
             self._confirm_state = None
         if req is not None:
-            self._write_log(_format_confirmation_result(req, approved))
+            result_text = _format_confirmation_result(req, approved)
+            if self._current_card is not None:
+                self._current_card.add_review_result(result_text)
+            else:
+                self._write_log(result_text)
         self._refresh_runtime_status()
 
     def _resolve_input_state(
@@ -426,11 +471,14 @@ class SysDialogueTUI(App):
             or self._input_state is not None
         )
         if not busy:
-            self._write_log("[yellow]当前没有正在执行的任务。[/yellow]")
+            self._write_log(Panel("当前没有正在执行的任务。", border_style="yellow", title="提示"))
             return
 
         self.controller.request_cancel()
-        self._write_log("[yellow]已请求取消当前执行。[/yellow]")
+        if self._current_card is not None:
+            self._current_card.add_notice("已请求取消当前执行。")
+        else:
+            self._write_log(Panel("已请求取消当前执行。", border_style="yellow", title="提示"))
         self._set_status("取消中…")
         self._resolve_confirm_state(False, dismiss=True)
         self._resolve_input_state("", dismiss=True)
@@ -449,7 +497,8 @@ class SysDialogueTUI(App):
         self._right_panel_mode = "audit"
 
     def action_clear_log(self) -> None:
-        self.query_one("#conversation", RichLog).clear()
+        self.query_one("#conversation", VerticalScroll).remove_children()
+        self._current_card = None
 
     def action_quit(self) -> None:
         self.exit()
@@ -574,19 +623,30 @@ def _looks_like_failure_reply(reply: str) -> bool:
 
 def _format_error_markdown(reply: str) -> str:
     text = (reply or "").strip() or "未知错误。"
+    presentation = present_error(text)
+    suggestions = "\n".join(f"- {item}" for item in presentation.suggestions)
     if "Traceback (most recent call last)" in text:
         return (
             "### 执行异常\n\n"
-            "系统捕获到未处理异常，任务已经停止。\n\n"
+            f"{presentation.summary}\n\n"
+            f"{suggestions}\n\n"
+            "<details>\n"
+            "<summary>技术详情</summary>\n\n"
             "```text\n"
-            f"{text}\n"
+            f"{presentation.detail}\n"
             "```\n\n"
-            "请先查看上方流程事件和右侧审计面板，再决定是否重试。"
+            "</details>"
         )
     return (
         "### 任务未完成\n\n"
-        f"{text}\n\n"
-        "可以根据上方流程事件继续补充信息、修正配置，或重新发起更小范围的任务。"
+        f"{presentation.summary}\n\n"
+        f"{suggestions}\n\n"
+        "<details>\n"
+        "<summary>技术详情</summary>\n\n"
+        "```text\n"
+        f"{presentation.detail}\n"
+        "```\n\n"
+        "</details>"
     )
 
 
