@@ -12,6 +12,7 @@ venv/
 env/
 
 # 本地状态与审计日志
+.env
 .sysdialogue/
 ~/.sysdialogue/
 
