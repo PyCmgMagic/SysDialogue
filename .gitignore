@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 本地状态与审计日志
+.sysdialogue/
+~/.sysdialogue/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 本地测试与临时文件
+_test_*.py
+*.log
+.DS_Store
+Thumbs.db

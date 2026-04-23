@@ -265,25 +265,14 @@ def _classify_get_resource_stats(args: dict, ep: EnvProfile) -> RiskDecision:
 
 
 def _classify_manage_firewall(args: dict, ep: EnvProfile) -> RiskDecision:
+    """本地语义分级；远程锁门（B015/B016/B017/WH023）由 remote_lockout 统一叠加。"""
     action = (args.get("action") or "").lower()
     if action == "list":
         return RiskDecision(level="SAFE")
-    if action == "flush":
-        if ep.get("remote_mode"):
-            return RiskDecision(level="BLOCK", rule_ids=["B015"], reason="远程模式禁止 flush 防火墙")
-        return RiskDecision(
-            level="WARN-HIGH", rule_ids=["WH010"],
-            reason="flush 防火墙规则", requires_confirmation=True,
-        )
-    if action == "set-default":
-        policy = (args.get("policy") or "").lower()
-        if ep.get("remote_mode") and policy in ("drop", "reject"):
-            return RiskDecision(level="BLOCK", rule_ids=["B016"], reason="远程模式禁止设 drop/reject 默认策略")
-        return RiskDecision(
-            level="WARN-HIGH", rule_ids=["WH010"],
-            reason="修改默认防火墙策略", requires_confirmation=True,
-        )
-    if action in ("allow", "deny", "delete"):
+    if action == "reload":
+        # 本地 reload WARN-LOW；远程模式下 remote_lockout 会升级为 WH023
+        return RiskDecision(level="WARN-LOW", reason="防火墙配置 reload")
+    if action in ("flush", "set-default", "allow", "deny", "delete"):
         return RiskDecision(
             level="WARN-HIGH", rule_ids=["WH010"],
             reason=f"防火墙规则变更 {action}", requires_confirmation=True,
@@ -401,12 +390,27 @@ def _classify_manage_sysctl(args: dict, ep: EnvProfile) -> RiskDecision:
 
 
 def _classify_resolve_dns(args: dict, ep: EnvProfile) -> RiskDecision:
-    return RiskDecision(level="SAFE")  # SSRF 细分由调用层处理
+    name = args.get("name", "")
+    resolver = args.get("resolver", "")
+    # WL016: 私网目标或私网 resolver
+    if pp.is_private_host(name) or (resolver and pp.is_private_host(resolver)):
+        return RiskDecision(
+            level="WARN-LOW", rule_ids=["WL016"],
+            reason="DNS 查询目标或 resolver 位于私网地址段",
+        )
+    return RiskDecision(level="SAFE")
 
 
 def _classify_check_endpoint(args: dict, ep: EnvProfile) -> RiskDecision:
     kind = (args.get("kind") or "tcp").lower()
+    host = args.get("host", "")
     timeout = args.get("timeout", 5)
+    # WL016: 私网探测（优先级 > WL015）
+    if pp.is_private_host(host):
+        return RiskDecision(
+            level="WARN-LOW", rule_ids=["WL016"],
+            reason=f"探测目标 {host} 位于私网地址段",
+        )
     if kind in ("http", "tls") and timeout > 10:
         return RiskDecision(level="WARN-LOW", rule_ids=["WL015"], reason="HTTP/TLS 探测超时较长")
     return RiskDecision(level="SAFE")
@@ -498,10 +502,14 @@ def _classify_manage_hosts_entries(args: dict, ep: EnvProfile) -> RiskDecision:
     action = (args.get("action") or "list").lower()
     if action == "list":
         return RiskDecision(level="SAFE")
-    # B024: 修改受保护条目
-    hostname = args.get("hostname", "")
-    if hostname.lower() == "localhost":
-        return RiskDecision(level="BLOCK", rule_ids=["B024"], reason="禁止修改 localhost 受保护条目")
+    # B024: 修改受保护条目（hostname=localhost 或 ip=127.0.0.1/::1）
+    hostname = args.get("hostname")
+    ip_addrs = args.get("ip_addrs") or []
+    if pp.matches_hosts_protected(hostname, ip_addrs):
+        return RiskDecision(
+            level="BLOCK", rule_ids=["B024"],
+            reason="禁止修改 localhost / 127.0.0.1 / ::1 受保护 hosts 条目",
+        )
     return RiskDecision(
         level="WARN-HIGH",
         reason=f"修改 /etc/hosts 条目 {action} 需确认", requires_confirmation=True,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import os
 import re
+import socket
 
 # --------------------------------------------------------------------------
 # 具名集合
@@ -222,6 +224,57 @@ def has_path_traversal(path: str) -> bool:
     """检测路径中是否包含 .. 组件。"""
     parts = path.replace("\\", "/").split("/")
     return ".." in parts
+
+
+# --------------------------------------------------------------------------
+# 网络策略辅助（WL016 / B024）
+# --------------------------------------------------------------------------
+
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),    # 链路本地
+    ipaddress.ip_network("fc00::/7"),           # IPv6 ULA
+]
+_LOCALHOST_WHITELIST = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_private_host(host: str) -> bool:
+    """WL016：host 是否解析到私网/链路本地地址（localhost 白名单除外）。
+
+    对于无法解析的主机名返回 False（由执行层处理解析失败）。
+    localhost/127.0.0.1/::1 视为健康检查白名单，不触发 WL016。
+    """
+    if not host:
+        return False
+    h = host.strip().lower()
+    if h in _LOCALHOST_WHITELIST:
+        return False
+    try:
+        addr = ipaddress.ip_address(h)
+    except ValueError:
+        try:
+            resolved = socket.gethostbyname(h)
+            addr = ipaddress.ip_address(resolved)
+        except Exception:
+            return False
+    return any(addr in net for net in _PRIVATE_NETWORKS)
+
+
+def matches_hosts_protected(hostname: str | None, ip_addrs: list[str] | None) -> bool:
+    """B024：hostname/ip_addrs 是否命中 HOSTS_PROTECTED_ENTRIES。
+
+    任一输入命中即视为修改受保护条目。
+    """
+    if hostname and hostname.strip().lower() == "localhost":
+        return True
+    if ip_addrs:
+        protected_ips = {ip for ip, _ in HOSTS_PROTECTED_ENTRIES}
+        for ip in ip_addrs:
+            if ip and ip.strip() in protected_ips:
+                return True
+    return False
 
 
 CRITICAL_SERVICES: set[str] = {
