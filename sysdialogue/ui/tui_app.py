@@ -187,7 +187,7 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 welcome,
-                border_style="cyan 50%",
+                border_style="dim cyan",
                 padding=(1, 2),
                 title_align="left",
             )
@@ -275,7 +275,7 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 body,
-                border_style="cyan 40%",
+                border_style="dim cyan",
                 padding=(0, 2),
                 title_align="left",
             )
@@ -327,7 +327,7 @@ class SysDialogueTUI(App):
                 Markdown(reply or "（无输出）"),
                 title="● SysDialogue",
                 title_align="left",
-                border_style="magenta 60%",
+                border_style="magenta",
                 padding=(1, 2),
             )
         )
@@ -338,7 +338,7 @@ class SysDialogueTUI(App):
                 Markdown(_format_error_markdown(reply)),
                 title="✕ 执行遇到问题",
                 title_align="left",
-                border_style="red 65%",
+                border_style="red",
                 padding=(1, 2),
             )
         )
@@ -349,7 +349,7 @@ class SysDialogueTUI(App):
                 Markdown(reply or "当前任务已停止。"),
                 title=f"◐ {title}",
                 title_align="left",
-                border_style="yellow 65%",
+                border_style="yellow",
                 padding=(1, 2),
             )
         )
