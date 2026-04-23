@@ -27,30 +27,37 @@ class TaskTimelineCard(Vertical):
     DEFAULT_CSS = """
     TaskTimelineCard {
         height: auto;
-        margin: 1 0;
-        padding: 0 1;
-        border: round $primary 45%;
+        margin: 0 0 1 0;
+        padding: 1 2;
+        border: round $primary 35%;
+        background: $boost 4%;
     }
     TaskTimelineCard.running {
-        border: round $accent 60%;
+        border: round $accent 55%;
     }
     TaskTimelineCard.failed {
-        border: round $error 70%;
+        border: round $error 60%;
     }
     TaskTimelineCard.cancelled {
-        border: round $warning 70%;
+        border: round $warning 60%;
     }
     TaskTimelineCard.completed {
-        border: round $success 65%;
+        border: round $success 55%;
     }
     TaskTimelineCard .task_header {
         text-style: bold;
+        color: $text;
     }
     TaskTimelineCard .task_status {
         color: $text-muted;
+        margin: 0 0 1 0;
     }
     TaskTimelineCard Collapsible {
-        margin-top: 1;
+        margin: 0;
+        padding: 0;
+    }
+    TaskTimelineCard Collapsible > Contents {
+        padding: 0 0 0 2;
     }
     """
 
@@ -76,13 +83,13 @@ class TaskTimelineCard(Vertical):
         self._error_body = Static()
         self._detail_body = Static()
         self._thinking_section = Collapsible(
-            self._thinking_body, title="思考过程", collapsed=False
+            self._thinking_body, title="思考", collapsed=True
         )
         self._tools_section = Collapsible(
             self._tools_body, title="工具执行", collapsed=False
         )
         self._verification_section = Collapsible(
-            self._verification_body, title="验证", collapsed=False
+            self._verification_body, title="验证", collapsed=True
         )
         self._result_section = Collapsible(
             self._result_body, title="结果", collapsed=False
@@ -257,8 +264,19 @@ class TaskTimelineCard(Vertical):
 
     def _refresh(self) -> None:
         elapsed = max(0.0, time.monotonic() - self.started_at)
-        self._header.update(f"请求：{_shorten(self.goal, 76)}")
-        self._status_line.update(f"状态：{self.status} · {elapsed:.1f}s")
+        symbol, color = _status_symbol(self.status)
+        header = Text()
+        header.append(symbol, style=f"bold {color}")
+        header.append("  SysDialogue", style=f"bold {color}")
+        self._header.update(header)
+        status_line = Text()
+        status_line.append(self.status, style=color)
+        status_line.append("  ·  ", style="dim")
+        status_line.append(f"{elapsed:.1f}s", style="dim")
+        if self._correction_count:
+            status_line.append("  ·  ", style="dim")
+            status_line.append(f"纠偏 {self._correction_count}", style="yellow dim")
+        self._status_line.update(status_line)
         self._thinking_body.update(Markdown(_markdown_list(self._thinking, "等待模型分析。")))
         self._tools_body.update(Markdown(_markdown_list(self._tools, "尚未调用工具。")))
         self._verification_body.update(Markdown(_markdown_list(self._verification, "尚未记录验证。")))
@@ -348,6 +366,20 @@ def _last_exception_line(traceback_text: str) -> str:
         if re.match(r"^[A-Za-z_][\w.]*Error:|^[A-Za-z_][\w.]*Exception:", line):
             return _shorten(line, 160)
     return _shorten(lines[-1], 160)
+
+
+def _status_symbol(status: str) -> tuple[str, str]:
+    mapping = {
+        "运行中": ("◐", "cyan"),
+        "已完成": ("✓", "green"),
+        "部分完成": ("◑", "yellow"),
+        "失败": ("✕", "red"),
+        "未完成": ("✕", "red"),
+        "已阻止": ("⊘", "red"),
+        "需要补充信息": ("?", "yellow"),
+        "已取消": ("◦", "yellow"),
+    }
+    return mapping.get(status, ("●", "magenta"))
 
 
 def _status_label(status: str) -> str:
