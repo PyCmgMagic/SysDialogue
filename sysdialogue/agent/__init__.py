@@ -2,5 +2,13 @@
 
 from sysdialogue.agent.controller import AgentController, OpenAIChatClient
 from sysdialogue.agent.prompt import build_system_prompt
+from sysdialogue.agent.react_runner import ReActRunner, TaskEvent, TaskRun
 
-__all__ = ["AgentController", "OpenAIChatClient", "build_system_prompt"]
+__all__ = [
+    "AgentController",
+    "OpenAIChatClient",
+    "ReActRunner",
+    "TaskEvent",
+    "TaskRun",
+    "build_system_prompt",
+]

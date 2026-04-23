@@ -26,6 +26,17 @@ _EXECUTION_MODE_RULES = """【执行模式声明】
 propose_dynamic_tool 仅用于 37 个静态工具和内置 workflow 完全无法覆盖的全新能力。"""
 
 
+_REACT_PROTOCOL = """【ReAct 任务协议】
+所有用户输入都必须通过 ReAct 协议收口：
+1. 不能直接用自然语言结束任务；最终必须调用 finish_task。
+2. 运维、诊断、变更、远程目标机相关任务在 completed 前必须至少调用一次只读工具或 workflow 观察目标环境，并给出 evidence。
+3. 变更型任务必须遵循 observe → act → verify → finish；没有验证结论时不得用 completed 收口。
+4. 普通聊天、项目说明、文档解释、设计讨论也要调用 finish_task，但可用 no_action_reason 说明未执行系统操作。
+5. 工具失败后必须基于 tool_result 修正、降级、请求更多信息，或用 failed/blocked/need_info 收口；不得忽略失败。
+6. 不要输出隐藏思维链；只输出用户可见的计划摘要、观察摘要、验证结论和完成说明。
+finish_task 字段要求：status、summary 必填；completed 的运维任务必须提供 evidence；need_info/blocked/failed 必须提供 next_steps 或 no_action_reason。"""
+
+
 _SAFETY_SUMMARY = """【安全规则摘要】
 - BLOCK 级：直接拒绝，不可绕过（例：读取 /etc/shadow、删除 root 用户、远程模式停止 sshd）
 - WARN-HIGH：展示计划/影响面/回滚方案，必须经用户确认方可执行
@@ -57,12 +68,13 @@ def _render_env_profile(env_sanitized: dict) -> str:
 
 
 def _render_tools(registry: "ToolRegistry") -> str:
-    lines = ["【可用工具清单（37 个静态 + 2 个元工具）】"]
+    lines = ["【可用工具清单（37 个静态 + 3 个元工具）】"]
     for name, desc in registry.describe():
         head = desc.split("。")[0] if desc else ""
         lines.append(f"  - {name}: {head}")
     lines.append("  - set_execution_mode: 声明执行模式（plan/workflow/direct），见上方执行模式规则")
     lines.append("  - propose_dynamic_tool: 提出新工具（竞赛模式关闭）")
+    lines.append("  - finish_task: ReAct 任务收口，所有任务最终必须调用")
     return "\n".join(lines)
 
 
@@ -82,6 +94,7 @@ def build_system_prompt(
     if context_summary:
         sections.append("【跨轮可复用上下文】\n" + context_summary)
     sections.extend([
+        _REACT_PROTOCOL,
         _EXECUTION_MODE_RULES,
         _SAFETY_SUMMARY,
         _competition_note(competition_mode),

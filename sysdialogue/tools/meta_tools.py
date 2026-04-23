@@ -8,6 +8,7 @@ from __future__ import annotations
 
 META_SET_EXECUTION_MODE = "set_execution_mode"
 META_PROPOSE_DYNAMIC_TOOL = "propose_dynamic_tool"
+META_FINISH_TASK = "finish_task"
 
 
 SET_EXECUTION_MODE_SCHEMA: dict = {
@@ -89,9 +90,36 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
 }
 
 
+FINISH_TASK_SCHEMA: dict = {
+    "name": META_FINISH_TASK,
+    "description": (
+        "ReAct 任务收口工具。所有用户输入都必须通过本工具结束；不能直接用自然语言结束。"
+        "用于报告完成状态、证据、验证结论、剩余风险和下一步。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["completed", "partial", "failed", "blocked", "need_info", "cancelled"],
+            },
+            "summary": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "verification": {"type": "string"},
+            "changed_state": {"type": "boolean", "default": False},
+            "remaining_risks": {"type": "array", "items": {"type": "string"}},
+            "next_steps": {"type": "array", "items": {"type": "string"}},
+            "no_action_reason": {"type": "string"},
+        },
+        "required": ["status", "summary"],
+    },
+}
+
+
 META_TOOL_SCHEMAS: list[dict] = [
     SET_EXECUTION_MODE_SCHEMA,
     PROPOSE_DYNAMIC_TOOL_SCHEMA,
+    FINISH_TASK_SCHEMA,
 ]
 
-META_TOOL_NAMES = {META_SET_EXECUTION_MODE, META_PROPOSE_DYNAMIC_TOOL}
+META_TOOL_NAMES = {META_SET_EXECUTION_MODE, META_PROPOSE_DYNAMIC_TOOL, META_FINISH_TASK}

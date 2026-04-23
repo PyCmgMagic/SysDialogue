@@ -68,6 +68,7 @@ class SysDialogueTUI(App):
         self.controller = controller
         controller.confirm_callback = self._confirm_callback
         controller.input_callback = self._input_callback
+        controller.event_callback = self._event_callback
         self._right_panel_mode = "audit"
         self._worker: threading.Thread | None = None
         self._confirm_state: dict[str, Any] | None = None
@@ -137,6 +138,15 @@ class SysDialogueTUI(App):
 
     def _write_log(self, text: str) -> None:
         self.query_one("#conversation", RichLog).write(text)
+
+    def _event_callback(self, event) -> None:
+        stage = getattr(event, "stage", "event")
+        message = getattr(event, "message", "")
+
+        def write() -> None:
+            self._write_log(f"[dim]· {stage}: {message}[/dim]")
+
+        self.call_from_thread(write)
 
     def _refresh_audit_panel(self) -> None:
         try:

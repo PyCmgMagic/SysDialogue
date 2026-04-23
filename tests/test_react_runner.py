@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+
+from sysdialogue.agent.controller import AgentController, LLMResponse
+from sysdialogue.agent.react_runner import _requires_environment_feedback
+from sysdialogue.audit.trace_store import AuditLog
+from sysdialogue.runtime.secure_runner import LocalExecutor
+from sysdialogue.tools.base import ToolResult
+from sysdialogue.tools.registry import ToolDef, ToolRegistry
+
+
+class FakeLLM:
+    def __init__(self, responses: list[list[dict]]):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def messages_create(self, *, system, messages, tools):
+        self.calls.append({"system": system, "messages": deepcopy(messages), "tools": deepcopy(tools)})
+        content = self.responses.pop(0)
+        stop_reason = "tool_use" if any(block.get("type") == "tool_use" for block in content) else "stop"
+        return LLMResponse(content=content, stop_reason=stop_reason)
+
+
+def _tool_use(name: str, args: dict, tool_id: str = "call_1") -> dict:
+    return {"type": "tool_use", "id": tool_id, "name": name, "input": args}
+
+
+def _finish(args: dict, tool_id: str = "finish_1") -> dict:
+    return _tool_use("finish_task", args, tool_id)
+
+
+def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = None):
+    events = []
+    controller = AgentController(
+        executor=LocalExecutor(),
+        env_profile={"remote_mode": False, "current_user": "tester"},
+        audit_log=AuditLog(log_dir=str(tmp_path / "audit")),
+        registry=registry or ToolRegistry(),
+        llm_client=llm,
+        event_callback=events.append,
+    )
+    return controller, events
+
+
+def _registry_with_system_info() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    def get_system_info(executor):
+        return ToolResult(
+            success=True,
+            data={"hostname": "testbox", "load": "0.01"},
+            cmd_trace=["uname", "-a"],
+        )
+
+    registry.register(
+        ToolDef(
+            name="get_system_info",
+            fn=get_system_info,
+            schema={
+                "name": "get_system_info",
+                "description": "Get system info",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    return registry
+
+
+def _registry_with_mutation_and_validation() -> ToolRegistry:
+    registry = _registry_with_system_info()
+
+    def mutate_marker(executor):
+        return ToolResult(success=True, data={"changed": True})
+
+    def validate_config(executor, path: str, target_type: str = "auto"):
+        return ToolResult(success=True, data={"path": path, "valid": True})
+
+    registry.register(
+        ToolDef(
+            name="mutate_marker",
+            fn=mutate_marker,
+            schema={
+                "name": "mutate_marker",
+                "description": "Mutate test marker",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    registry.register(
+        ToolDef(
+            name="validate_config",
+            fn=validate_config,
+            schema={
+                "name": "validate_config",
+                "description": "Validate config",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "target_type": {"type": "string"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        )
+    )
+    return registry
+
+
+def test_requires_environment_feedback_classifies_greeting_and_ops() -> None:
+    assert _requires_environment_feedback("你好") is False
+    assert _requires_environment_feedback("检查系统版本和负载") is True
+
+
+def test_greeting_can_finish_without_system_action(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _finish({
+                "status": "completed",
+                "summary": "你好，我在。",
+                "no_action_reason": "这是普通问候，不需要访问系统环境。",
+            })
+        ]
+    ])
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("你好")
+
+    assert "你好" in reply
+    assert "未执行系统操作" in reply
+    assert [event.stage for event in events] == ["task_started", "model_response", "task_finished"]
+
+
+def test_operational_task_cannot_complete_without_observation(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _finish({
+                "status": "completed",
+                "summary": "系统正常。",
+                "evidence": ["未观察"],
+            })
+        ],
+        [
+            _finish({
+                "status": "need_info",
+                "summary": "还需要先观察目标环境。",
+                "next_steps": ["调用只读工具检查系统状态"],
+            }, tool_id="finish_2")
+        ],
+    ])
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("检查系统版本和负载")
+
+    assert "还需要先观察" in reply
+    assert llm.calls[1]["messages"][-1]["content"][0]["is_error"] is True
+    assert "task_finished" in [event.stage for event in events]
+
+
+def test_tool_success_then_finish_completes_operational_task(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("get_system_info", {})],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "已检查系统信息。",
+                "evidence": ["hostname=testbox", "load=0.01"],
+                "verification": "只读系统信息已返回。",
+            })
+        ],
+    ])
+    controller, events = _controller(tmp_path, llm, _registry_with_system_info())
+
+    reply = controller.run_turn("检查系统版本和负载")
+
+    assert "已检查系统信息" in reply
+    stages = [event.stage for event in events]
+    assert stages[:2] == ["task_started", "model_response"]
+    assert "tool_started" in stages
+    assert "tool_finished" in stages
+    assert "verification" in stages
+    assert stages[-1] == "task_finished"
+
+
+def test_plain_text_responses_trigger_react_correction_then_failure(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [{"type": "text", "text": "系统正常。"}],
+        [{"type": "text", "text": "我已经回答了。"}],
+        [{"type": "text", "text": "仍然没有工具。"}],
+    ])
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("检查系统版本和负载")
+
+    assert "未按 ReAct 协议" in reply
+    assert len(llm.calls) == 3
+    assert "ReAct protocol correction" in llm.calls[1]["messages"][-1]["content"]
+    assert "ReAct protocol correction" in llm.calls[2]["messages"][-1]["content"]
+    assert [event.stage for event in events].count("correction") == 2
+
+
+def test_finish_task_requires_summary(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_finish({"status": "completed", "no_action_reason": "普通聊天"})],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "已按协议收口。",
+                "no_action_reason": "普通聊天，不访问系统。",
+            }, tool_id="finish_2")
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("你好")
+
+    assert "已按协议收口" in reply
+    assert llm.calls[1]["messages"][-1]["content"][0]["is_error"] is True
+
+
+def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("get_system_info", {})],
+        [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "已经修改并验证。",
+                "evidence": ["mutate_marker changed=true"],
+                "verification": "模型声称已验证，但还没有验证工具结果。",
+                "changed_state": True,
+            })
+        ],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="validate_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "已经修改并完成验证。",
+                "evidence": ["mutate_marker changed=true", "validate_config valid=true"],
+                "verification": "validate_config 在变更后返回 valid=true。",
+                "changed_state": True,
+            }, tool_id="finish_2")
+        ],
+    ])
+    controller, events = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("修改配置并验证")
+
+    assert "完成验证" in reply
+    rejected_result = llm.calls[3]["messages"][-1]["content"][0]
+    assert rejected_result["is_error"] is True
+    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+    stages = [event.stage for event in events]
+    assert stages.count("correction") == 1

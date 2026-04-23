@@ -12,6 +12,7 @@ def run_simple_cli(config) -> int:
         confirm_callback=_confirm_callback,
         input_callback=_input_callback,
     )
+    runtime.controller.event_callback = _event_callback
     try:
         print("SysDialogue Simple CLI")
         print("输入运维需求开始对话，输入 quit / exit 退出。")
@@ -59,3 +60,9 @@ def _input_callback(prompt: str, multiline: bool) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def _event_callback(event) -> None:
+    stage = getattr(event, "stage", "event")
+    message = getattr(event, "message", "")
+    print(f"system> [{stage}] {message}")

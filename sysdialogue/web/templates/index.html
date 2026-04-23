@@ -121,6 +121,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .msg.error .bubble { background: #fff5f5; border: 1px solid #ffc0c0; color: var(--red); font-family: var(--mono); font-size: 12px; }
 .msg.system .bubble { background: transparent; border: none; color: var(--text3); font-size: 11px; padding: 0; }
 
+/* timeline */
+#timeline {
+  display: none; margin: 0 48px 10px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: #fafafa; max-height: 150px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px; color: var(--text2);
+}
+#timeline.visible { display: block; }
+.event-line { padding: 3px 0; border-bottom: 1px dotted #e5e5e5; }
+.event-line:last-child { border-bottom: none; }
+.event-stage { color: var(--blue); font-weight: 600; }
+
 /* thinking */
 .thinking-dots { display: inline-flex; gap: 4px; align-items: center; padding: 4px 0; }
 .thinking-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); animation: blink 1.2s infinite; }
@@ -243,6 +255,9 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
     <!-- chat -->
     <div id="chat"></div>
 
+    <!-- ReAct timeline -->
+    <div id="timeline"></div>
+
     <!-- confirm banner -->
     <div id="confirm-banner">
       <div class="cf-title" id="cf-level"></div>
@@ -288,11 +303,13 @@ const SESSION_ID = "{{ session_id }}";
 const POLL_MS = 1200;
 
 let knownEntries = 0;
+let knownEvents = 0;
 let thinkingEl = null;
 let polling = null;
 let hasStarted = false;
 
 const chat = document.getElementById("chat");
+const timeline = document.getElementById("timeline");
 const welcome = document.getElementById("welcome");
 const input = document.getElementById("msg-input");
 const btnSend = document.getElementById("btn-send");
@@ -405,10 +422,26 @@ function syncEntries(entries) {
   knownEntries = entries.length;
 }
 
+function appendEvent(e) {
+  timeline.classList.add("visible");
+  const div = document.createElement("div");
+  div.className = "event-line";
+  div.innerHTML = `<span class="event-stage">${esc(e.stage || "event")}</span> ${esc(e.message || "")}`;
+  timeline.appendChild(div);
+  timeline.scrollTop = timeline.scrollHeight;
+}
+
+function syncEvents(events) {
+  if (events.length <= knownEvents) return;
+  for (let i = knownEvents; i < events.length; i++) appendEvent(events[i]);
+  knownEvents = events.length;
+}
+
 async function poll() {
   try {
     const s = await api("/state");
     syncEntries(s.entries || []);
+    syncEvents(s.task_events || []);
     renderState(s);
   } catch (_) {}
 }

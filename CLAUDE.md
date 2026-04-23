@@ -1,7 +1,7 @@
 # SysDialogue v6 — 开发交接文档
 
 > 设计文档：`framework/claudeplan6.md`（1684 行，19 章，完整独立设计，无需参考历史版本）
-> 当前状态：v6 主骨架、OpenAI-compatible Chat Completions 适配、远程目标机文件访问、`--run-scheduled-job`、`--simple`、Web 控制台、ConversationManager、TUI 取消/输入链路均已落地；Linux 真机链路仍需最终验收。
+> 当前状态：v6 主骨架、任务级 ReAct runtime、OpenAI-compatible Chat Completions 适配、远程目标机文件访问、`--run-scheduled-job`、`--simple`、Web 控制台、ConversationManager、TUI 取消/输入链路均已落地；Linux 真机链路仍需最终验收。
 > 当前入口：`python -m sysdialogue.app.cli --verify/--demo/--simple/--web/(无参启动 TUI)`，Windows 本地 `--demo` 会明确返回“不支持本地 Linux 巡检演示”而非模糊失败。
 
 ---
@@ -224,10 +224,12 @@ class SafetyDecision:
     reason: str
 ```
 
-### AgentController.run_turn 调用流程（完整闭环）
+### AgentController.run_turn 调用流程（ReAct 闭环）
 ```
-用户输入 → messages_create
-  → 收到 tool_use
+用户输入 → ReActRunner.run
+  → task_started
+  → messages_create
+  → 收到 tool_use / finish_task
   → 元工具拦截（set_execution_mode=workflow → WorkflowEngine.run；mode=plan → PlanningEngine.freeze）
   → 非元工具：RiskClassifier.classify（叠加 remote_lockout）
     → audit.log_decision(level)
@@ -236,8 +238,10 @@ class SafetyDecision:
     → 执行：registry.call(name, args, executor, session_counters, env_profile)
     → audit.log_command(cmd_trace, exit_code, output_preview)
     → 返回 tool_result
-  → 循环直到 stop_reason != tool_use
-  → 返回 assistant 文本
+  → 模型基于 tool_result 继续 observe/act/verify
+  → finish_task 通过完成门校验
+  → task_finished / task_failed
+  → 返回最终用户摘要
 ```
 
 ### WorkflowEngine 执行约定

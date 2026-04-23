@@ -20,9 +20,9 @@ from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.tools.meta_tools import (
+    META_FINISH_TASK,
     META_PROPOSE_DYNAMIC_TOOL,
     META_SET_EXECUTION_MODE,
-    META_TOOL_SCHEMAS,
 )
 
 if TYPE_CHECKING:
@@ -112,6 +112,7 @@ class AgentController:
     input_callback: Callable[[str, bool], str] = field(
         default=lambda prompt, multiline: ""
     )
+    event_callback: Callable[[Any], None] = field(default=lambda event: None)
     workflows_dir: Path | None = None
     dynamic_registry: Any = None  # 可选 DynamicToolRegistry 实例（dev 模式）
     competition_mode: bool = True
@@ -157,53 +158,10 @@ class AgentController:
     # ------------------------------------------------------------------
 
     def run_turn(self, user_message: str) -> str:
-        """单轮对话：返回 assistant 最终自然语言回复。"""
-        self.clear_cancel()
-        messages = self.conversation_manager.prepare_turn(user_message)
-        all_tools = self.registry.all_schemas() + META_TOOL_SCHEMAS
+        """Run one user turn through the task-level ReAct runtime."""
+        from sysdialogue.agent.react_runner import ReActRunner
 
-        for _ in range(self.max_iterations):
-            if self.is_cancel_requested():
-                self.conversation_manager.commit_turn(messages)
-                return "当前执行已取消。"
-            try:
-                response = self.llm_client.messages_create(
-                    system=self._current_system_prompt(),
-                    messages=messages,
-                    tools=all_tools,
-                )
-            except Exception as exc:
-                self.conversation_manager.commit_turn(messages)
-                return (
-                    f"LLM 调用失败：{exc}\n"
-                    "请检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL 是否正确，"
-                    "以及该 OpenAI-compatible 服务是否支持 Chat Completions / tool_calls。"
-                )
-            content = _content_as_list(response.content)
-            messages.append({"role": "assistant", "content": content})
-
-            stop_reason = getattr(response, "stop_reason", None)
-            if stop_reason != "tool_use":
-                self.conversation_manager.commit_turn(messages)
-                return _extract_text(content)
-
-            tool_result_blocks = []
-            for block in content:
-                if _block_type(block) != "tool_use":
-                    continue
-                if self.is_cancel_requested():
-                    self.conversation_manager.commit_turn(messages)
-                    return "当前执行已取消。"
-                name = _block_attr(block, "name")
-                args = _block_attr(block, "input") or {}
-                tool_use_id = _block_attr(block, "id")
-                result_block = self._dispatch_tool(name, args, tool_use_id)
-                tool_result_blocks.append(result_block)
-
-            messages.append({"role": "user", "content": tool_result_blocks})
-
-        self.conversation_manager.commit_turn(messages)
-        return "（达到最大迭代次数，请分步重试或精简需求）"
+        return ReActRunner(self).run(user_message)
 
     # ------------------------------------------------------------------
     # 工具分派
@@ -216,6 +174,12 @@ class AgentController:
             return self._handle_set_execution_mode(args, tool_use_id)
         if name == META_PROPOSE_DYNAMIC_TOOL:
             return self._handle_propose_dynamic_tool(args, tool_use_id)
+        if name == META_FINISH_TASK:
+            return _tool_result_block(
+                tool_use_id,
+                "finish_task is handled by ReActRunner and cannot be dispatched as an OS tool.",
+                is_error=True,
+            )
 
         # 注册表校验
         if not self.registry.has(name):
@@ -247,6 +211,16 @@ class AgentController:
             )
 
         if decision.requires_confirmation:
+            self._emit_task_event(
+                "confirmation_requested",
+                f"{name} requires confirmation ({decision.level})",
+                {
+                    "tool": name,
+                    "risk_level": decision.level,
+                    "rule_ids": decision.rule_ids,
+                    "reason": decision.reason,
+                },
+            )
             req = ConfirmationRequest(
                 tool=name, args=args, risk=decision,
                 rollback_hint=decision.rollback_hint,
@@ -364,6 +338,17 @@ class AgentController:
 
     def is_cancel_requested(self) -> bool:
         return self._cancel_event.is_set()
+
+    def _emit_task_event(self, stage: str, message: str, data: dict | None = None) -> None:
+        from sysdialogue.agent.react_runner import TaskEvent
+
+        self._emit_task_event_obj(TaskEvent(stage=stage, message=message, data=data or {}))
+
+    def _emit_task_event_obj(self, event: Any) -> None:
+        try:
+            self.event_callback(event)
+        except Exception:
+            pass
 
     def _current_system_prompt(self) -> str:
         return build_system_prompt(

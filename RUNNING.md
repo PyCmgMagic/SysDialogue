@@ -6,7 +6,7 @@
 cd D:\项目\Nexus
 ```
 
-SysDialogue 是面向 Linux 服务器运维场景的智能代理。它通过 OpenAI-compatible Chat Completions API 调用模型，可从 TUI、轻量 CLI、Web 控制台或计划任务入口运行，并通过固定工具集、风险分级、人工确认、备份回滚和审计日志来约束操作。
+SysDialogue 是面向 Linux 服务器运维场景的智能代理。它通过 OpenAI-compatible Chat Completions API 调用模型，可从 TUI、轻量 CLI、Web 控制台或计划任务入口运行，并通过任务级 ReAct runtime、固定工具集、风险分级、人工确认、备份回滚和审计日志来约束操作。
 
 ## 1. 运行前提
 
@@ -463,11 +463,14 @@ SysDialogue 的执行链路大致为：
 
 ```text
 用户自然语言
-  -> LLM 生成 tool_use 或 workflow 路由
+  -> ReActRunner 创建任务并记录事件时间线
+  -> LLM 生成 tool_use / workflow 路由 / finish_task
   -> RiskClassifier 风险分级
   -> RemoteLockout / CommandSafety 追加检查
   -> 必要时人工确认
   -> SafeExecutor 执行
+  -> tool_result 反馈给模型继续观察、修正或验证
+  -> finish_task 通过完成门校验
   -> AuditLog 记录
   -> 返回结果或触发回滚
 ```
@@ -714,3 +717,4 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 - Windows 本地只作为开发与入口 smoke 环境，不等价于 Linux 运维目标机
 - Web 控制台是轻量最小可用版本，当前 session 存储在进程内存中
 - 计划任务入口是非交互模式，高风险任务会被拒绝，不会等待人工确认
+- 真实 OpenAI-compatible 服务需要支持 Chat Completions `tool_calls`；不支持时 ReAct runtime 会明确报错，不会退化成裸聊天

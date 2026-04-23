@@ -37,8 +37,10 @@ class WebSession:
             confirm_callback=self._confirm_callback,
             input_callback=self._input_callback,
         )
+        self.runtime.controller.event_callback = self._event_callback
         self.session_id = session_id
         self.entries: list[dict] = []
+        self.task_events: list[dict] = []
         self.status = "ready"
         self.pending_confirmation: _PendingConfirmation | None = None
         self.pending_input: _PendingInput | None = None
@@ -60,6 +62,7 @@ class WebSession:
                 "session_id": self.session_id,
                 "status": self.status,
                 "entries": list(self.entries),
+                "task_events": list(self.task_events),
                 "pending_confirmation": (
                     {
                         "tool": self.pending_confirmation.tool,
@@ -157,6 +160,19 @@ class WebSession:
             self.status = "input"
         pending.event.wait()
         return pending.value
+
+    def _event_callback(self, event) -> None:
+        if hasattr(event, "to_dict"):
+            item = event.to_dict()
+        else:
+            item = {
+                "stage": getattr(event, "stage", "event"),
+                "message": getattr(event, "message", ""),
+                "data": getattr(event, "data", {}),
+            }
+        with self._lock:
+            self.task_events.append(item)
+            self.task_events = self.task_events[-200:]
 
 
 class WebSessionStore:
