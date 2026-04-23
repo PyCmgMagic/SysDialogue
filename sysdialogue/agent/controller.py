@@ -88,6 +88,7 @@ class AgentController:
         default=lambda prompt, multiline: ""
     )
     workflows_dir: Path | None = None
+    dynamic_registry: Any = None  # 可选 DynamicToolRegistry 实例（dev 模式）
     competition_mode: bool = True
     max_iterations: int = 25
 
@@ -313,17 +314,57 @@ class AgentController:
                 "竞赛模式下 propose_dynamic_tool 已关闭；请使用 37 个静态工具或内置 workflow 完成任务。",
                 is_error=True,
             )
-        # 开发模式：Task 12 接入 DynamicToolRegistry 后替换此处
+
+        # 开发模式：有 dynamic_registry 则注册提案，否则只记录不执行
+        if self.dynamic_registry is None:
+            self.audit_log.log_decision(
+                tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
+                risk_level="WARN-HIGH", rule_ids=[],
+                reason="dev 模式但未注入 dynamic_registry",
+                decision="propose_dynamic_tool_pending",
+                env_profile_id=self._env_profile_id,
+            )
+            return _tool_result_block(
+                tool_use_id,
+                "DynTool 提案已记录但 DynamicToolRegistry 未注入，无法执行。",
+                is_error=True,
+            )
+        try:
+            dt = self.dynamic_registry.register(
+                name=args.get("proposed_tool_name", ""),
+                description=args.get("intent_summary", ""),
+                cmd_template=args.get("cmd_template") or [],
+                params=args.get("params") or {},
+                consequences=args.get("consequences", ""),
+                risk_assessment=args.get("risk_assessment", ""),
+                estimated_risk=args.get("estimated_risk", "UNKNOWN"),
+                reversible=args.get("reversible", False),
+            )
+        except (ValueError, RuntimeError) as e:
+            self.audit_log.log_decision(
+                tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
+                risk_level="WARN-HIGH", rule_ids=[],
+                reason=f"DynTool 注册失败：{e}",
+                decision="propose_dynamic_tool_rejected",
+                env_profile_id=self._env_profile_id,
+            )
+            return _tool_result_block(tool_use_id, f"DynTool 注册失败：{e}", is_error=True)
+
         self.audit_log.log_decision(
             tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
             risk_level="WARN-HIGH", rule_ids=[],
-            reason="DynTool 提案待接入 DynamicToolRegistry",
-            decision="propose_dynamic_tool_pending",
+            reason=f"DynTool 已注册：{dt['tool_id']}",
+            decision="propose_dynamic_tool_registered",
             env_profile_id=self._env_profile_id,
         )
         return _tool_result_block(
-            tool_use_id, "DynTool 提案已记录但尚未接入执行通路（Task 12）。",
-            is_error=True,
+            tool_use_id,
+            json.dumps({
+                "tool_id": dt["tool_id"], "name": dt["name"],
+                "estimated_risk": dt["estimated_risk"],
+                "note": "已注册为 UNKNOWN 级；执行前须经 CommandSafetyChecker + 用户确认。",
+            }, ensure_ascii=False),
+            is_error=False,
         )
 
 
