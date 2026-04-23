@@ -1,316 +1,459 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SysDialogue Web Console</title>
-  <style>
-    :root {
-      --bg: #f5f1e8;
-      --panel: rgba(255,255,255,0.88);
-      --ink: #1e2b2a;
-      --muted: #5f6b67;
-      --accent: #0f766e;
-      --accent-2: #d97706;
-      --border: rgba(30,43,42,0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(15,118,110,0.14), transparent 35%),
-        radial-gradient(circle at bottom right, rgba(217,119,6,0.16), transparent 32%),
-        linear-gradient(135deg, #f8f5ef 0%, #efe6d6 100%);
-      min-height: 100vh;
-    }
-    .shell {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-    .hero {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: end;
-      margin-bottom: 20px;
-    }
-    .hero h1 {
-      margin: 0;
-      font-size: clamp(28px, 4vw, 44px);
-      letter-spacing: -0.04em;
-    }
-    .hero p {
-      margin: 8px 0 0;
-      color: var(--muted);
-      max-width: 780px;
-    }
-    .badge {
-      background: rgba(15,118,110,0.12);
-      color: var(--accent);
-      border: 1px solid rgba(15,118,110,0.2);
-      padding: 8px 12px;
-      border-radius: 999px;
-      font-size: 13px;
-      white-space: nowrap;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 1.15fr 0.95fr;
-      gap: 18px;
-    }
-    .column {
-      display: grid;
-      gap: 18px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 18px;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 16px 40px rgba(30,43,42,0.08);
-    }
-    .panel h2 {
-      margin: 0 0 12px;
-      font-size: 15px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-    }
-    #conversation {
-      min-height: 360px;
-      max-height: 520px;
-      overflow: auto;
-      display: grid;
-      gap: 12px;
-    }
-    .entry {
-      padding: 14px 16px;
-      border-radius: 16px;
-      white-space: pre-wrap;
-      line-height: 1.5;
-    }
-    .entry.user {
-      background: rgba(15,118,110,0.1);
-      border: 1px solid rgba(15,118,110,0.16);
-    }
-    .entry.assistant {
-      background: rgba(255,255,255,0.82);
-      border: 1px solid rgba(30,43,42,0.08);
-    }
-    .entry.error {
-      background: rgba(220,38,38,0.08);
-      border: 1px solid rgba(220,38,38,0.16);
-    }
-    textarea {
-      width: 100%;
-      min-height: 110px;
-      border-radius: 16px;
-      border: 1px solid var(--border);
-      padding: 14px;
-      font: inherit;
-      resize: vertical;
-      background: rgba(255,255,255,0.75);
-    }
-    .actions {
-      display: flex;
-      gap: 10px;
-      margin-top: 12px;
-      flex-wrap: wrap;
-    }
-    button {
-      border: none;
-      border-radius: 999px;
-      padding: 12px 18px;
-      font: inherit;
-      cursor: pointer;
-      transition: transform .15s ease, opacity .15s ease;
-    }
-    button:hover { transform: translateY(-1px); }
-    .primary { background: var(--accent); color: white; }
-    .warn { background: var(--accent-2); color: white; }
-    .ghost { background: rgba(30,43,42,0.08); color: var(--ink); }
-    .stack { display: grid; gap: 10px; }
-    .meta {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .summary {
-      min-height: 84px;
-      white-space: pre-wrap;
-      line-height: 1.6;
-    }
-    .mini {
-      padding: 12px 14px;
-      border-radius: 14px;
-      background: rgba(255,255,255,0.72);
-      border: 1px solid var(--border);
-    }
-    pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-      font-size: 12px;
-      color: #24403d;
-    }
-    @media (max-width: 980px) {
-      .grid { grid-template-columns: 1fr; }
-      .meta { grid-template-columns: 1fr; }
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SysDialogue</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f5f5f5;
+  --sidebar-bg: #fafafa;
+  --main-bg: #ffffff;
+  --border: #e0e0e0;
+  --text: #1a1a1a;
+  --text2: #555;
+  --text3: #999;
+  --accent: #1a1a1a;
+  --btn-bg: #f0f0f0;
+  --btn-hover: #e4e4e4;
+  --input-bg: #ffffff;
+  --tag-bg: #efefef;
+  --green: #2da44e;
+  --yellow: #bf8700;
+  --red: #cf222e;
+  --blue: #0969da;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+
+#app { display: flex; height: 100vh; overflow: hidden; }
+
+/* ── sidebar ── */
+#sidebar {
+  width: 260px; min-width: 260px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+
+#sidebar-header {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+#sidebar-header .proj-name { font-weight: 600; font-size: 14px; color: var(--text); }
+#sidebar-header .proj-path { font-size: 11px; color: var(--text3); margin-top: 2px; font-family: var(--mono); }
+
+#btn-new {
+  display: flex; align-items: center; gap: 6px;
+  margin: 10px 10px 6px;
+  padding: 7px 12px; border-radius: 6px;
+  background: var(--btn-bg); border: 1px solid var(--border);
+  color: var(--text2); font-size: 12px; cursor: pointer;
+  font-family: var(--font);
+}
+#btn-new:hover { background: var(--btn-hover); }
+#btn-new svg { opacity: .6; }
+
+#session-list { flex: 1; overflow-y: auto; padding: 4px 6px; }
+#session-list::-webkit-scrollbar { width: 3px; }
+#session-list::-webkit-scrollbar-thumb { background: var(--border); }
+
+.session-item {
+  padding: 7px 10px; border-radius: 6px; cursor: pointer;
+  color: var(--text2); font-size: 12px;
+  display: flex; align-items: center; gap: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.session-item:hover { background: var(--btn-bg); }
+.session-item.active { background: var(--btn-hover); color: var(--text); font-weight: 500; }
+.session-item .dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--text3);
+}
+.session-item.active .dot { background: var(--accent); }
+
+/* ── main ── */
+#main {
+  flex: 1; display: flex; flex-direction: column;
+  background: var(--main-bg); overflow: hidden;
+}
+
+/* welcome screen */
+#welcome {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px; color: var(--text2);
+}
+#welcome .logo-box {
+  width: 48px; height: 48px; border: 2px solid var(--text);
+  border-radius: 4px; display: flex; align-items: center; justify-content: center;
+  margin-bottom: 6px;
+}
+#welcome .logo-box svg { color: var(--text); }
+#welcome h2 { font-size: 18px; font-weight: 500; color: var(--text); }
+#welcome .meta { font-size: 12px; color: var(--text3); display: flex; align-items: center; gap: 6px; }
+#welcome .meta svg { opacity: .5; }
+
+/* chat area */
+#chat {
+  flex: 1; overflow-y: auto; padding: 24px 48px;
+  display: none; flex-direction: column; gap: 16px;
+}
+#chat.visible { display: flex; }
+#chat::-webkit-scrollbar { width: 4px; }
+#chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.msg { display: flex; flex-direction: column; gap: 4px; }
+.msg .meta-row { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 6px; }
+.msg .meta-row .role { font-weight: 500; color: var(--text2); }
+.msg .bubble {
+  padding: 10px 14px; border-radius: 8px;
+  line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+  font-size: 13px;
+}
+.msg.user .bubble { background: var(--btn-bg); border: 1px solid var(--border); }
+.msg.assistant .bubble { background: #fff; border: 1px solid var(--border); }
+.msg.error .bubble { background: #fff5f5; border: 1px solid #ffc0c0; color: var(--red); font-family: var(--mono); font-size: 12px; }
+.msg.system .bubble { background: transparent; border: none; color: var(--text3); font-size: 11px; padding: 0; }
+
+/* thinking */
+.thinking-dots { display: inline-flex; gap: 4px; align-items: center; padding: 4px 0; }
+.thinking-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); animation: blink 1.2s infinite; }
+.thinking-dots span:nth-child(2) { animation-delay: .2s; }
+.thinking-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%,80%,100% { opacity: .2; } 40% { opacity: 1; } }
+
+/* confirm banner */
+#confirm-banner {
+  display: none; margin: 0 48px 0;
+  padding: 10px 14px; border-radius: 8px;
+  background: #fffbeb; border: 1px solid #f0c040;
+  font-size: 12px;
+}
+#confirm-banner.visible { display: block; }
+#confirm-banner .cf-title { font-weight: 600; color: var(--yellow); margin-bottom: 4px; }
+#confirm-banner .cf-reason { color: var(--text2); margin-bottom: 8px; line-height: 1.5; }
+#confirm-banner .cf-btns { display: flex; gap: 8px; }
+.cf-btn {
+  padding: 4px 14px; border-radius: 5px; font-size: 12px;
+  cursor: pointer; font-family: var(--font); border: 1px solid;
+}
+.cf-btn.approve { background: #e6f4ea; color: var(--green); border-color: #a8d5b5; }
+.cf-btn.approve:hover { background: #d4edda; }
+.cf-btn.deny { background: #ffeef0; color: var(--red); border-color: #f5c0c4; }
+.cf-btn.deny:hover { background: #ffd7da; }
+
+/* input request banner */
+#input-banner {
+  display: none; margin: 0 48px 0;
+  padding: 8px 14px; border-radius: 8px;
+  background: #f0f4ff; border: 1px solid #c0d0f0;
+  font-size: 12px; color: var(--blue);
+}
+#input-banner.visible { display: block; }
+
+/* ── input area ── */
+#input-area {
+  padding: 12px 48px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--main-bg);
+}
+#input-box {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--input-bg);
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  overflow: hidden;
+}
+#msg-input {
+  width: 100%; background: transparent; border: none; outline: none;
+  font-family: var(--font); font-size: 13px; color: var(--text);
+  padding: 12px 14px 6px; resize: none;
+  min-height: 44px; max-height: 120px; line-height: 1.5;
+}
+#msg-input::placeholder { color: var(--text3); }
+#msg-input:disabled { opacity: .5; }
+#input-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 8px;
+}
+#btn-attach {
+  width: 26px; height: 26px; border-radius: 5px;
+  background: transparent; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text3);
+}
+#btn-attach:hover { background: var(--btn-bg); color: var(--text2); }
+.toolbar-tags { display: flex; gap: 6px; flex: 1; }
+.tag {
+  padding: 3px 8px; border-radius: 4px; font-size: 11px;
+  background: var(--tag-bg); color: var(--text2); border: 1px solid var(--border);
+  cursor: pointer; display: flex; align-items: center; gap: 4px;
+}
+.tag:hover { background: var(--btn-hover); }
+.tag .dot-status { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+#btn-send {
+  width: 30px; height: 30px; border-radius: 6px;
+  background: var(--accent); border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; flex-shrink: 0;
+}
+#btn-send:hover { opacity: .85; }
+#btn-send:disabled { opacity: .35; cursor: not-allowed; }
+</style>
 </head>
 <body>
-  <div class="shell">
-    <div class="hero">
-      <div>
-        <h1>SysDialogue Web Console</h1>
-        <p>以 Web 形态承接对话输入、计划预览、风险确认、执行时间线和结果总结。当前会话固定为默认会话，适合本地演示与调试。</p>
+<div id="app">
+
+  <!-- sidebar -->
+  <nav id="sidebar">
+    <div id="sidebar-header">
+      <div class="proj-name">SysDialogue</div>
+      <div class="proj-path">v6 · 运维智能代理</div>
+    </div>
+    <button id="btn-new" onclick="newSession()">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v5.5h5.5a.75.75 0 0 1 0 1.5h-5.5v5.5a.75.75 0 0 1-1.5 0v-5.5H1.75a.75.75 0 0 1 0-1.5h5.5V1.75A.75.75 0 0 1 8 1Z"/></svg>
+      新建会话
+    </button>
+    <div id="session-list"></div>
+  </nav>
+
+  <!-- main -->
+  <div id="main">
+
+    <!-- welcome -->
+    <div id="welcome">
+      <div class="logo-box">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/>
+        </svg>
       </div>
-      <div class="badge" id="status-badge">status: ready</div>
+      <h2>构建任何运维任务</h2>
+      <div class="meta">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2.75A.75.75 0 0 1 1.75 2h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 2.75Zm0 5A.75.75 0 0 1 1.75 7h12.5a.75.75 0 0 1 0 1.5H1.75A.75.75 0 0 1 1 7.75ZM1.75 12h12.5a.75.75 0 0 1 0 1.5H1.75a.75.75 0 0 1 0-1.5Z"/></svg>
+        主分支（main）
+      </div>
+      <div class="meta" id="welcome-time">最后修改 刚刚</div>
     </div>
 
-    <div class="grid">
-      <div class="column">
-        <section class="panel">
-          <h2>Conversation</h2>
-          <div id="conversation"></div>
-        </section>
-        <section class="panel">
-          <h2>Input</h2>
-          <textarea id="message" placeholder="输入自然语言运维需求，或在出现输入请求时直接填写响应。"></textarea>
-          <div class="actions">
-            <button class="primary" id="send-btn">发送</button>
-            <button class="ghost" id="cancel-btn">取消当前执行</button>
-          </div>
-        </section>
-      </div>
+    <!-- chat -->
+    <div id="chat"></div>
 
-      <div class="column">
-        <section class="panel stack">
-          <h2>Plan / Risk</h2>
-          <div class="mini" id="pending-box">当前无待确认请求。</div>
-          <div class="actions" id="confirm-actions" style="display:none;">
-            <button class="warn" data-approved="true">批准</button>
-            <button class="ghost" data-approved="false">拒绝</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <h2>Result Summary</h2>
-          <div class="mini summary" id="result-box">当前还没有执行结果。</div>
-          <div class="actions" style="margin-top:14px; margin-bottom:8px;">
-            <button class="ghost" type="button" disabled>Reusable Context</button>
-          </div>
-          <div class="meta" id="context-box"></div>
-        </section>
-
-        <section class="panel">
-          <h2>Execution Timeline</h2>
-          <pre id="audit-box"></pre>
-        </section>
+    <!-- confirm banner -->
+    <div id="confirm-banner">
+      <div class="cf-title" id="cf-level"></div>
+      <div class="cf-reason" id="cf-reason"></div>
+      <div class="cf-btns">
+        <button class="cf-btn approve" onclick="doConfirm(true)">批准执行</button>
+        <button class="cf-btn deny" onclick="doConfirm(false)">拒绝</button>
       </div>
     </div>
+
+    <!-- input request banner -->
+    <div id="input-banner"></div>
+
+    <!-- input area -->
+    <div id="input-area">
+      <div id="input-box">
+        <textarea id="msg-input" rows="1"
+          placeholder='随便问点什么… "重启 nginx 服务"'
+          onkeydown="onKey(event)" oninput="autoResize(this)"></textarea>
+        <div id="input-toolbar">
+          <button id="btn-attach" title="附加上下文">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v5.5h5.5a.75.75 0 0 1 0 1.5h-5.5v5.5a.75.75 0 0 1-1.5 0v-5.5H1.75a.75.75 0 0 1 0-1.5h5.5V1.75A.75.75 0 0 1 8 1Z"/></svg>
+          </button>
+          <div class="toolbar-tags">
+            <span class="tag" id="tag-status">
+              <span class="dot-status" id="status-dot"></span>
+              <span id="tag-label">就绪</span>
+            </span>
+            <span class="tag" id="tag-cancel" style="display:none;color:#cf222e;border-color:#f5c0c4;background:#ffeef0" onclick="doCancel()">取消执行</span>
+          </div>
+          <button id="btn-send" onclick="sendMessage()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.75a.75.75 0 0 1 .673.418l5.25 10.5A.75.75 0 0 1 13.25 14H2.75a.75.75 0 0 1-.673-1.082l5.25-10.5A.75.75 0 0 1 8 1.75Z"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
   </div>
+</div>
 
-  <script>
-    const sessionId = "{{ session_id }}";
-    const conversationEl = document.getElementById("conversation");
-    const statusBadge = document.getElementById("status-badge");
-    const pendingBox = document.getElementById("pending-box");
-    const confirmActions = document.getElementById("confirm-actions");
-    const contextBox = document.getElementById("context-box");
-    const resultBox = document.getElementById("result-box");
-    const auditBox = document.getElementById("audit-box");
-    const messageEl = document.getElementById("message");
+<script>
+const SESSION_ID = "{{ session_id }}";
+const POLL_MS = 1200;
 
-    async function postJson(url, body = {}) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "request failed");
-      }
-      return res.json();
-    }
+let knownEntries = 0;
+let thinkingEl = null;
+let polling = null;
+let hasStarted = false;
 
-    function renderEntries(entries) {
-      conversationEl.innerHTML = "";
-      entries.forEach((entry) => {
-        const div = document.createElement("div");
-        div.className = `entry ${entry.role}`;
-        div.textContent = entry.text;
-        conversationEl.appendChild(div);
-      });
-      conversationEl.scrollTop = conversationEl.scrollHeight;
-    }
+const chat = document.getElementById("chat");
+const welcome = document.getElementById("welcome");
+const input = document.getElementById("msg-input");
+const btnSend = document.getElementById("btn-send");
+const confirmBanner = document.getElementById("confirm-banner");
+const inputBanner = document.getElementById("input-banner");
+const tagLabel = document.getElementById("tag-label");
+const tagCancel = document.getElementById("tag-cancel");
+const statusDot = document.getElementById("status-dot");
 
-    function renderContext(context) {
-      contextBox.innerHTML = "";
-      const keys = Object.keys(context || {});
-      if (!keys.length) {
-        contextBox.innerHTML = '<div class="mini">暂无可复用上下文。</div>';
-        return;
-      }
-      keys.sort().forEach((key) => {
-        const div = document.createElement("div");
-        div.className = "mini";
-        div.innerHTML = `<strong>${key}</strong><br>${String(context[key])}`;
-        contextBox.appendChild(div);
-      });
-    }
+function api(path, method = "GET", body) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  return fetch(`/api/session/${SESSION_ID}${path}`, opts).then(r => r.json());
+}
 
-    async function refreshState() {
-      const res = await fetch(`/api/session/${sessionId}/state`);
-      const state = await res.json();
-      statusBadge.textContent = `status: ${state.status}`;
-      renderEntries(state.entries || []);
-      renderContext(state.context || {});
-      resultBox.textContent = state.result_summary || "当前还没有执行结果。";
-      auditBox.textContent = (state.audit_tail || []).join("\n");
+function autoResize(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 120) + "px";
+}
 
-      if (state.pending_confirmation) {
-        const p = state.pending_confirmation;
-        pendingBox.textContent = `${p.tool}\n${p.risk_level}\n${p.reason}${p.rollback_hint ? `\n回滚: ${p.rollback_hint}` : ""}`;
-        confirmActions.style.display = "flex";
-      } else if (state.pending_input) {
-        pendingBox.textContent = `等待输入: ${state.pending_input.prompt}${state.pending_input.multiline ? "\n支持多行输入，请直接在左侧输入框填写内容。" : ""}`;
-        confirmActions.style.display = "none";
-      } else {
-        pendingBox.textContent = "当前无待确认请求。";
-        confirmActions.style.display = "none";
-      }
-    }
+function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
 
-    document.getElementById("send-btn").addEventListener("click", async () => {
-      const message = messageEl.value.trim();
-      if (!message) return;
-      await postJson(`/api/session/${sessionId}/turn`, { message });
-      messageEl.value = "";
-      await refreshState();
-    });
+function ts() {
+  return new Date().toLocaleTimeString("zh", { hour: "2-digit", minute: "2-digit" });
+}
 
-    document.getElementById("cancel-btn").addEventListener("click", async () => {
-      await postJson(`/api/session/${sessionId}/cancel`);
-      await refreshState();
-    });
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
 
-    confirmActions.addEventListener("click", async (event) => {
-      const btn = event.target.closest("button[data-approved]");
-      if (!btn) return;
-      await postJson(`/api/session/${sessionId}/confirm`, { approved: btn.dataset.approved === "true" });
-      await refreshState();
-    });
+function showChat() {
+  if (hasStarted) return;
+  hasStarted = true;
+  welcome.style.display = "none";
+  chat.classList.add("visible");
+}
 
-    refreshState();
-    setInterval(refreshState, 1200);
-  </script>
+function appendMsg(role, text) {
+  showChat();
+  const div = document.createElement("div");
+  div.className = `msg ${role}`;
+  const roleLabel = { user: "你", assistant: "Agent", error: "错误", system: "系统" }[role] || role;
+  div.innerHTML = `
+    <div class="meta-row"><span class="role">${roleLabel}</span><span>${ts()}</span></div>
+    <div class="bubble">${esc(text)}</div>`;
+  chat.appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function showThinking() {
+  if (thinkingEl) return;
+  showChat();
+  const div = document.createElement("div");
+  div.className = "msg assistant";
+  div.innerHTML = `<div class="meta-row"><span class="role">Agent</span></div>
+    <div class="bubble"><span class="thinking-dots"><span></span><span></span><span></span></span></div>`;
+  chat.appendChild(div);
+  thinkingEl = div;
+  scrollBottom();
+}
+
+function hideThinking() {
+  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+}
+
+const STATUS_LABEL = { ready: "就绪", thinking: "执行中", confirming: "待确认", input: "待输入", cancelling: "取消中" };
+const DOT_COLOR = { ready: "#2da44e", thinking: "#0969da", confirming: "#bf8700", input: "#8250df", cancelling: "#cf222e" };
+
+function renderState(s) {
+  const st = s.status;
+  tagLabel.textContent = STATUS_LABEL[st] || st;
+  statusDot.style.background = DOT_COLOR[st] || "#999";
+  tagCancel.style.display = ["thinking","confirming","input"].includes(st) ? "" : "none";
+
+  input.disabled = st !== "ready" && st !== "input";
+  btnSend.disabled = st !== "ready" && st !== "input";
+
+  if (st === "thinking") showThinking(); else hideThinking();
+
+  // confirm banner
+  if (s.pending_confirmation) {
+    const pc = s.pending_confirmation;
+    document.getElementById("cf-level").textContent = `${pc.risk_level} — ${pc.tool}`;
+    document.getElementById("cf-reason").textContent = pc.reason + (pc.rollback_hint ? `\n回滚：${pc.rollback_hint}` : "");
+    confirmBanner.classList.add("visible");
+  } else {
+    confirmBanner.classList.remove("visible");
+  }
+
+  // input banner
+  if (s.pending_input) {
+    inputBanner.textContent = `需要输入：${s.pending_input.prompt}`;
+    inputBanner.classList.add("visible");
+    input.placeholder = s.pending_input.prompt;
+    input.disabled = false;
+    btnSend.disabled = false;
+  } else {
+    inputBanner.classList.remove("visible");
+    input.placeholder = '随便问点什么… "重启 nginx 服务"';
+  }
+}
+
+function syncEntries(entries) {
+  if (entries.length <= knownEntries) return;
+  for (let i = knownEntries; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.role !== "user") appendMsg(e.role, e.text);
+  }
+  knownEntries = entries.length;
+}
+
+async function poll() {
+  try {
+    const s = await api("/state");
+    syncEntries(s.entries || []);
+    renderState(s);
+  } catch (_) {}
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  autoResize(input);
+  appendMsg("user", text);
+  knownEntries++;
+  try {
+    await api("/turn", "POST", { message: text });
+  } catch (e) {
+    appendMsg("error", "发送失败：" + e.message);
+  }
+  await poll();
+}
+
+async function doConfirm(approved) {
+  await api("/confirm", "POST", { approved });
+  await poll();
+}
+
+async function doCancel() {
+  await api("/cancel", "POST", {});
+  await poll();
+}
+
+function newSession() {
+  location.reload();
+}
+
+function onKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+// sidebar session entry
+const li = document.createElement("div");
+li.className = "session-item active";
+li.innerHTML = `<span class="dot"></span><span>当前会话</span>`;
+document.getElementById("session-list").appendChild(li);
+
+poll();
+polling = setInterval(poll, POLL_MS);
+</script>
 </body>
 </html>
