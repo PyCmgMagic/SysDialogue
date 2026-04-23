@@ -619,6 +619,8 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
 
 
 def _assistant_message_to_openai(content) -> dict:
+    if isinstance(content, str):
+        return {"role": "assistant", "content": content}
     blocks = _content_as_list(content)
     text_parts: list[str] = []
     tool_calls: list[dict] = []

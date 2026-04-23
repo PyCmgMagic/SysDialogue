@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.conversation_store import ConversationStore
 from sysdialogue.ui.tui_app import (
+    SysDialogueTUI,
     _choice_button_label,
     _choices_from_task_event,
     _event_style,
@@ -20,6 +25,7 @@ def test_tui_event_messages_hide_raw_model_internals() -> None:
         "已规划下一步动作：2 个工具/流程调用。"
     )
     assert "ReAct" in _format_event_message("correction", "raw correction", {})
+    assert "输出未满足" not in _format_event_message("correction", "raw correction", {})
 
 
 def test_tui_event_styles_reflect_failures() -> None:
@@ -142,3 +148,19 @@ def test_task_timeline_corrections_are_debug_details_not_main_thinking() -> None
     assert not any("输出未满足" in item for item in state["thinking"])
     assert state["correction_count"] == "2"
     assert sum("ReAct 纠偏记录" in item for item in state["details"]) == 1
+
+
+def test_tui_persists_restored_history_to_restored_session(tmp_path) -> None:
+    controller = SimpleNamespace(
+        audit_log=SimpleNamespace(session_id="current_session"),
+        conversation_manager=ConversationManager(),
+    )
+    app = SysDialogueTUI(controller)
+    app._history_store = ConversationStore(storage_dir=str(tmp_path))
+    app._history_session_id = "restored_session"
+    app._current_goal = "继续检查"
+
+    app._persist_history("完成", "completed")
+
+    assert (tmp_path / "restored_session.json").exists()
+    assert not (tmp_path / "current_session.json").exists()

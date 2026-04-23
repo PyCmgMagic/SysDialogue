@@ -145,3 +145,15 @@ def test_internal_tool_results_convert_to_openai_tool_messages() -> None:
             "content": '{"success": true}',
         },
     ]
+
+
+def test_legacy_assistant_string_messages_remain_visible_to_openai() -> None:
+    converted = _to_openai_messages(
+        "system prompt",
+        [{"role": "assistant", "content": "历史回复"}],
+    )
+
+    assert converted == [
+        {"role": "system", "content": "system prompt"},
+        {"role": "assistant", "content": "历史回复"},
+    ]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sysdialogue.agent.conversation import ConversationManager
 from sysdialogue.agent.conversation_store import ConversationStore
 
@@ -55,6 +57,8 @@ def test_conversation_store_saves_sanitized_history_and_restores_context(tmp_pat
     assert restored.context == {"service_name": "nginx"}
     assert all("tool_result" not in str(message) for message in restored.history)
     assert any(message["role"] == "assistant" for message in restored.history)
+    assistant_messages = [message for message in restored.history if message["role"] == "assistant"]
+    assert assistant_messages[0]["content"] == [{"type": "text", "text": "我会先查看状态。"}]
 
 
 def test_conversation_store_lists_recent_summaries(tmp_path) -> None:
@@ -74,3 +78,32 @@ def test_conversation_store_lists_recent_summaries(tmp_path) -> None:
 
     assert len(summaries) == 30
     assert summaries[0].last_user_message.startswith("request")
+
+
+def test_conversation_store_restores_legacy_assistant_string_as_typed_text(tmp_path) -> None:
+    (tmp_path / "legacy.json").write_text(
+        json.dumps(
+            {
+                "session_id": "legacy",
+                "title": "legacy",
+                "created_at": "2026-04-23T00:00:00+00:00",
+                "updated_at": "2026-04-23T00:00:00+00:00",
+                "status": "completed",
+                "history": [
+                    {"role": "user", "content": "上一轮问题"},
+                    {"role": "assistant", "content": "上一轮回答"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ConversationStore(storage_dir=str(tmp_path))
+    manager = ConversationManager()
+
+    store.restore_to_manager("legacy", manager)
+
+    assert manager.history[-1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "上一轮回答"}],
+    }

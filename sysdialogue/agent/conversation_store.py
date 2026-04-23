@@ -115,7 +115,7 @@ class ConversationStore:
         record = self.load(session_id)
         if record is None:
             raise FileNotFoundError(f"Conversation history not found: {session_id}")
-        manager.history = list(record.history)
+        manager.history = _sanitize_history(record.history)
         manager.context = dict(record.context)
         return record
 
@@ -143,12 +143,19 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
             continue
         content = message.get("content")
         if isinstance(content, str):
-            sanitized.append({"role": role, "content": _truncate(content, 1200)})
+            sanitized.append({"role": role, "content": _message_content(role, content)})
             continue
         text = _text_blocks(content)
         if text:
-            sanitized.append({"role": role, "content": _truncate(text, 1200)})
+            sanitized.append({"role": role, "content": _message_content(role, text)})
     return sanitized[-20:]
+
+
+def _message_content(role: str, text: str) -> str | list[dict[str, str]]:
+    text = _truncate(text, 1200)
+    if role == "assistant":
+        return [{"type": "text", "text": text}]
+    return text
 
 
 def _text_blocks(content: Any) -> str:

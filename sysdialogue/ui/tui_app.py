@@ -130,6 +130,7 @@ class SysDialogueTUI(App):
         self._current_card: TaskTimelineCard | None = None
         self._current_goal = ""
         self._history_store = ConversationStore()
+        self._history_session_id = controller.audit_log.session_id
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -270,7 +271,7 @@ class SysDialogueTUI(App):
         try:
             snapshot = self._current_card.snapshot() if self._current_card else {}
             self._history_store.save_turn(
-                session_id=self.controller.audit_log.session_id,
+                session_id=self._history_session_id,
                 manager=self.controller.conversation_manager,
                 user_message=self._current_goal,
                 final_reply=reply,
@@ -516,6 +517,7 @@ class SysDialogueTUI(App):
         except Exception as exc:
             self._write_log(Panel(f"恢复历史失败：{exc}", border_style="red", title="历史"))
             return
+        self._history_session_id = record.session_id
         self._write_log(
             Panel(
                 Markdown(
@@ -612,7 +614,9 @@ def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str
             return f"已规划下一步动作：{count} 个工具/流程调用。"
         return "正在整理回复格式，等待 ReAct 收口。"
     if stage == "correction":
-        return "输出未满足 ReAct 协议，已自动要求模型改用工具或 finish_task 收口。"
+        count = data.get("correction_count")
+        suffix = f"（累计 {count} 次）" if count else ""
+        return f"ReAct 协议纠偏已记录到技术详情{suffix}。"
     if stage == "tool_started":
         return f"正在调用工具：{data.get('tool') or message}"
     if stage == "tool_finished":
