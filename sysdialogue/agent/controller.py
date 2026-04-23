@@ -46,6 +46,10 @@ class LLMResponse:
     stop_reason: str
 
 
+class LLMClientError(RuntimeError):
+    """Raised when the configured LLM endpoint does not return a usable response."""
+
+
 class OpenAIChatClient:
     """OpenAI-compatible Chat Completions wrapper using SysDialogue tool blocks."""
 
@@ -80,10 +84,13 @@ class OpenAIChatClient:
         }
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
-        response = self._client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-        message = _object_attr(choice, "message")
-        return _from_openai_message(message, _object_attr(choice, "finish_reason", "stop"))
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise LLMClientError(
+                f"OpenAI-compatible API 调用失败（{type(exc).__name__}）：{exc}"
+            ) from exc
+        return _from_openai_response(response)
 
 
 # --------------------------------------------------------------------------
@@ -159,11 +166,19 @@ class AgentController:
             if self.is_cancel_requested():
                 self.conversation_manager.commit_turn(messages)
                 return "当前执行已取消。"
-            response = self.llm_client.messages_create(
-                system=self._current_system_prompt(),
-                messages=messages,
-                tools=all_tools,
-            )
+            try:
+                response = self.llm_client.messages_create(
+                    system=self._current_system_prompt(),
+                    messages=messages,
+                    tools=all_tools,
+                )
+            except Exception as exc:
+                self.conversation_manager.commit_turn(messages)
+                return (
+                    f"LLM 调用失败：{exc}\n"
+                    "请检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL 是否正确，"
+                    "以及该 OpenAI-compatible 服务是否支持 Chat Completions / tool_calls。"
+                )
             content = _content_as_list(response.content)
             messages.append({"role": "assistant", "content": content})
 
@@ -511,6 +526,60 @@ def _tool_result_messages_to_openai(content) -> list[dict]:
     return messages
 
 
+def _from_openai_response(response) -> LLMResponse:
+    if isinstance(response, str):
+        if _looks_like_html(response):
+            raise LLMClientError(
+                "OpenAI-compatible API 返回了 HTML 页面，而不是 Chat Completions JSON。"
+                "请确认 OPENAI_BASE_URL 指向 API 根路径，通常应类似 "
+                "https://newapi.sduonline.cn/v1，而不是控制台网页首页。"
+            )
+        parsed = _json_loads_or_none(response)
+        if parsed is not None:
+            return _from_openai_response(parsed)
+        return LLMResponse(
+            content=[{"type": "text", "text": response}],
+            stop_reason="stop",
+        )
+
+    if isinstance(response, dict) and "data" in response and "choices" not in response:
+        return _from_openai_response(response["data"])
+
+    if isinstance(response, dict) and "error" in response and "choices" not in response:
+        raise LLMClientError(
+            "OpenAI-compatible API 返回错误："
+            f"{_response_preview(response['error'])}"
+        )
+
+    choices = _object_attr(response, "choices", None) or []
+    if choices:
+        choice = choices[0]
+        message = _object_attr(choice, "message")
+        if message is None:
+            message = _object_attr(choice, "delta")
+        return _from_openai_message(
+            message or {},
+            _object_attr(choice, "finish_reason", "stop"),
+        )
+
+    message = _object_attr(response, "message", None)
+    if message is not None:
+        return _from_openai_message(message, _object_attr(response, "finish_reason", "stop"))
+
+    text = (
+        _object_attr(response, "content", None)
+        or _object_attr(response, "text", None)
+        or _object_attr(response, "output_text", None)
+    )
+    if isinstance(text, str) and text:
+        return LLMResponse(content=[{"type": "text", "text": text}], stop_reason="stop")
+
+    raise LLMClientError(
+        "OpenAI-compatible API 返回了无法识别的响应结构："
+        f"{type(response).__name__}。响应预览：{_response_preview(response)}"
+    )
+
+
 def _from_openai_message(message, finish_reason: str | None = None) -> LLMResponse:
     content: list[dict] = []
     text = _object_attr(message, "content", "") or ""
@@ -551,6 +620,32 @@ def _content_to_text(content) -> str:
 
 def _contains_tool_result_block(content) -> bool:
     return any(_block_type(block) == "tool_result" for block in _content_as_list(content))
+
+
+def _json_loads_or_none(value: str):
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _looks_like_html(value: str) -> bool:
+    text = value.lstrip().lower()
+    return text.startswith("<!doctype html") or text.startswith("<html")
+
+
+def _response_preview(response) -> str:
+    try:
+        if isinstance(response, str):
+            raw = response
+        elif hasattr(response, "model_dump_json"):
+            raw = response.model_dump_json()
+        else:
+            raw = json.dumps(response, ensure_ascii=False, default=str)
+    except Exception:
+        raw = str(response)
+    return raw[:500]
+
 
 def _content_as_list(content) -> list:
     if isinstance(content, list):
