@@ -250,9 +250,13 @@ class SysDialogueTUI(App):
             status = "failed"
         elif self._turn_cancelled:
             self._finish_current_card(reply, is_error=False, cancelled=True)
+            if reply and reply.strip():
+                self._write_warning(reply, title="任务已取消")
             status = "cancelled"
         else:
             self._finish_current_card(reply, is_error=False)
+            if reply and reply.strip():
+                self._write_assistant(reply)
             status = "completed"
         self._persist_history(reply, status)
         self._refresh_audit_panel()
