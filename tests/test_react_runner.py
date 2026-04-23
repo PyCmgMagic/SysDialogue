@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse
-from sysdialogue.agent.react_runner import _requires_environment_feedback
+from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
@@ -162,6 +162,14 @@ def test_requires_environment_feedback_classifies_greeting_and_ops() -> None:
     assert _requires_environment_feedback("检查系统版本和负载") is True
     assert _requires_environment_feedback("解释 OpenAI API 怎么使用") is False
     assert _requires_environment_feedback("审计 API 密钥配置") is True
+
+
+def test_iteration_budget_scales_by_task_complexity() -> None:
+    assert _iteration_budget("你好", hard_limit=160, requires_environment_feedback=False) == 20
+    assert _iteration_budget("检查系统版本和负载", hard_limit=160, requires_environment_feedback=True) == 80
+    assert _iteration_budget("修改 nginx 配置并备份验证", hard_limit=160, requires_environment_feedback=True) == 140
+    assert _iteration_budget("修改配置", hard_limit=60, requires_environment_feedback=True) == 60
+    assert _iteration_budget("检查系统", hard_limit=10, requires_environment_feedback=True) == 20
 
 
 def test_greeting_can_finish_without_system_action(tmp_path: Path) -> None:

@@ -116,7 +116,7 @@ class AgentController:
     event_callback: Callable[[Any], None] = field(default=lambda event: None)
     workflows_dir: Path | None = None
     dynamic_registry: Any = None  # DynamicToolRegistry instance.
-    max_iterations: int = 25
+    max_iterations: int = 160
     conversation_manager: ConversationManager | None = None
 
     # 运行时状态

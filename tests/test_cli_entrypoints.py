@@ -44,6 +44,20 @@ def test_load_config_falls_back_to_openai_model_then_legacy(monkeypatch, tmp_pat
     assert load_config().model == "legacy-model"
 
 
+def test_load_config_clamps_max_iterations(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert load_config().max_iterations == 160
+
+    monkeypatch.setenv("SYSDIALOGUE_MAX_ITER", "999")
+    assert load_config().max_iterations == 300
+
+    monkeypatch.setenv("SYSDIALOGUE_MAX_ITER", "1")
+    assert load_config().max_iterations == 20
+
+    monkeypatch.setenv("SYSDIALOGUE_MAX_ITER", "not-an-int")
+    assert load_config().max_iterations == 160
+
+
 def test_cli_help_no_longer_exposes_dev_mode() -> None:
     result = CliRunner().invoke(main, ["--help"])
     removed_option = "-" + "-dev"

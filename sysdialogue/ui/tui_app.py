@@ -14,9 +14,11 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Static
 
+from sysdialogue.agent.conversation_store import ConversationStore
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
+from sysdialogue.ui.history_modal import HistoryModal
 from sysdialogue.ui.input_modal import InputModal
 from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
 
@@ -104,6 +106,7 @@ class SysDialogueTUI(App):
     """
 
     BINDINGS = [
+        Binding("f2", "show_history", "历史"),
         Binding("f3", "toggle_audit", "审计"),
         Binding("f4", "toggle_env", "环境"),
         Binding("ctrl+c", "cancel_current", "取消"),
@@ -125,6 +128,8 @@ class SysDialogueTUI(App):
         self._turn_cancelled = False
         self._choice_values: list[str] = []
         self._current_card: TaskTimelineCard | None = None
+        self._current_goal = ""
+        self._history_store = ConversationStore()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -155,7 +160,7 @@ class SysDialogueTUI(App):
                 Markdown(
                     "**欢迎使用 SysDialogue v6**\n\n"
                     "输入自然语言运维需求，Enter 发送。\n\n"
-                    "F3 切换审计面板 / F4 切换环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。"
+                    "F2 历史 / F3 审计 / F4 环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。"
                 ),
                 title="SysDialogue",
                 border_style="cyan",
@@ -194,6 +199,7 @@ class SysDialogueTUI(App):
     def _start_turn(self, text: str) -> None:
         self._turn_failed = False
         self._turn_cancelled = False
+        self._current_goal = text
         self._begin_task_card(text)
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = True
@@ -215,10 +221,14 @@ class SysDialogueTUI(App):
         self._worker = None
         if is_error or _looks_like_failure_reply(reply) or self._turn_failed:
             self._finish_current_card(reply, is_error=True)
+            status = "failed"
         elif self._turn_cancelled:
             self._finish_current_card(reply, is_error=False, cancelled=True)
+            status = "cancelled"
         else:
             self._finish_current_card(reply, is_error=False)
+            status = "completed"
+        self._persist_history(reply, status)
         self._refresh_audit_panel()
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = False
@@ -253,6 +263,22 @@ class SysDialogueTUI(App):
                 self._write_assistant(reply)
             return
         self._current_card.finish_with_reply(reply, is_error=is_error, cancelled=cancelled)
+
+    def _persist_history(self, reply: str, status: str) -> None:
+        if not self._current_goal:
+            return
+        try:
+            snapshot = self._current_card.snapshot() if self._current_card else {}
+            self._history_store.save_turn(
+                session_id=self.controller.audit_log.session_id,
+                manager=self.controller.conversation_manager,
+                user_message=self._current_goal,
+                final_reply=reply,
+                status=status,
+                events_summary=snapshot,
+            )
+        except Exception:
+            pass
 
     def _write_assistant(self, reply: str) -> None:
         self._write_log(
@@ -460,6 +486,47 @@ class SysDialogueTUI(App):
 
     def action_toggle_audit(self) -> None:
         self._switch_right_panel("audit")
+
+    def action_show_history(self) -> None:
+        busy = (
+            (self._worker is not None and self._worker.is_alive())
+            or self._confirm_state is not None
+            or self._input_state is not None
+        )
+        if busy:
+            self._write_log(Panel("任务执行中，暂时不能恢复历史。", border_style="yellow", title="历史"))
+            return
+        summaries = self._history_store.list_summaries(limit=30)
+        if not summaries:
+            self._write_log(Panel("还没有可恢复的历史对话。", border_style="yellow", title="历史"))
+            return
+
+        def on_close(session_id: str | None) -> None:
+            if session_id:
+                self._restore_history(session_id)
+
+        self.push_screen(HistoryModal(summaries), on_close)
+
+    def _restore_history(self, session_id: str) -> None:
+        try:
+            record = self._history_store.restore_to_manager(
+                session_id,
+                self.controller.conversation_manager,
+            )
+        except Exception as exc:
+            self._write_log(Panel(f"恢复历史失败：{exc}", border_style="red", title="历史"))
+            return
+        self._write_log(
+            Panel(
+                Markdown(
+                    f"已恢复历史对话：**{record.title}**\n\n"
+                    "后续输入会复用该对话的上下文；不会重放历史工具执行。"
+                ),
+                title="历史已恢复",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
 
     def action_toggle_env(self) -> None:
         self._switch_right_panel("env")

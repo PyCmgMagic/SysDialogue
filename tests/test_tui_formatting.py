@@ -122,3 +122,23 @@ def test_task_timeline_card_groups_react_events() -> None:
     assert any("get_system_info" in item for item in state["tools"])
     assert any("只读系统信息" in item for item in state["verification"])
     assert any("系统信息检查完成" in item for item in state["results"])
+
+
+def test_task_timeline_corrections_are_debug_details_not_main_thinking() -> None:
+    card = TaskTimelineCard("检查系统")
+    card.apply_event("task_started", "raw", {})
+    card.apply_event(
+        "correction",
+        "raw correction",
+        {"display_level": "debug", "correction_count": 1},
+    )
+    card.apply_event(
+        "correction",
+        "raw correction",
+        {"display_level": "debug", "correction_count": 2},
+    )
+
+    state = card.snapshot()
+    assert not any("输出未满足" in item for item in state["thinking"])
+    assert state["correction_count"] == "2"
+    assert sum("ReAct 纠偏记录" in item for item in state["details"]) == 1

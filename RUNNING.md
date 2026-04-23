@@ -136,8 +136,10 @@ export OPENAI_MODEL="你的模型名"
 OPENAI_API_KEY=你的_api_key
 OPENAI_BASE_URL=你的_openai_compatible_base_url
 OPENAI_MODEL=你的模型名
-SYSDIALOGUE_MAX_ITER=25
+SYSDIALOGUE_MAX_ITER=160
 ```
+
+`SYSDIALOGUE_MAX_ITER` 是 ReAct 运行时的硬上限，不是每个任务固定迭代次数。默认值为 `160`，允许范围为 `20..300`；实际任务会按复杂度使用动态预算：普通聊天约 `20` 轮，一般运维约 `80` 轮，复杂变更、workflow 或动态工具任务约 `140` 轮，并且不会超过这个硬上限。
 
 运行时显式指定：
 
@@ -245,8 +247,9 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 - 主要交互入口
 - 使用 Textual TUI
 - 支持对话、计划预览、风险确认、审计查看、环境查看
-- ReAct 执行过程会显示为友好的阶段事件，如“开始 / 分析 / 工具 / 验证 / 完成”
+- ReAct 执行过程会显示为紧凑任务卡片，按“思考过程 / 工具执行 / 验证 / 结果 / 错误详情”折叠展示
 - 最终回复支持 Markdown 渲染，异常和失败会包装为错误面板，而不是裸 traceback
+- 历史对话会保存到 `~/.sysdialogue/conversations/`，可在 TUI 中恢复上下文继续追问
 
 运行：
 
@@ -270,6 +273,7 @@ TUI 快捷键：
 
 - `Ctrl+C`：取消当前执行中的任务或 workflow，并触发可用的回滚链路
 - `Ctrl+D`：退出应用
+- `F2`：打开最近历史对话，选择后恢复上下文继续对话；不会重放历史工具执行
 - `F3`：查看审计面板
 - `F4`：查看环境画像面板
 

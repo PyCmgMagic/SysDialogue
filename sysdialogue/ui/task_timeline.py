@@ -65,6 +65,8 @@ class TaskTimelineCard(Vertical):
         self._results: list[str] = []
         self._errors: list[str] = []
         self._details: list[str] = []
+        self._correction_count = 0
+        self._correction_detail = ""
         self._header = Static(classes="task_header")
         self._status_line = Static(classes="task_status")
         self._thinking_body = Static()
@@ -116,10 +118,15 @@ class TaskTimelineCard(Vertical):
                     _detail_block("模型可见文本", data["visible_text_preview"])
                 )
         elif stage == "correction":
-            self._thinking.append("模型输出未满足工具协议，已自动要求改用工具或 finish_task 收口。")
+            self._correction_count = int(data.get("correction_count") or (self._correction_count + 1))
             errors = data.get("errors") or []
+            detail = "模型输出未满足工具协议，系统已自动要求改用工具或 finish_task 收口。"
             if errors:
-                self._details.append(_detail_block("ReAct 完成门反馈", "\n".join(map(str, errors))))
+                detail += "\n" + "\n".join(map(str, errors))
+            self._correction_detail = _detail_block(
+                "ReAct 纠偏记录",
+                f"已自动纠偏 {self._correction_count} 次。\n{detail}",
+            )
         elif stage == "tool_started":
             tool = data.get("tool") or message
             self._tools.append(f"开始调用 `{tool}`。")
@@ -180,7 +187,8 @@ class TaskTimelineCard(Vertical):
             "verification": list(self._verification),
             "results": list(self._results),
             "errors": list(self._errors),
-            "details": list(self._details),
+            "details": [*self._details, *([self._correction_detail] if self._correction_detail else [])],
+            "correction_count": str(self._correction_count),
         }
 
     def _record_tool_result(self, name: str, data: dict[str, Any], *, workflow: bool = False) -> None:
@@ -229,7 +237,7 @@ class TaskTimelineCard(Vertical):
             self._results = ["任务已取消，未继续执行后续工具。"]
             self._collapse_after_finish()
             return
-        presentation = present_error(data.get("error_detail") or message or data.get("error_summary", ""))
+        presentation = present_error(data.get("error_detail") or data.get("error_summary") or message or "")
         self.status = "未完成"
         self.remove_class("running")
         self.add_class("failed")
@@ -256,7 +264,10 @@ class TaskTimelineCard(Vertical):
         self._verification_body.update(Markdown(_markdown_list(self._verification, "尚未记录验证。")))
         self._result_body.update(Markdown(_markdown_list(self._results, "任务仍在进行。")))
         self._error_body.update(Markdown(_markdown_list(self._errors, "没有错误。")))
-        self._detail_body.update(Markdown("\n\n".join(self._details) or "_暂无技术详情。_"))
+        details = [*self._details]
+        if self._correction_detail:
+            details.append(self._correction_detail)
+        self._detail_body.update(Markdown("\n\n".join(details) or "_暂无技术详情。_"))
 
     @staticmethod
     def _add_unique(items: list[str], value: str) -> None:

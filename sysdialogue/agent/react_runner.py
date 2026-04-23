@@ -112,6 +112,9 @@ class TaskRun:
     events: list[TaskEvent] = field(default_factory=list)
     final_status: str = ""
     final_reply: str = ""
+    correction_count: int = 0
+    iteration_budget: int = 0
+    iteration_limit: int = 0
 
 
 class ReActRunner:
@@ -129,15 +132,23 @@ class ReActRunner:
             goal=user_message,
             requires_environment_feedback=_requires_environment_feedback(user_message),
         )
+        task.iteration_limit = _clamp_iteration_limit(self.controller.max_iterations)
+        task.iteration_budget = _iteration_budget(
+            user_message,
+            hard_limit=task.iteration_limit,
+            requires_environment_feedback=task.requires_environment_feedback,
+        )
         self._emit(task, "task_started", "ReAct task started", {
             "task_id": task.task_id,
             "requires_environment_feedback": task.requires_environment_feedback,
+            "iteration_budget": task.iteration_budget,
+            "iteration_limit": task.iteration_limit,
         })
         messages = self.controller.conversation_manager.prepare_turn(user_message)
         all_tools = self.controller.registry.all_schemas() + META_TOOL_SCHEMAS
         empty_action_turns = 0
 
-        for iteration in range(self.controller.max_iterations):
+        for iteration in range(task.iteration_budget):
             if self.controller.is_cancel_requested():
                 task.final_status = "cancelled"
                 task.final_reply = "当前执行已取消。"
@@ -190,16 +201,24 @@ class ReActRunner:
                         "content": correction,
                         "sysdialogue_internal": True,
                     })
-                    self._emit(task, "correction", "Model did not use ReAct tools; correction injected.", {
-                        "attempt": empty_action_turns,
-                    })
+                    self._emit_correction(
+                        task,
+                        "Model did not use ReAct tools; correction injected.",
+                        {"attempt": empty_action_turns},
+                    )
                     continue
                 task.final_status = "failed"
                 task.final_reply = (
                     "模型连续返回普通文本，未按 ReAct 协议调用工具或 finish_task。"
                     "请确认当前模型支持 Chat Completions tool_calls。"
                 )
-                self._emit(task, "task_failed", "ReAct protocol was not followed.")
+                self._emit(task, "task_failed", "ReAct protocol was not followed.", {
+                    "status": "failed",
+                    "error_summary": "模型未按工具协议完成任务收口。",
+                    "error_detail": task.final_reply,
+                    "next_steps": ["确认当前模型支持 tool_calls", "将任务拆小后重试"],
+                    "correction_count": task.correction_count,
+                })
                 self._commit_final(messages, task)
                 return task.final_reply
 
@@ -215,7 +234,7 @@ class ReActRunner:
                         is_error=True,
                     ))
                 messages.append({"role": "user", "content": result_blocks})
-                self._emit(task, "correction", "finish_task was mixed with other tool calls.")
+                self._emit_correction(task, "finish_task was mixed with other tool calls.")
                 continue
 
             for block in tool_blocks:
@@ -253,10 +272,16 @@ class ReActRunner:
                 return task.final_reply
 
         task.final_status = "failed"
-        task.final_reply = "达到最大 ReAct 迭代次数，请缩小任务范围或分步重试。"
+        task.final_reply = (
+            f"已达到本任务动态 ReAct 预算（{task.iteration_budget} 轮），"
+            "请缩小任务范围或分步重试。"
+        )
         self._emit(task, "task_failed", "Maximum ReAct iterations reached.", {
             "status": "failed",
-            "error_summary": "达到最大 ReAct 迭代次数，任务未完成。",
+            "error_summary": "已达到本任务动态 ReAct 预算，任务未完成。",
+            "error_detail": task.final_reply,
+            "iteration_budget": task.iteration_budget,
+            "iteration_limit": task.iteration_limit,
             "next_steps": ["缩小任务范围", "把目标拆成更明确的单步请求"],
         })
         self._commit_final(messages, task)
@@ -265,7 +290,7 @@ class ReActRunner:
     def _handle_finish_task(self, task: TaskRun, args: dict, tool_use_id: str) -> dict:
         errors = _validate_finish_args(task, args)
         if errors:
-            self._emit(task, "correction", "finish_task rejected by completion gate.", {
+            self._emit_correction(task, "finish_task rejected by completion gate.", {
                 "errors": errors,
             })
             return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
@@ -399,6 +424,15 @@ class ReActRunner:
         task.events.append(event)
         self.controller._emit_task_event_obj(event)
 
+    def _emit_correction(self, task: TaskRun, message: str, data: dict[str, Any] | None = None) -> None:
+        task.correction_count += 1
+        payload = {
+            "display_level": "debug",
+            "correction_count": task.correction_count,
+            **(data or {}),
+        }
+        self._emit(task, "correction", message, payload)
+
 
 def _requires_environment_feedback(user_message: str) -> bool:
     text = (user_message or "").strip().lower()
@@ -426,6 +460,36 @@ def _requires_environment_feedback(user_message: str) -> bool:
     if any(k in text for k in non_ops_keywords):
         return False
     return True
+
+
+def _clamp_iteration_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        value = 160
+    return max(20, min(300, value))
+
+
+def _iteration_budget(
+    user_message: str,
+    *,
+    hard_limit: int,
+    requires_environment_feedback: bool | None = None,
+) -> int:
+    text = (user_message or "").lower()
+    limit = _clamp_iteration_limit(hard_limit)
+    if requires_environment_feedback is None:
+        requires_environment_feedback = _requires_environment_feedback(user_message)
+    if not requires_environment_feedback:
+        return min(20, limit)
+    complex_markers = (
+        "修改", "写入", "备份", "恢复", "回滚", "发布", "部署", "rollout",
+        "workflow", "工作流", "动态工具", "dyntool", "container", "docker",
+        "podman", "迁移", "升级", "多步", "验证", "修复",
+    )
+    if any(marker in text for marker in complex_markers):
+        return min(140, limit)
+    return min(80, limit)
 
 
 def _validate_finish_args(task: TaskRun, args: dict) -> list[str]:

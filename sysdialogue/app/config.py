@@ -18,7 +18,7 @@ class AppConfig:
     ssh_user: str = ""
     ssh_key_file: str = ""
     workflows_dir: str = ""  # 空则默认 sysdialogue/workflows/
-    max_iterations: int = 25
+    max_iterations: int = 160
 
 
 def load_config(
@@ -48,7 +48,7 @@ def load_config(
         base_url=os.environ.get("OPENAI_BASE_URL", ""),
         model=model or os.environ.get("OPENAI_MODEL", "") or os.environ.get("SYSDIALOGUE_MODEL", ""),
         remote_mode=remote,
-        max_iterations=int(os.environ.get("SYSDIALOGUE_MAX_ITER", 25)),
+        max_iterations=_env_int_clamped("SYSDIALOGUE_MAX_ITER", default=160, minimum=20, maximum=300),
         workflows_dir=os.environ.get("SYSDIALOGUE_WORKFLOWS_DIR", ""),
     )
     if ssh:
@@ -57,3 +57,14 @@ def load_config(
         cfg.ssh_user = ssh.get("user", "")
         cfg.ssh_key_file = ssh.get("key_file", "")
     return cfg
+
+
+def _env_int_clamped(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
