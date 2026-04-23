@@ -63,33 +63,38 @@ class SysDialogueTUI(App):
     CSS = """
     Screen {
         layout: vertical;
+        background: $surface;
     }
     #main_layout {
         height: 1fr;
         layout: horizontal;
+        padding: 0;
     }
     #left_pane {
         width: 65%;
         height: 100%;
         layout: vertical;
+        padding: 0 1 0 1;
     }
     #right_pane {
         width: 35%;
         height: 100%;
         background: $panel;
-        border-left: tall $primary 40%;
+        border-left: tall $primary 30%;
+        padding: 0 1;
     }
     #conversation {
         height: 1fr;
-        border: round $primary 40%;
-        padding: 0 1;
+        padding: 1 2;
+        scrollbar-size: 1 1;
     }
     #choice_bar {
         height: auto;
         min-height: 3;
-        padding: 0 1;
-        background: $accent 12%;
-        border: round $accent 45%;
+        padding: 1 2;
+        margin: 0 0 1 0;
+        background: $accent 8%;
+        border: round $accent 35%;
     }
     #choice_bar.hidden {
         display: none;
@@ -98,10 +103,22 @@ class SysDialogueTUI(App):
         margin: 0 1 0 0;
         max-width: 32;
     }
+    #user_input {
+        margin: 0 0 1 0;
+        border: round $primary 45%;
+        padding: 0 1;
+    }
+    #user_input:focus {
+        border: round $accent 70%;
+    }
     #status_bar {
         height: 1;
-        background: $primary 20%;
-        padding: 0 1;
+        background: $primary 18%;
+        padding: 0 2;
+        color: $text-muted;
+    }
+    .log_line {
+        margin: 0 0 1 0;
     }
     """
 
@@ -156,16 +173,24 @@ class SysDialogueTUI(App):
     def on_mount(self) -> None:
         self.title = "SysDialogue v6"
         self.sub_title = "Linux 运维智能代理"
+        welcome = Text()
+        welcome.append("SysDialogue v6", style="bold cyan")
+        welcome.append("  ·  ", style="dim")
+        welcome.append("Linux 运维智能代理", style="cyan")
+        welcome.append("\n\n")
+        welcome.append("输入自然语言运维需求，", style="")
+        welcome.append("Enter", style="bold")
+        welcome.append(" 发送。\n", style="")
+        welcome.append(
+            "F2 历史  ·  F3 审计  ·  F4 环境  ·  Ctrl+C 取消  ·  Ctrl+D 退出",
+            style="dim",
+        )
         self._write_log(
             Panel(
-                Markdown(
-                    "**欢迎使用 SysDialogue v6**\n\n"
-                    "输入自然语言运维需求，Enter 发送。\n\n"
-                    "F2 历史 / F3 审计 / F4 环境画像 / Ctrl+C 取消当前执行 / Ctrl+D 退出。"
-                ),
-                title="SysDialogue",
-                border_style="cyan",
-                padding=(0, 1),
+                welcome,
+                border_style="dim cyan",
+                padding=(1, 2),
+                title_align="left",
             )
         )
         self.query_one("#user_input", Input).focus()
@@ -201,6 +226,7 @@ class SysDialogueTUI(App):
         self._turn_failed = False
         self._turn_cancelled = False
         self._current_goal = text
+        self._write_user_bubble(text)
         self._begin_task_card(text)
         input_box = self.query_one("#user_input", Input)
         input_box.disabled = True
@@ -225,9 +251,13 @@ class SysDialogueTUI(App):
             status = "failed"
         elif self._turn_cancelled:
             self._finish_current_card(reply, is_error=False, cancelled=True)
+            if reply and reply.strip():
+                self._write_warning(reply, title="任务已取消")
             status = "cancelled"
         else:
             self._finish_current_card(reply, is_error=False)
+            if reply and reply.strip():
+                self._write_assistant(reply)
             status = "completed"
         self._persist_history(reply, status)
         self._refresh_audit_panel()
@@ -239,6 +269,21 @@ class SysDialogueTUI(App):
     def _write_log(self, renderable) -> None:
         self.query_one("#conversation", VerticalScroll).mount(
             Static(renderable, classes="log_line")
+        )
+
+    def _write_user_bubble(self, text: str) -> None:
+        body = Text()
+        body.append("你  ", style="bold cyan")
+        body.append("·  刚刚", style="dim")
+        body.append("\n")
+        body.append(text)
+        self._write_log(
+            Panel(
+                body,
+                border_style="dim cyan",
+                padding=(0, 2),
+                title_align="left",
+            )
         )
 
     def _begin_task_card(self, goal: str) -> None:
@@ -285,9 +330,10 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 Markdown(reply or "（无输出）"),
-                title="SysDialogue",
+                title="● SysDialogue",
+                title_align="left",
                 border_style="magenta",
-                padding=(0, 1),
+                padding=(1, 2),
             )
         )
 
@@ -295,9 +341,10 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 Markdown(_format_error_markdown(reply)),
-                title="执行遇到问题",
+                title="✕ 执行遇到问题",
+                title_align="left",
                 border_style="red",
-                padding=(0, 1),
+                padding=(1, 2),
             )
         )
 
@@ -305,9 +352,10 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 Markdown(reply or "当前任务已停止。"),
-                title=title,
+                title=f"◐ {title}",
+                title_align="left",
                 border_style="yellow",
-                padding=(0, 1),
+                padding=(1, 2),
             )
         )
 

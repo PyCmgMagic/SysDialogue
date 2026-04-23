@@ -27,30 +27,59 @@ class TaskTimelineCard(Vertical):
     DEFAULT_CSS = """
     TaskTimelineCard {
         height: auto;
-        margin: 1 0;
-        padding: 0 1;
-        border: round $primary 45%;
+        margin: 0 0 1 0;
+        padding: 1 2;
+        border: round $primary 35%;
+        background: $boost 4%;
     }
     TaskTimelineCard.running {
-        border: round $accent 60%;
+        border: round $accent 55%;
     }
     TaskTimelineCard.failed {
-        border: round $error 70%;
+        border: round $error 60%;
     }
     TaskTimelineCard.cancelled {
-        border: round $warning 70%;
+        border: round $warning 60%;
     }
     TaskTimelineCard.completed {
-        border: round $success 65%;
+        border: round $success 55%;
     }
     TaskTimelineCard .task_header {
         text-style: bold;
+        color: $text;
     }
     TaskTimelineCard .task_status {
         color: $text-muted;
+        margin: 0 0 1 0;
     }
     TaskTimelineCard Collapsible {
-        margin-top: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: transparent;
+    }
+    TaskTimelineCard CollapsibleTitle {
+        background: transparent;
+        color: $text-muted;
+        padding: 0 1;
+        text-style: none;
+    }
+    TaskTimelineCard CollapsibleTitle:hover {
+        background: $boost 5%;
+        color: $accent;
+    }
+    TaskTimelineCard CollapsibleTitle:focus {
+        background: transparent;
+        color: $accent;
+        text-style: bold;
+    }
+    TaskTimelineCard Collapsible.-expanded > CollapsibleTitle {
+        color: $text;
+        text-style: bold;
+    }
+    TaskTimelineCard Contents {
+        padding: 0 0 0 3;
+        background: transparent;
     }
     """
 
@@ -76,13 +105,13 @@ class TaskTimelineCard(Vertical):
         self._error_body = Static()
         self._detail_body = Static()
         self._thinking_section = Collapsible(
-            self._thinking_body, title="思考过程", collapsed=False
+            self._thinking_body, title="思考", collapsed=True
         )
         self._tools_section = Collapsible(
             self._tools_body, title="工具执行", collapsed=False
         )
         self._verification_section = Collapsible(
-            self._verification_body, title="验证", collapsed=False
+            self._verification_body, title="验证", collapsed=True
         )
         self._result_section = Collapsible(
             self._result_body, title="结果", collapsed=False
@@ -113,10 +142,6 @@ class TaskTimelineCard(Vertical):
                 self._thinking,
                 data.get("analysis_summary") or _fallback_model_summary(data),
             )
-            if data.get("visible_text_preview"):
-                self._details.append(
-                    _detail_block("模型可见文本", data["visible_text_preview"])
-                )
         elif stage == "correction":
             self._correction_count = int(data.get("correction_count") or (self._correction_count + 1))
             errors = data.get("errors") or []
@@ -171,10 +196,12 @@ class TaskTimelineCard(Vertical):
             })
         elif cancelled:
             self.status = "已取消"
-            self._results = self._results or [reply or "当前任务已取消。"]
-        elif not self._results:
+            self.remove_class("running")
+            self.add_class("cancelled")
+        elif not self.has_class("completed"):
             self.status = "已完成"
-            self._results.append(reply or "（无输出）")
+            self.remove_class("running")
+            self.add_class("completed")
         self._collapse_after_finish()
         self._refresh()
 
@@ -207,8 +234,7 @@ class TaskTimelineCard(Vertical):
     def _record_finish(self, data: dict[str, Any]) -> None:
         status = data.get("status") or "completed"
         self.status = _status_label(status)
-        summary = data.get("summary") or f"任务已收口：{status}。"
-        result_lines = [summary]
+        result_lines: list[str] = []
         if data.get("verification"):
             result_lines.append(f"验证：{data['verification']}")
         evidence = data.get("evidence") or []
@@ -257,17 +283,34 @@ class TaskTimelineCard(Vertical):
 
     def _refresh(self) -> None:
         elapsed = max(0.0, time.monotonic() - self.started_at)
-        self._header.update(f"请求：{_shorten(self.goal, 76)}")
-        self._status_line.update(f"状态：{self.status} · {elapsed:.1f}s")
+        symbol, color = _status_symbol(self.status)
+        header = Text()
+        header.append(symbol, style=f"bold {color}")
+        header.append("  SysDialogue", style=f"bold {color}")
+        self._header.update(header)
+        status_line = Text()
+        status_line.append(self.status, style=color)
+        status_line.append("  ·  ", style="dim")
+        status_line.append(f"{elapsed:.1f}s", style="dim")
+        if self._correction_count:
+            status_line.append("  ·  ", style="dim")
+            status_line.append(f"纠偏 {self._correction_count}", style="yellow dim")
+        self._status_line.update(status_line)
         self._thinking_body.update(Markdown(_markdown_list(self._thinking, "等待模型分析。")))
         self._tools_body.update(Markdown(_markdown_list(self._tools, "尚未调用工具。")))
         self._verification_body.update(Markdown(_markdown_list(self._verification, "尚未记录验证。")))
-        self._result_body.update(Markdown(_markdown_list(self._results, "任务仍在进行。")))
+        self._result_body.update(Markdown(_markdown_list(self._results, "无结构化结果。")))
         self._error_body.update(Markdown(_markdown_list(self._errors, "没有错误。")))
         details = [*self._details]
         if self._correction_detail:
             details.append(self._correction_detail)
         self._detail_body.update(Markdown("\n\n".join(details) or "_暂无技术详情。_"))
+        self._thinking_section.display = bool(self._thinking)
+        self._tools_section.display = bool(self._tools)
+        self._verification_section.display = bool(self._verification)
+        self._result_section.display = bool(self._results)
+        self._error_section.display = bool(self._errors)
+        self._detail_section.display = bool(details)
 
     @staticmethod
     def _add_unique(items: list[str], value: str) -> None:
@@ -348,6 +391,20 @@ def _last_exception_line(traceback_text: str) -> str:
         if re.match(r"^[A-Za-z_][\w.]*Error:|^[A-Za-z_][\w.]*Exception:", line):
             return _shorten(line, 160)
     return _shorten(lines[-1], 160)
+
+
+def _status_symbol(status: str) -> tuple[str, str]:
+    mapping = {
+        "运行中": ("◐", "cyan"),
+        "已完成": ("✓", "green"),
+        "部分完成": ("◑", "yellow"),
+        "失败": ("✕", "red"),
+        "未完成": ("✕", "red"),
+        "已阻止": ("⊘", "red"),
+        "需要补充信息": ("?", "yellow"),
+        "已取消": ("◦", "yellow"),
+    }
+    return mapping.get(status, ("●", "magenta"))
 
 
 def _status_label(status: str) -> str:
