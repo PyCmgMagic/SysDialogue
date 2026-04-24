@@ -1,6 +1,6 @@
 """AgentController — agentic loop 主控，串联安全门 / 工具执行 / 审计。
 
-设计参考 claudeplan8.md。单 controller 只拥有一个当前执行任务。
+设计参考 claudeplan9.md。单 controller 只拥有一个当前执行任务。
 """
 
 from __future__ import annotations
@@ -14,10 +14,13 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.hooks import HookEvent, HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy
-from sysdialogue.agent.role_agents import render_role_profiles
+from sysdialogue.agent.role_agents import RoleRunner, render_role_profiles
+from sysdialogue.agent.skills import SkillManager
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskEventRecord, TaskStore
+from sysdialogue.agent.target_profile import TargetProfileStore
 from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.agent.prompt import build_system_prompt
 from sysdialogue.audit.trace_store import AuditLog
@@ -26,8 +29,10 @@ from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.tools.meta_tools import (
+    META_ACTIVATE_SKILL,
     META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
+    META_HANDOFF_TO_ROLE,
     META_PROPOSE_DYNAMIC_TOOL,
     META_SET_EXECUTION_MODE,
 )
@@ -169,6 +174,10 @@ class AgentController:
     memory_manager: MemoryManager | None = None
     trace_store: TraceStore | None = None
     command_registry: CommandRegistry | None = None
+    skill_manager: SkillManager | None = None
+    hook_manager: HookManager | None = None
+    role_runner: RoleRunner | None = None
+    target_profile_store: TargetProfileStore | None = None
 
     # 运行时状态
     _session_counters: dict = field(default_factory=dict)
@@ -200,6 +209,14 @@ class AgentController:
             self.trace_store = TraceStore()
         if self.command_registry is None:
             self.command_registry = CommandRegistry()
+        if self.skill_manager is None:
+            self.skill_manager = SkillManager()
+        if self.hook_manager is None:
+            self.hook_manager = HookManager()
+        if self.role_runner is None:
+            self.role_runner = RoleRunner()
+        if self.target_profile_store is None:
+            self.target_profile_store = TargetProfileStore()
         self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
             self._env_sanitized,
@@ -269,6 +286,10 @@ class AgentController:
             return self._handle_propose_dynamic_tool(args, tool_use_id)
         if name == META_EXECUTE_DYNAMIC_TOOL:
             return self._handle_execute_dynamic_tool(args, tool_use_id)
+        if name == META_ACTIVATE_SKILL:
+            return self._handle_activate_skill(args, tool_use_id)
+        if name == META_HANDOFF_TO_ROLE:
+            return self._handle_handoff_to_role(args, tool_use_id)
         if name == META_FINISH_TASK:
             return _tool_result_block(
                 tool_use_id,
@@ -363,20 +384,36 @@ class AgentController:
                     "reason": confirm_decision.reason,
                 },
             )
+            self._run_hooks(
+                "approval_requested",
+                {
+                    "tool": name,
+                    "risk_level": confirm_decision.level,
+                    "reason": confirm_decision.reason,
+                },
+                allow_execute=False,
+            )
             req = ConfirmationRequest(
                 tool=name, args=args, risk=confirm_decision,
                 rollback_hint=confirm_decision.rollback_hint,
             )
             try:
-                ok = self.confirm_callback(req)
+                raw_confirmation = self.confirm_callback(req)
             except Exception as e:
-                ok = False
+                raw_confirmation = False
                 self.audit_log.log_decision(
                     tool=name, args=args, risk_level=decision.level,
                     rule_ids=decision.rule_ids,
                     reason=f"confirm_callback 异常：{e}",
                     decision="confirm_error",
                     env_profile_id=self._env_profile_id,
+                )
+            ok, always_this_session = _confirmation_outcome(raw_confirmation)
+            if ok and always_this_session and self.permission_policy is not None:
+                self.permission_policy.grant_for_session(
+                    kind="tool",
+                    value=name,
+                    target=str(self.env_profile.get("host") or self.env_profile.get("hostname") or ""),
                 )
             if not ok:
                 self.audit_log.log_decision(
@@ -391,8 +428,14 @@ class AgentController:
 
         lock_error = self._acquire_direct_tool_locks(name, args, tool_use_id)
         if lock_error is not None:
+            self._run_hooks(
+                "lock_conflict",
+                {"tool": name, "args": args, "error": lock_error.get("content", "")},
+                allow_execute=False,
+            )
             return lock_error
 
+        self._run_hooks("pre_tool", {"tool": name, "args": args}, allow_execute=True)
         # 执行
         result: ToolResult = self.registry.call(
             name, args,
@@ -414,6 +457,17 @@ class AgentController:
             status="ok" if result.success else "error",
             summary=_preview(result),
             data={"tool": name, "exit_code": result.exit_code},
+        )
+        self._run_hooks(
+            "post_tool",
+            {
+                "tool": name,
+                "args": args,
+                "success": result.success,
+                "exit_code": result.exit_code,
+                "output_preview": _preview(result),
+            },
+            allow_execute=True,
         )
         return _tool_result_block(
             tool_use_id,
@@ -756,6 +810,25 @@ class AgentController:
                 permission_summary = self.permission_policy.render_summary()
             except Exception:
                 permission_summary = None
+        skills_summary = None
+        if self.skill_manager is not None:
+            try:
+                skills_summary = self.skill_manager.render_prompt_summary()
+            except Exception:
+                skills_summary = None
+        hooks_summary = None
+        if self.hook_manager is not None:
+            try:
+                hooks_summary = self.hook_manager.render_summary()
+            except Exception:
+                hooks_summary = None
+        target_summary = None
+        if self.target_profile_store is not None:
+            try:
+                target_id = self.target_profile_store.target_id_from_env(self.env_profile)
+                target_summary = self.target_profile_store.render_prompt_summary(target_id)
+            except Exception:
+                target_summary = None
         return build_system_prompt(
             self._env_sanitized,
             self.registry,
@@ -764,6 +837,9 @@ class AgentController:
             memory_summary=memory_summary,
             permission_summary=permission_summary,
             role_profiles_summary=render_role_profiles(),
+            skills_summary=skills_summary,
+            hooks_summary=hooks_summary,
+            target_summary=target_summary,
         )
 
     def _dynamic_tools_prompt_summary(self) -> str | None:
@@ -967,7 +1043,7 @@ class AgentController:
                 env_profile_id=self._env_profile_id,
             )
             try:
-                ok = self.confirm_callback(
+                raw_confirmation = self.confirm_callback(
                     ConfirmationRequest(
                         tool=META_EXECUTE_DYNAMIC_TOOL,
                         args=payload,
@@ -986,6 +1062,16 @@ class AgentController:
                     env_profile_id=self._env_profile_id,
                 )
                 return False
+            ok, always_this_session = _confirmation_outcome(raw_confirmation)
+            if ok and always_this_session and self.permission_policy is not None:
+                command = list(payload.get("cmd") or [])
+                command_name = command[0].replace("\\", "/").rsplit("/", 1)[-1] if command else ""
+                if command_name:
+                    self.permission_policy.grant_for_session(
+                        kind="command",
+                        value=command_name,
+                        target=str(self.env_profile.get("host") or self.env_profile.get("hostname") or ""),
+                    )
             self.audit_log.log_decision(
                 tool=META_EXECUTE_DYNAMIC_TOOL,
                 args=payload,
@@ -1076,6 +1162,126 @@ class AgentController:
             json.dumps(content, ensure_ascii=False),
             is_error=(not result.success),
         )
+
+    def _handle_activate_skill(self, args: dict, tool_use_id: str) -> dict:
+        if not isinstance(args, dict):
+            return _tool_result_block(tool_use_id, "activate_skill arguments must be an object.", is_error=True)
+        if self.skill_manager is None:
+            return _tool_result_block(tool_use_id, "SkillManager is unavailable.", is_error=True)
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return _tool_result_block(tool_use_id, "activate_skill.name is required.", is_error=True)
+        skill_args = args.get("args") or {}
+        if not isinstance(skill_args, dict):
+            return _tool_result_block(tool_use_id, "activate_skill.args must be an object.", is_error=True)
+        try:
+            invocation = self.skill_manager.activate(name, skill_args, source="model")
+        except Exception as exc:
+            return _tool_result_block(tool_use_id, f"activate_skill failed: {exc}", is_error=True)
+        self.conversation_manager.context[f"skill:{invocation.name}"] = invocation.context
+        self._emit_task_event(
+            "skill_activated",
+            f"Skill activated: {invocation.name}",
+            {
+                "skill": invocation.name,
+                "args": invocation.args,
+                "source": invocation.source,
+                "record_path": invocation.record_path,
+                "reason": args.get("reason") or "",
+            },
+        )
+        self._trace(
+            "handoff",
+            "activate_skill",
+            summary=f"Activated skill {invocation.name}",
+            data={"skill": invocation.name, "args": invocation.args, "record_path": invocation.record_path},
+        )
+        return _tool_result_block(
+            tool_use_id,
+            json.dumps(
+                {
+                    "success": True,
+                    "skill": invocation.name,
+                    "context": invocation.context,
+                    "record_path": invocation.record_path,
+                    "note": "Skill instructions were injected as context only; no OS operation was executed.",
+                },
+                ensure_ascii=False,
+            ),
+            is_error=False,
+        )
+
+    def _handle_handoff_to_role(self, args: dict, tool_use_id: str) -> dict:
+        if not isinstance(args, dict):
+            return _tool_result_block(tool_use_id, "handoff_to_role arguments must be an object.", is_error=True)
+        if self.role_runner is None:
+            return _tool_result_block(tool_use_id, "RoleRunner is unavailable.", is_error=True)
+        role = str(args.get("role") or "").strip()
+        objective = str(args.get("objective") or "").strip()
+        constraints = args.get("constraints") or {}
+        if not isinstance(constraints, dict):
+            return _tool_result_block(tool_use_id, "handoff_to_role.constraints must be an object.", is_error=True)
+        if not role or not objective:
+            return _tool_result_block(tool_use_id, "handoff_to_role requires role and objective.", is_error=True)
+        try:
+            record = self.role_runner.handoff(role=role, objective=objective, constraints=constraints)
+        except Exception as exc:
+            return _tool_result_block(tool_use_id, f"handoff_to_role failed: {exc}", is_error=True)
+        payload = {
+            "handoff_id": record.handoff_id,
+            "role": record.role,
+            "objective": record.objective,
+            "constraints": record.constraints,
+            "recommendation": record.recommendation,
+            "allowed_tools": list(record.allowed_tools),
+            "created_at": record.created_at,
+        }
+        self.conversation_manager.context[f"role:{record.role}:last"] = record.recommendation
+        self._emit_task_event("role_handoff", f"Role handoff: {record.role}", payload)
+        self._trace(
+            "handoff",
+            record.role,
+            summary=record.recommendation,
+            data=payload,
+        )
+        return _tool_result_block(tool_use_id, json.dumps({"success": True, **payload}, ensure_ascii=False), is_error=False)
+
+    def _run_hooks(self, event: str, payload: dict[str, Any] | None = None, *, allow_execute: bool = True) -> None:
+        if self.hook_manager is None:
+            return
+        try:
+            results = self.hook_manager.run(
+                HookEvent(
+                    event=event,
+                    task_id=self.current_task_id or "",
+                    session_id=self.session_id,
+                    payload=payload or {},
+                ),
+                controller=self,
+                allow_execute=allow_execute,
+            )
+        except Exception as exc:
+            self._trace("hook", event, status="error", summary=str(exc)[:300])
+            return
+        for result in results:
+            self._emit_task_event(
+                "hook",
+                f"Hook {result.hook_id}: {result.status}",
+                {
+                    "hook_id": result.hook_id,
+                    "action": result.action,
+                    "status": result.status,
+                    "message": result.message,
+                    **(result.data or {}),
+                },
+            )
+            self._trace(
+                "hook",
+                result.hook_id,
+                status="ok" if result.status == "ok" else result.status,
+                summary=result.message,
+                data={"action": result.action, **(result.data or {})},
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1170,6 +1376,21 @@ def _dedupe_scopes(scopes: list[str]) -> list[str]:
         seen.add(scope)
         result.append(scope)
     return result
+
+
+def _confirmation_outcome(value: Any) -> tuple[bool, bool]:
+    """Return (approved, always_this_session) from legacy or richer callbacks."""
+    if isinstance(value, dict):
+        decision = str(value.get("decision") or value.get("scope") or "").lower()
+        approved = bool(value.get("approved", decision in {"once", "always", "always_this_session"}))
+        return approved, approved and decision in {"always", "always_this_session"}
+    if isinstance(value, str):
+        decision = value.strip().lower()
+        return decision in {"true", "yes", "approve", "approved", "once", "always", "always_this_session"}, decision in {
+            "always",
+            "always_this_session",
+        }
+    return bool(value), False
 
 
 # --------------------------------------------------------------------------

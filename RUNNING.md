@@ -2,8 +2,8 @@
 
 ## Baseline
 
-- Active design baseline: `framework/claudeplan8.md`
-- Historical reference only: `framework/claudeplan6.md` and `framework/claudeplan7.md`
+- Active design baseline: `framework/claudeplan9.md`
+- Historical reference only: `framework/claudeplan6.md`, `framework/claudeplan7.md`, and `framework/claudeplan8.md`
 
 This guide explains how to install, configure, run, and verify the current SysDialogue runtime.
 
@@ -87,6 +87,18 @@ Per-task budgets are dynamic:
 - complex mutation / workflow / DynTool tasks: about `140`
 
 All of them are clamped to `20..300`.
+
+## 3.1 Skills, Hooks, And Profiles
+
+Optional local extensions:
+
+- Project skills: `.sysdialogue/skills/<name>/SKILL.md`
+- User skills: `~/.sysdialogue/skills/<name>/SKILL.md`
+- Project hooks: `.sysdialogue/hooks.json`
+- User hooks: `~/.sysdialogue/hooks.json`
+- Target profiles: `~/.sysdialogue/targets/`
+
+Skills inject playbook instructions only. Hooks can notify, inject read-only context, or run a bounded command through the DynTool safety chain.
 
 ## 4. Git Preflight
 
@@ -214,6 +226,13 @@ The interactive entrypoints support shared control-plane commands:
 /tools
 /permissions
 /compact
+/skills
+/skill <name> [json args]
+/skill-reload
+/hooks
+/forget <memory_id>
+/target
+/why [tool]
 ```
 
 Examples:
@@ -222,6 +241,9 @@ Examples:
 /status
 /memory Prefer nginx changes during maintenance windows
 /compact nginx service is the current troubleshooting target
+/skills
+/skill service-triage {"service":"nginx"}
+/target set maintenance_window=Sunday 02:00
 ```
 
 ## 10. ReAct Runtime Rules

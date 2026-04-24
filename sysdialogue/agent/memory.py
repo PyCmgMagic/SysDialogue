@@ -114,6 +114,26 @@ class MemoryManager:
             source="compact",
         )
 
+    def compact_preview(self, *, session_id: str, summary: str) -> str:
+        sanitized = redact_sensitive(summary)
+        return (
+            f"Preview memory key: summary:{session_id}\n"
+            f"Scope: session\n"
+            f"Value:\n{sanitized}"
+        )
+
+    def forget(self, memory_id: str) -> bool:
+        target = str(memory_id or "").strip()
+        if not target:
+            return False
+        with self._lock():
+            records = self._load_unlocked()
+            kept = [record for record in records if record.memory_id != target]
+            if len(kept) == len(records):
+                return False
+            self._save_unlocked(kept)
+        return True
+
     def _lock(self) -> FileLock:
         return FileLock(str(self.index_path) + ".lock", timeout=10)
 

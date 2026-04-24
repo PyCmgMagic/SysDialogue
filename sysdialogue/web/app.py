@@ -66,11 +66,47 @@ def create_web_app(config) -> FastAPI:
         session = store.get(session_id)
         return {"records": [record.__dict__ for record in session.runtime.memory_manager.list_records(limit=100)]}
 
+    @app.get("/api/session/{session_id}/skills")
+    async def get_skills(session_id: str):
+        session = store.get(session_id)
+        return {"skills": [skill.__dict__ for skill in session.runtime.skill_manager.list_skills()]}
+
+    @app.post("/api/session/{session_id}/skill")
+    async def activate_skill(session_id: str, payload: dict):
+        name = (payload.get("name") or "").strip()
+        args = payload.get("args") or {}
+        if not name:
+            raise HTTPException(status_code=400, detail="skill name cannot be empty")
+        if not isinstance(args, dict):
+            raise HTTPException(status_code=400, detail="args must be an object")
+        try:
+            reply = store.get(session_id).activate_skill(name, args)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "reply": reply}
+
+    @app.get("/api/session/{session_id}/hooks")
+    async def get_hooks(session_id: str):
+        session = store.get(session_id)
+        return {"hooks": [hook.__dict__ for hook in session.runtime.hook_manager.list_rules()]}
+
+    @app.get("/api/session/{session_id}/permissions/explain")
+    async def explain_permissions(session_id: str, tool: str = "*", risk_level: str = "SAFE"):
+        session = store.get(session_id)
+        target = str(session.runtime.env_profile.get("host") or session.runtime.env_profile.get("hostname") or "")
+        return session.runtime.permission_policy.explain_tool(
+            tool=tool,
+            args={},
+            risk_level=risk_level,
+            target=target,
+        )
+
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):
         approved = bool(payload.get("approved"))
+        decision = str(payload.get("decision") or ("once" if approved else "deny"))
         try:
-            store.get(session_id).submit_confirmation(approved)
+            store.get(session_id).submit_confirmation(approved, decision=decision)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}

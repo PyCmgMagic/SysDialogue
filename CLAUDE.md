@@ -1,7 +1,7 @@
 # SysDialogue Current Handoff
 
-> Active design baseline: `framework/claudeplan8.md`
-> Historical archive only: `framework/claudeplan6.md` and `framework/claudeplan7.md`
+> Active design baseline: `framework/claudeplan9.md`
+> Historical archive only: `framework/claudeplan6.md`, `framework/claudeplan7.md`, and `framework/claudeplan8.md`
 
 ## What This Project Is
 
@@ -9,13 +9,14 @@ SysDialogue is a Linux operations agent with:
 
 - OpenAI-compatible Chat Completions tool-calling
 - task-level ReAct runtime
-- 37 static tools + 4 meta tools
+- 37 static tools + 6 meta tools
 - built-in workflows
 - TUI / Simple CLI / Web / scheduled-job entrypoints
 - risk gates, confirmation, rollback hints, and audit logs
 - OpenCode-style permission policy
 - layered memory and local trace spans
 - shared slash commands
+- Markdown skills, controlled hooks, role handoff, and target profiles
 - local and SSH remote execution
 
 The current runtime always enables DynTool; there is no gated development-only mode.
@@ -23,9 +24,9 @@ DynTool is always enabled, but still gated by safety checks, confirmation, audit
 
 ## Current Source Of Truth
 
-Use `framework/claudeplan8.md` for current architecture and behavior.
+Use `framework/claudeplan9.md` for current architecture and behavior.
 
-Do not treat `framework/claudeplan6.md` or `framework/claudeplan7.md` as normative anymore. They are kept only so we can trace earlier design decisions and audit the migration path.
+Do not treat `framework/claudeplan6.md`, `framework/claudeplan7.md`, or `framework/claudeplan8.md` as normative anymore. They are kept only so we can trace earlier design decisions and audit the migration path.
 
 ## Git-First Rules
 
@@ -57,6 +58,9 @@ Persistent state now lives under:
 - `~/.sysdialogue/policy.json`
 - `~/.sysdialogue/memory/`
 - `~/.sysdialogue/traces/`
+- `~/.sysdialogue/skills/`
+- `~/.sysdialogue/hooks.json`
+- `~/.sysdialogue/targets/`
 
 Shared stores are implemented in `sysdialogue/agent/state_store.py`:
 
@@ -72,6 +76,13 @@ Locking is cross-process lease-based, not in-memory-only anymore.
 - `MemoryManager` stores layered reusable context and redacts obvious secrets before long-term storage.
 - `TraceStore` writes local JSONL spans for LLM calls, tools, guardrails, confirmations, and verification.
 
+### Skills / Hooks / Roles
+
+- `SkillManager` loads `.sysdialogue/skills/<name>/SKILL.md` before user skills under `~/.sysdialogue/skills/`.
+- `HookManager` reads `.sysdialogue/hooks.json` and `~/.sysdialogue/hooks.json`; hook commands go through DynTool safety.
+- `RoleRunner` supports serial advisory handoff to `planner`, `executor`, `verifier`, `risk_reviewer`, and `toolsmith`.
+- `TargetProfileStore` records target facts under `~/.sysdialogue/targets/`.
+
 ### Slash Commands
 
 Shared commands are available in TUI, Web, and Simple CLI:
@@ -85,6 +96,13 @@ Shared commands are available in TUI, Web, and Simple CLI:
 - `/tools`
 - `/permissions`
 - `/compact`
+- `/skills`
+- `/skill`
+- `/skill-reload`
+- `/hooks`
+- `/forget`
+- `/target`
+- `/why`
 
 ### Entry Surfaces
 
@@ -129,13 +147,17 @@ DynTool is always available, but still last-resort:
 - `sysdialogue/agent/memory.py`
 - `sysdialogue/agent/trace_store.py`
 - `sysdialogue/agent/command_registry.py`
+- `sysdialogue/agent/skills.py`
+- `sysdialogue/agent/hooks.py`
+- `sysdialogue/agent/role_agents.py`
+- `sysdialogue/agent/target_profile.py`
 - `sysdialogue/app/runtime_factory.py`
 - `sysdialogue/app/jobs.py`
 - `sysdialogue/app/simple_cli.py`
 - `sysdialogue/web/service.py`
 - `sysdialogue/ui/tui_app.py`
 - `sysdialogue/ui/task_timeline.py`
-- `framework/claudeplan8.md`
+- `framework/claudeplan9.md`
 
 ## Current Behavior Guarantees
 
@@ -147,6 +169,7 @@ DynTool is always available, but still last-resort:
 - friendly error presentation is shared across TUI / Web / Simple CLI
 - slash commands are shared across TUI / Web / Simple CLI
 - PermissionPolicy, MemoryManager, and TraceStore are injected into every runtime
+- Skills, Hooks, RoleRunner, and TargetProfileStore are injected into every runtime
 
 ## Remaining Real-World Validation Gaps
 

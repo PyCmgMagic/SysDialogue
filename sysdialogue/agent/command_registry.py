@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +40,20 @@ class CommandRegistry:
             return CommandResult(_permissions(controller))
         if command == "/compact":
             return CommandResult(_compact(controller, arg))
+        if command == "/skills":
+            return CommandResult(_skills(controller))
+        if command == "/skill":
+            return CommandResult(_skill(controller, arg))
+        if command == "/skill-reload":
+            return CommandResult(_skill_reload(controller))
+        if command == "/hooks":
+            return CommandResult(_hooks(controller))
+        if command == "/forget":
+            return CommandResult(_forget(controller, arg))
+        if command == "/target":
+            return CommandResult(_target(controller, arg))
+        if command == "/why":
+            return CommandResult(_why(controller, arg))
         return CommandResult(f"Unknown command: {command}\n\n{_help_text()}")
 
 
@@ -62,6 +78,13 @@ def _help_text() -> str:
             "- /tools: show static and reusable dynamic tools",
             "- /permissions: show active permission policy summary",
             "- /compact [summary]: compact current context into memory",
+            "- /skills: list installed Markdown skills",
+            "- /skill <name> [json args]: activate a skill for this session",
+            "- /skill-reload: rescan project/user skills",
+            "- /hooks: show configured hooks",
+            "- /forget <memory_id>: remove one memory record",
+            "- /target [set key=value]: show or update current target profile",
+            "- /why [tool]: explain the current permission decision",
         ]
     )
 
@@ -169,9 +192,142 @@ def _compact(controller: Any, arg: str) -> str:
     if manager is None:
         return "MemoryManager is unavailable."
     summary = arg.strip()
+    if summary.startswith("--preview"):
+        preview = summary.removeprefix("--preview").strip()
+        if not preview:
+            context = controller.conversation_manager.render_context()
+            preview = f"Session context summary:\n{context}"
+        return manager.compact_preview(session_id=controller.session_id, summary=preview)
     if not summary:
         context = controller.conversation_manager.render_context()
         summary = f"Session context summary:\n{context}"
     record = manager.compact_session(session_id=controller.session_id, summary=summary)
     controller.conversation_manager.context["last_compaction_memory_id"] = record.memory_id
     return f"Compacted current context into {record.memory_id}."
+
+
+def _skills(controller: Any) -> str:
+    manager = getattr(controller, "skill_manager", None)
+    if manager is None:
+        return "SkillManager is unavailable."
+    skills = manager.list_skills()
+    if not skills:
+        return "No skills installed. Add SKILL.md under .sysdialogue/skills/<name>/ or ~/.sysdialogue/skills/<name>/."
+    lines = ["Installed skills:"]
+    for skill in skills:
+        flags = []
+        if skill.user_invocable:
+            flags.append("user")
+        if skill.model_invocable:
+            flags.append("model")
+        lines.append(f"- {skill.name} [{skill.scope}; {', '.join(flags)}]: {skill.description}")
+    return "\n".join(lines)
+
+
+def _skill(controller: Any, arg: str) -> str:
+    manager = getattr(controller, "skill_manager", None)
+    if manager is None:
+        return "SkillManager is unavailable."
+    name, raw_args = _split_name_and_tail(arg)
+    if not name:
+        return "Usage: /skill <name> [json args]"
+    try:
+        parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+    except json.JSONDecodeError as exc:
+        return f"Skill args must be JSON object: {exc}"
+    if not isinstance(parsed_args, dict):
+        return "Skill args must be a JSON object."
+    try:
+        invocation = manager.activate(name, parsed_args, source="user")
+    except Exception as exc:
+        return f"Skill activation failed: {exc}"
+    controller.conversation_manager.context[f"skill:{invocation.name}"] = invocation.context
+    if getattr(controller, "session_store", None) is not None:
+        controller.session_store.sync_manager(
+            controller.session_id,
+            controller.conversation_manager,
+            surface=controller.surface,
+        )
+    if hasattr(controller, "_emit_task_event"):
+        controller._emit_task_event(
+            "skill_activated",
+            f"Skill activated: {invocation.name}",
+            {"skill": invocation.name, "source": "user", "record_path": invocation.record_path},
+        )
+    if hasattr(controller, "_trace"):
+        controller._trace(
+            "handoff",
+            "activate_skill",
+            summary=f"Activated skill {invocation.name} from command",
+            data={"skill": invocation.name, "record_path": invocation.record_path},
+        )
+    return f"Activated skill {invocation.name}. It was added to reusable context; no OS operation was executed."
+
+
+def _skill_reload(controller: Any) -> str:
+    manager = getattr(controller, "skill_manager", None)
+    if manager is None:
+        return "SkillManager is unavailable."
+    skills = manager.reload()
+    return f"Reloaded {len(skills)} skill(s)."
+
+
+def _hooks(controller: Any) -> str:
+    manager = getattr(controller, "hook_manager", None)
+    if manager is None:
+        return "HookManager is unavailable."
+    manager.reload()
+    return manager.render_summary()
+
+
+def _forget(controller: Any, arg: str) -> str:
+    manager = getattr(controller, "memory_manager", None)
+    if manager is None:
+        return "MemoryManager is unavailable."
+    memory_id = arg.strip()
+    if not memory_id:
+        return "Usage: /forget <memory_id>"
+    return f"Forgot {memory_id}." if manager.forget(memory_id) else f"Memory not found: {memory_id}"
+
+
+def _target(controller: Any, arg: str) -> str:
+    store = getattr(controller, "target_profile_store", None)
+    if store is None:
+        return "TargetProfileStore is unavailable."
+    target_id = store.target_id_from_env(getattr(controller, "env_profile", {}) or {})
+    stripped = arg.strip()
+    if not stripped:
+        return store.render_prompt_summary(target_id)
+    if stripped.startswith("set "):
+        assignment = stripped[4:].strip()
+        if "=" not in assignment:
+            return "Usage: /target set key=value"
+        key, value = assignment.split("=", 1)
+        profile = store.remember_fact(target_id, key.strip(), value.strip())
+        return f"Updated target {profile.target_id}: {key.strip()}={value.strip()}"
+    return "Usage: /target or /target set key=value"
+
+
+def _why(controller: Any, arg: str) -> str:
+    policy = getattr(controller, "permission_policy", None)
+    if policy is None:
+        return "PermissionPolicy is unavailable."
+    tool = (arg.strip().split() or ["*"])[0]
+    target = str((getattr(controller, "env_profile", {}) or {}).get("host") or (getattr(controller, "env_profile", {}) or {}).get("hostname") or "")
+    explanation = policy.explain_tool(tool=tool, args={}, risk_level="SAFE", target=target)
+    return json.dumps(explanation, ensure_ascii=False, indent=2)
+
+
+def _split_name_and_tail(text: str) -> tuple[str, str]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return "", ""
+    try:
+        parts = shlex.split(stripped, posix=False)
+    except ValueError:
+        parts = stripped.split(maxsplit=1)
+    if not parts:
+        return "", ""
+    name = parts[0].strip("\"'")
+    tail = stripped[len(parts[0]):].strip()
+    return name, tail

@@ -20,6 +20,10 @@ class PolicyDecision:
     action: str = "ask"  # allow | ask | deny
     reason: str = "No matching permission rule."
     rule_id: str = ""
+    matched_rule: dict[str, Any] | None = None
+    candidate_rules: list[dict[str, Any]] = field(default_factory=list)
+    decision_reason: str = ""
+    suggested_always_grant: bool = False
 
     @property
     def is_denied(self) -> bool:
@@ -64,13 +68,23 @@ class PermissionPolicy:
         target: str = "",
     ) -> PolicyDecision:
         if risk_level == "BLOCK":
-            return PolicyDecision("deny", "RiskClassifier returned BLOCK; policy cannot override it.", "risk:block")
+            return PolicyDecision(
+                "deny",
+                "RiskClassifier returned BLOCK; policy cannot override it.",
+                "risk:block",
+                decision_reason="BLOCK cannot be downgraded by permission policy.",
+            )
 
         key = self._grant_key("tool", tool, target)
         if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
-            return PolicyDecision("allow", "Allowed by this-session grant.", "session-grant")
+            return PolicyDecision(
+                "allow",
+                "Allowed by this-session grant.",
+                "session-grant",
+                decision_reason="This session already approved the same tool/target.",
+            )
 
-        rule = self._best_tool_rule(
+        rule, candidates = self._best_tool_rule(
             tool=tool,
             args=args or {},
             risk_level=risk_level,
@@ -78,9 +92,23 @@ class PermissionPolicy:
         )
 
         if rule is not None:
-            return PolicyDecision(_normalize_action(rule.action), rule.description or f"Matched {rule.kind}:{rule.pattern}", rule.rule_id)
+            action = _normalize_action(rule.action)
+            return PolicyDecision(
+                action,
+                rule.description or f"Matched {rule.kind}:{rule.pattern}",
+                rule.rule_id,
+                matched_rule=_rule_payload(rule),
+                candidate_rules=[_rule_payload(candidate) for candidate in candidates],
+                decision_reason="Most specific matching rule wins; equal specificity uses the later rule.",
+                suggested_always_grant=(action == "ask" and risk_level in {"SAFE", "WARN-LOW"}),
+            )
 
-        return PolicyDecision("allow", f"{risk_level} tool without a stricter policy rule.", "default:risk-classifier")
+        return PolicyDecision(
+            "allow",
+            f"{risk_level} tool without a stricter policy rule.",
+            "default:risk-classifier",
+            decision_reason="No policy rule matched; falling back to RiskClassifier.",
+        )
 
     def evaluate_command(
         self,
@@ -90,15 +118,61 @@ class PermissionPolicy:
         target: str = "",
     ) -> PolicyDecision:
         if risk_level == "BLOCK":
-            return PolicyDecision("deny", "Command safety returned BLOCK; policy cannot override it.", "risk:block")
+            return PolicyDecision(
+                "deny",
+                "Command safety returned BLOCK; policy cannot override it.",
+                "risk:block",
+                decision_reason="BLOCK cannot be downgraded by permission policy.",
+            )
         command = _basename(argv[0]) if argv else ""
         key = self._grant_key("command", command, target)
         if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
-            return PolicyDecision("allow", "Allowed by this-session grant.", "session-grant")
+            return PolicyDecision(
+                "allow",
+                "Allowed by this-session grant.",
+                "session-grant",
+                decision_reason="This session already approved the same command/target.",
+            )
         rule = self._best_match(kind="command", value=command)
         if rule is not None:
-            return PolicyDecision(_normalize_action(rule.action), rule.description or f"Matched command:{rule.pattern}", rule.rule_id)
-        return PolicyDecision("ask", "Dynamic commands require explicit confirmation by default.", "default:command")
+            action = _normalize_action(rule.action)
+            return PolicyDecision(
+                action,
+                rule.description or f"Matched command:{rule.pattern}",
+                rule.rule_id,
+                matched_rule=_rule_payload(rule),
+                decision_reason="Most specific matching command rule wins.",
+                suggested_always_grant=(action == "ask" and risk_level in {"SAFE", "WARN-LOW"}),
+            )
+        return PolicyDecision(
+            "ask",
+            "Dynamic commands require explicit confirmation by default.",
+            "default:command",
+            decision_reason="No command policy matched; DynTool defaults to ask.",
+            suggested_always_grant=(risk_level in {"SAFE", "WARN-LOW"}),
+        )
+
+    def explain_tool(
+        self,
+        *,
+        tool: str,
+        args: dict[str, Any] | None = None,
+        risk_level: str = "SAFE",
+        target: str = "",
+    ) -> dict[str, Any]:
+        decision = self.evaluate_tool(tool=tool, args=args or {}, risk_level=risk_level, target=target)
+        return {
+            "tool": tool,
+            "risk_level": risk_level,
+            "target": target,
+            "action": decision.action,
+            "reason": decision.reason,
+            "rule_id": decision.rule_id,
+            "matched_rule": decision.matched_rule,
+            "candidate_rules": decision.candidate_rules,
+            "decision_reason": decision.decision_reason,
+            "suggested_always_grant": decision.suggested_always_grant,
+        }
 
     def grant_for_session(self, *, kind: str, value: str, target: str = "") -> None:
         self.session_grants.add(self._grant_key(kind, value, target))
@@ -164,7 +238,7 @@ class PermissionPolicy:
         args: dict[str, Any],
         risk_level: str,
         target: str = "",
-    ) -> PermissionRule | None:
+    ) -> tuple[PermissionRule | None, list[PermissionRule]]:
         matches: list[tuple[int, int, PermissionRule]] = []
         path_values = self._path_values(args)
         for index, rule in enumerate(self.rules):
@@ -177,9 +251,9 @@ class PermissionPolicy:
             elif rule.kind == "path" and any(fnmatch.fnmatchcase(path, rule.pattern) for path in path_values):
                 matches.append((_rule_specificity(rule), index, rule))
         if not matches:
-            return None
+            return None, []
         matches.sort(key=lambda item: (item[0], item[1]))
-        return matches[-1][2]
+        return matches[-1][2], [item[2] for item in matches]
 
     def _path_values(self, args: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
@@ -205,6 +279,17 @@ def _basename(command: str) -> str:
 
 def _rule_specificity(rule: PermissionRule) -> int:
     return _kind_weight(rule.kind) + _pattern_specificity(rule.pattern)
+
+
+def _rule_payload(rule: PermissionRule) -> dict[str, Any]:
+    return {
+        "rule_id": rule.rule_id,
+        "action": rule.action,
+        "kind": rule.kind,
+        "pattern": rule.pattern,
+        "description": rule.description,
+        "specificity": _rule_specificity(rule),
+    }
 
 
 def _kind_weight(kind: str) -> int:

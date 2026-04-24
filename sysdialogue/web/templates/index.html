@@ -261,6 +261,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
         <div class="side-title">Trace</div>
         <div class="side-body" id="trace-summary">暂无 trace</div>
       </div>
+      <div class="side-card">
+        <div class="side-title">Skills</div>
+        <div class="side-body" id="skill-summary">暂无技能</div>
+      </div>
+      <div class="side-card">
+        <div class="side-title">Hooks</div>
+        <div class="side-body" id="hook-summary">暂无 hooks</div>
+      </div>
     </div>
   </nav>
 
@@ -293,7 +301,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
       <div class="cf-title" id="cf-level"></div>
       <div class="cf-reason" id="cf-reason"></div>
       <div class="cf-btns">
-        <button class="cf-btn approve" onclick="doConfirm(true)">批准执行</button>
+        <button class="cf-btn approve" onclick="doConfirm(true, 'once')">批准本次</button>
+        <button class="cf-btn approve" onclick="doConfirm(true, 'always_this_session')">本会话总是允许</button>
         <button class="cf-btn deny" onclick="doConfirm(false)">拒绝</button>
       </div>
     </div>
@@ -353,6 +362,8 @@ const statusDot = document.getElementById("status-dot");
 const memorySummary = document.getElementById("memory-summary");
 const policySummary = document.getElementById("policy-summary");
 const traceSummary = document.getElementById("trace-summary");
+const skillSummary = document.getElementById("skill-summary");
+const hookSummary = document.getElementById("hook-summary");
 
 async function api(path, method = "GET", body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -497,6 +508,16 @@ function renderState(s) {
   traceSummary.textContent = traces.length
     ? traces.slice(-5).map(t => `${t.span_type || "span"} ${t.name || ""} ${t.status || ""}`).join("\n")
     : "暂无 trace";
+
+  const skills = s.skills || [];
+  skillSummary.textContent = skills.length
+    ? skills.slice(0, 6).map(sk => `${sk.name || "skill"} (${sk.scope || "local"})`).join("\n")
+    : "暂无技能";
+
+  const hooks = s.hooks || [];
+  hookSummary.textContent = hooks.length
+    ? hooks.slice(0, 6).map(h => `${h.event || "event"} -> ${h.action || "action"}`).join("\n")
+    : "暂无 hooks";
 }
 
 function syncEntries(entries) {
@@ -555,8 +576,8 @@ async function sendMessage() {
   await poll();
 }
 
-async function doConfirm(approved) {
-  await api("/confirm", "POST", { approved });
+async function doConfirm(approved, decision = "once") {
+  await api("/confirm", "POST", { approved, decision: approved ? decision : "deny" });
   await poll();
 }
 

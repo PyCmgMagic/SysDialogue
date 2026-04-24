@@ -22,6 +22,7 @@ class _PendingConfirmation:
     rollback_hint: str
     event: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
+    decision: str = "once"
 
 
 @dataclass
@@ -86,6 +87,14 @@ class WebSession:
                 "traces": [span.__dict__ for span in self.runtime.trace_store.list_spans(self.session_id, limit=50)],
                 "memory": [record.__dict__ for record in self.runtime.memory_manager.list_records(limit=20)],
                 "permission_policy": self.runtime.permission_policy.render_summary(),
+                "skills": [skill.__dict__ for skill in self.runtime.skill_manager.list_skills()],
+                "hooks": [hook.__dict__ for hook in self.runtime.hook_manager.list_rules()],
+                "permission_explain": self.runtime.permission_policy.explain_tool(
+                    tool="*",
+                    args={},
+                    risk_level="SAFE",
+                    target=str(self.runtime.env_profile.get("host") or self.runtime.env_profile.get("hostname") or ""),
+                ),
             }
 
     def start_turn(self, text: str) -> None:
@@ -122,10 +131,13 @@ class WebSession:
         pending.value = text
         pending.event.set()
 
-    def submit_confirmation(self, approved: bool) -> None:
+    def submit_confirmation(self, approved: bool, decision: str = "once") -> None:
+        clean_decision = str(decision or "once").strip().lower()
+        if clean_decision not in {"once", "always_this_session", "deny"}:
+            clean_decision = "once" if approved else "deny"
         with self._lock:
             if self.pending_confirmation is None:
-                if self._resolve_persisted_confirmation(approved):
+                if self._resolve_persisted_confirmation(approved, clean_decision):
                     return
                 self._recover_unowned_pending()
                 raise RuntimeError("当前没有待确认请求")
@@ -137,6 +149,7 @@ class WebSession:
                 surface="web",
             )
         pending.approved = approved
+        pending.decision = clean_decision
         pending.event.set()
 
     def needs_input_response(self) -> bool:
@@ -165,6 +178,23 @@ class WebSession:
                 daemon=True,
             )
             self._worker.start()
+
+    def activate_skill(self, name: str, args: dict[str, Any] | None = None) -> str:
+        if not name:
+            raise RuntimeError("skill name cannot be empty")
+        invocation = self.runtime.skill_manager.activate(name, args or {}, source="user")
+        self.runtime.controller.conversation_manager.context[f"skill:{invocation.name}"] = invocation.context
+        self.runtime.session_store.sync_manager(
+            self.session_id,
+            self.runtime.controller.conversation_manager,
+            surface="web",
+        )
+        self.runtime.controller._emit_task_event(
+            "skill_activated",
+            f"Skill activated: {invocation.name}",
+            {"skill": invocation.name, "source": "web", "record_path": invocation.record_path},
+        )
+        return f"Activated skill {invocation.name}."
 
     def cancel(self) -> None:
         self.runtime.controller.request_cancel()
@@ -250,6 +280,7 @@ class WebSession:
                 and data.get("resolved")
             ):
                 pending.approved = bool(data.get("approved"))
+                pending.decision = str(data.get("decision") or ("once" if pending.approved else "deny"))
                 break
             if self.runtime.controller.is_cancel_requested():
                 pending.approved = False
@@ -259,7 +290,10 @@ class WebSession:
                 self.pending_confirmation = None
             status = "cancelling" if self.runtime.controller.is_cancel_requested() else "running"
             self.runtime.session_store.clear_pending(self.session_id, surface="web", status=status)
-        return pending.approved
+        return {
+            "approved": pending.approved,
+            "decision": pending.decision if pending.approved else "deny",
+        }
 
     def _input_callback(self, prompt: str, multiline: bool) -> str:
         pending = _PendingInput(
@@ -330,7 +364,7 @@ class WebSession:
             surface="web",
         )
 
-    def _resolve_persisted_confirmation(self, approved: bool) -> bool:
+    def _resolve_persisted_confirmation(self, approved: bool, decision: str = "once") -> bool:
         record = self.runtime.session_store.ensure(self.session_id, surface="web")
         pending = record.pending_confirmation or {}
         if record.status != "waiting_confirm" or not pending or pending.get("resolved"):
@@ -343,6 +377,16 @@ class WebSession:
             approved=approved,
             surface="web",
         )
+        record = self.runtime.session_store.load(self.session_id)
+        if record and record.pending_confirmation:
+            pending = dict(record.pending_confirmation)
+            pending["decision"] = decision if approved else "deny"
+            self.runtime.session_store.set_status(
+                self.session_id,
+                "running",
+                surface="web",
+                pending_confirmation=pending,
+            )
         return True
 
     def _resolve_persisted_input(self, text: str) -> bool:

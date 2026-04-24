@@ -58,13 +58,15 @@ def _render_env_profile(env_sanitized: dict) -> str:
 
 
 def _render_tools(registry: "ToolRegistry") -> str:
-    lines = ["[Available Tools: 37 static + 4 meta]"]
+    lines = ["[Available Tools: 37 static + 6 meta]"]
     for name, desc in registry.describe():
         head = desc.split("。")[0] if desc else ""
         lines.append(f"  - {name}: {head}")
     lines.append("  - set_execution_mode: declare plan/workflow/direct execution mode")
     lines.append("  - propose_dynamic_tool: propose a DynTool only when static tools/workflows cannot cover the task")
     lines.append("  - execute_dynamic_tool: execute a registered DynTool with safety checks, user confirmation, audit, and ReAct gates")
+    lines.append("  - activate_skill: load Markdown skill/playbook instructions; never executes OS operations")
+    lines.append("  - handoff_to_role: ask a constrained built-in role for structured guidance")
     lines.append("  - finish_task: close every ReAct task")
     return "\n".join(lines)
 
@@ -77,6 +79,9 @@ def build_system_prompt(
     memory_summary: str | None = None,
     permission_summary: str | None = None,
     role_profiles_summary: str | None = None,
+    skills_summary: str | None = None,
+    hooks_summary: str | None = None,
+    target_summary: str | None = None,
 ) -> str:
     """Build the system prompt injected into the LLM."""
     sections = [
@@ -91,8 +96,14 @@ def build_system_prompt(
         sections.append("[Reusable Cross-Turn Context]\n" + context_summary)
     if memory_summary:
         sections.append(memory_summary)
+    if target_summary:
+        sections.append(target_summary)
     if permission_summary:
         sections.append("[Permission Policy]\n" + permission_summary)
+    if skills_summary:
+        sections.append(skills_summary)
+    if hooks_summary:
+        sections.append("[Hooks]\n" + hooks_summary)
     if role_profiles_summary:
         sections.append(role_profiles_summary)
     if dynamic_tools_summary:

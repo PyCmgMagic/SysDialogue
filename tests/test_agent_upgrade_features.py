@@ -6,9 +6,13 @@ from pathlib import Path
 
 from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.controller import AgentController, LLMResponse
+from sysdialogue.agent.hooks import HookEvent, HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy, PermissionRule
+from sysdialogue.agent.role_agents import RoleRunner
+from sysdialogue.agent.skills import SkillManager
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.target_profile import TargetProfileStore
 from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
@@ -216,3 +220,148 @@ def test_web_app_exposes_command_trace_and_memory_routes() -> None:
     assert "/api/session/{session_id}/command" in paths
     assert "/api/session/{session_id}/traces" in paths
     assert "/api/session/{session_id}/memory" in paths
+    assert "/api/session/{session_id}/skills" in paths
+    assert "/api/session/{session_id}/skill" in paths
+    assert "/api/session/{session_id}/hooks" in paths
+    assert "/api/session/{session_id}/permissions/explain" in paths
+
+
+def test_skill_manager_project_skill_overrides_user_skill(tmp_path: Path) -> None:
+    user_skill = tmp_path / "user" / "deploy" / "SKILL.md"
+    project_skill = tmp_path / "project" / ".sysdialogue" / "skills" / "deploy" / "SKILL.md"
+    user_skill.parent.mkdir(parents=True)
+    project_skill.parent.mkdir(parents=True)
+    user_skill.write_text("---\nname: deploy\ndescription: user deploy\n---\nuser body\n", encoding="utf-8")
+    project_skill.write_text(
+        "---\nname: deploy\ndescription: project deploy\nallowed_tools: [manage_service]\n---\nproject body\n",
+        encoding="utf-8",
+    )
+
+    manager = SkillManager(project_root=tmp_path / "project", user_root=tmp_path / "user")
+    invocation = manager.activate("deploy", {"service": "nginx"}, source="user")
+
+    assert "project deploy" in manager.render_prompt_summary()
+    assert "project body" in invocation.context
+    assert "user body" not in invocation.context
+    assert '"service": "nginx"' in invocation.context
+
+
+def test_slash_skill_activates_context_without_os_execution(tmp_path: Path) -> None:
+    project_skill = tmp_path / ".sysdialogue" / "skills" / "audit" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: audit\ndescription: audit playbook\n---\nRead-only audit guidance.\n",
+        encoding="utf-8",
+    )
+    controller = _controller(tmp_path)
+    controller.skill_manager = SkillManager(project_root=tmp_path, user_root=tmp_path / "user-skills")
+
+    reply = controller.run_turn('/skill audit {"scope":"ssh"}')
+
+    assert "Activated skill audit" in reply
+    assert "skill:audit" in controller.conversation_manager.context
+    assert "Read-only audit guidance" in controller.conversation_manager.context["skill:audit"]
+
+
+def test_activate_skill_meta_tool_injects_context(tmp_path: Path) -> None:
+    project_skill = tmp_path / ".sysdialogue" / "skills" / "triage" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: triage\ndescription: triage playbook\nmodel_invocable: true\n---\nTriage steps.\n",
+        encoding="utf-8",
+    )
+    controller = _controller(tmp_path)
+    controller.skill_manager = SkillManager(project_root=tmp_path, user_root=tmp_path / "user-skills")
+
+    result = controller._dispatch_tool("activate_skill", {"name": "triage", "args": {"x": 1}}, "skill_1")
+
+    assert result["is_error"] is False
+    assert "skill:triage" in controller.conversation_manager.context
+
+
+def test_hook_manager_notify_and_inject_context(tmp_path: Path) -> None:
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": [
+                    {"id": "notify", "event": "task_started", "action": "notify", "message": "task {goal}"},
+                    {"id": "ctx", "event": "task_started", "action": "inject_context", "context": "ctx {goal}"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    controller = _controller(tmp_path)
+    manager = HookManager(project_root=tmp_path / "project", user_path=hooks_path)
+
+    results = manager.run(
+        HookEvent(event="task_started", session_id=controller.session_id, payload={"goal": "audit"}),
+        controller=controller,
+    )
+
+    assert [result.hook_id for result in results] == ["notify", "ctx"]
+    assert controller.conversation_manager.context["hook:ctx"] == "ctx audit"
+
+
+def test_role_runner_handoff_is_structured_and_advisory() -> None:
+    record = RoleRunner().handoff(
+        role="verifier",
+        objective="verify nginx restart",
+        constraints={"read_only": True},
+    )
+
+    assert record.role == "verifier"
+    assert "verify" in record.recommendation.lower()
+    assert "manage_service" in record.allowed_tools
+
+
+def test_handoff_meta_tool_returns_record(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    result = controller._dispatch_tool(
+        "handoff_to_role",
+        {"role": "risk_reviewer", "objective": "review restart risk", "constraints": {"service": "nginx"}},
+        "handoff_1",
+    )
+    payload = json.loads(result["content"])
+
+    assert result["is_error"] is False
+    assert payload["role"] == "risk_reviewer"
+    assert payload["handoff_id"].startswith("handoff_")
+
+
+def test_permission_explain_includes_candidates_and_suggestion(tmp_path: Path) -> None:
+    policy = PermissionPolicy(str(tmp_path / "policy.json"))
+    policy.rules = [
+        PermissionRule(rule_id="allow-all", action="allow", kind="tool", pattern="*"),
+        PermissionRule(rule_id="ask-service", action="ask", kind="tool", pattern="manage_service"),
+    ]
+
+    explanation = policy.explain_tool(tool="manage_service", args={}, risk_level="SAFE")
+
+    assert explanation["action"] == "ask"
+    assert explanation["matched_rule"]["rule_id"] == "ask-service"
+    assert explanation["candidate_rules"]
+    assert explanation["suggested_always_grant"] is True
+
+
+def test_target_profile_store_persists_facts(tmp_path: Path) -> None:
+    store = TargetProfileStore(str(tmp_path / "targets"))
+    target_id = store.target_id_from_env({"remote_mode": True, "host": "example.com", "ssh_port": 22})
+
+    store.remember_fact(target_id, "service", "nginx")
+    summary = store.render_prompt_summary(target_id)
+
+    assert target_id == "ssh-example.com-22"
+    assert "service" in summary
+    assert "nginx" in summary
+
+
+def test_memory_forget_removes_record(tmp_path: Path) -> None:
+    manager = MemoryManager(str(tmp_path / "memory"))
+    record = manager.remember(scope="global", key="note", value="hello", source="test")
+
+    assert manager.forget(record.memory_id) is True
+    assert manager.forget(record.memory_id) is False
+    assert not manager.list_records()

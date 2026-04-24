@@ -10,6 +10,8 @@ META_SET_EXECUTION_MODE = "set_execution_mode"
 META_PROPOSE_DYNAMIC_TOOL = "propose_dynamic_tool"
 META_EXECUTE_DYNAMIC_TOOL = "execute_dynamic_tool"
 META_FINISH_TASK = "finish_task"
+META_ACTIVATE_SKILL = "activate_skill"
+META_HANDOFF_TO_ROLE = "handoff_to_role"
 
 
 SET_EXECUTION_MODE_SCHEMA: dict = {
@@ -182,10 +184,51 @@ FINISH_TASK_SCHEMA: dict = {
 }
 
 
+ACTIVATE_SKILL_SCHEMA: dict = {
+    "name": META_ACTIVATE_SKILL,
+    "description": (
+        "Activate a local Markdown skill/playbook when it is relevant to the task. "
+        "This only injects skill instructions and context; it never executes OS operations and does not bypass safety gates."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Skill name from the [Skills] prompt section."},
+            "args": {"type": "object", "description": "Structured skill arguments for this invocation."},
+            "reason": {"type": "string", "description": "Why this skill is useful now."},
+        },
+        "required": ["name"],
+    },
+}
+
+
+HANDOFF_TO_ROLE_SCHEMA: dict = {
+    "name": META_HANDOFF_TO_ROLE,
+    "description": (
+        "Ask a built-in constrained role (planner, executor, verifier, risk_reviewer, toolsmith) "
+        "for structured guidance. Handoff is serial and advisory; execution remains in the main ReAct loop."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "role": {
+                "type": "string",
+                "enum": ["planner", "executor", "verifier", "risk_reviewer", "toolsmith"],
+            },
+            "objective": {"type": "string"},
+            "constraints": {"type": "object"},
+        },
+        "required": ["role", "objective"],
+    },
+}
+
+
 META_TOOL_SCHEMAS: list[dict] = [
     SET_EXECUTION_MODE_SCHEMA,
     PROPOSE_DYNAMIC_TOOL_SCHEMA,
     EXECUTE_DYNAMIC_TOOL_SCHEMA,
+    ACTIVATE_SKILL_SCHEMA,
+    HANDOFF_TO_ROLE_SCHEMA,
     FINISH_TASK_SCHEMA,
 ]
 
@@ -193,5 +236,7 @@ META_TOOL_NAMES = {
     META_SET_EXECUTION_MODE,
     META_PROPOSE_DYNAMIC_TOOL,
     META_EXECUTE_DYNAMIC_TOOL,
+    META_ACTIVATE_SKILL,
+    META_HANDOFF_TO_ROLE,
     META_FINISH_TASK,
 }

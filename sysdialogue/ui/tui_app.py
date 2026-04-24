@@ -59,7 +59,7 @@ _EVENT_STYLES = {
 
 
 class SysDialogueTUI(App):
-    """SysDialogue v8 Textual application."""
+    """SysDialogue v9 Textual application."""
 
     CSS = """
     Screen {
@@ -171,10 +171,10 @@ class SysDialogueTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "SysDialogue v8"
+        self.title = "SysDialogue v9"
         self.sub_title = "Linux 运维智能代理"
         welcome = Text()
-        welcome.append("SysDialogue v8", style="bold cyan")
+        welcome.append("SysDialogue v9", style="bold cyan")
         welcome.append("  ·  ", style="dim")
         welcome.append("Linux 运维智能代理", style="cyan")
         welcome.append("\n\n")

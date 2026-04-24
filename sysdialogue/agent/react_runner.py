@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Any
 
 from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
 from sysdialogue.tools.meta_tools import (
+    META_ACTIVATE_SKILL,
     META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
+    META_HANDOFF_TO_ROLE,
     META_PROPOSE_DYNAMIC_TOOL,
     META_SET_EXECUTION_MODE,
     META_TOOL_SCHEMAS,
@@ -167,6 +169,11 @@ class ReActRunner:
                     "resumed": task.resumed,
                     "resume_message": task.resume_message,
                 },
+            )
+            self.controller._run_hooks(
+                "task_started",
+                {"task_id": task.task_id, "goal": task.goal},
+                allow_execute=True,
             )
             messages = self._prepare_messages(task, user_message)
             all_tools = self.controller.registry.all_schemas() + META_TOOL_SCHEMAS
@@ -617,6 +624,12 @@ class ReActRunner:
             self._persist_task_state(task)
             return
 
+        if name in {META_ACTIVATE_SKILL, META_HANDOFF_TO_ROLE}:
+            task.observed = True
+            task.current_phase = "analysis"
+            self._persist_task_state(task)
+            return
+
         if name == META_EXECUTE_DYNAMIC_TOOL:
             changes_state = bool(payload.get("changes_state", True))
             task.observed = True
@@ -758,6 +771,16 @@ class ReActRunner:
             status=final_status,
             current_phase="finish",
             technical_details=task.technical_details,
+        )
+        hook_event = "task_finished" if final_status in {"completed", "blocked"} else "task_failed"
+        self.controller._run_hooks(
+            hook_event,
+            {
+                "task_id": task.task_id,
+                "status": final_status,
+                "summary": task.final_reply[:500],
+            },
+            allow_execute=True,
         )
 
     def _emit(self, task: TaskRun, stage: str, message: str, data: dict[str, Any] | None = None) -> None:

@@ -8,9 +8,13 @@ from typing import Any, TYPE_CHECKING
 
 from sysdialogue.agent.controller import AgentController, OpenAIChatClient
 from sysdialogue.agent.command_registry import CommandRegistry
+from sysdialogue.agent.hooks import HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy
+from sysdialogue.agent.role_agents import RoleRunner
+from sysdialogue.agent.skills import SkillManager
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.target_profile import TargetProfileStore
 from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
@@ -41,6 +45,10 @@ class RuntimeBundle:
     memory_manager: MemoryManager
     trace_store: TraceStore
     command_registry: CommandRegistry
+    skill_manager: SkillManager
+    hook_manager: HookManager
+    role_runner: RoleRunner
+    target_profile_store: TargetProfileStore
 
     def close(self) -> None:
         try:
@@ -90,6 +98,10 @@ def create_runtime(
     memory_manager = MemoryManager()
     trace_store = TraceStore()
     command_registry = CommandRegistry()
+    skill_manager = SkillManager()
+    hook_manager = HookManager()
+    role_runner = RoleRunner()
+    target_profile_store = TargetProfileStore()
 
     if llm_client is None:
         if require_api:
@@ -122,6 +134,10 @@ def create_runtime(
         memory_manager=memory_manager,
         trace_store=trace_store,
         command_registry=command_registry,
+        skill_manager=skill_manager,
+        hook_manager=hook_manager,
+        role_runner=role_runner,
+        target_profile_store=target_profile_store,
     )
     try:
         existing = session_store.load(controller.session_id)
@@ -146,4 +162,8 @@ def create_runtime(
         memory_manager=memory_manager,
         trace_store=trace_store,
         command_registry=command_registry,
+        skill_manager=skill_manager,
+        hook_manager=hook_manager,
+        role_runner=role_runner,
+        target_profile_store=target_profile_store,
     )
