@@ -12,6 +12,7 @@ from sysdialogue.agent.react_runner import (
     _is_mutating_tool,
     _is_verification_tool,
     _iteration_budget,
+    _plan_step_repair_match,
     _plan_args_match,
     _requires_environment_feedback,
     _resolve_runtime_args_for_tool,
@@ -167,6 +168,16 @@ def test_plan_args_match_tolerates_container_defaults_and_deferred_values() -> N
         {"action": "add", "username": "alice", "public_key_from_file": "/tmp/key.pub"},
         {"action": "add", "username": "alice", "public_key": "ssh-ed25519 AAAA test"},
     )
+    assert _plan_args_match(
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app", "timeout": 120},
+    )
+    assert not _plan_args_match(
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/other"},
+    )
 
 
 def test_frozen_plan_runtime_arg_binding_resolves_previous_step_data() -> None:
@@ -217,6 +228,44 @@ def test_container_exec_verification_only_accepts_read_only_checks() -> None:
     assert not _is_mutating_tool("manage_container", select_args)
     assert not _is_verification_tool("manage_container", create_args)
     assert _is_mutating_tool("manage_container", create_args)
+    assert _is_verification_tool(
+        "manage_container",
+        {
+            "action": "wait_exec",
+            "name": "mysql",
+            "command": ["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "ping"],
+        },
+    )
+
+
+def test_frozen_plan_allows_limited_repairs_for_cwd_and_mysql_tcp() -> None:
+    maven_step = TaskStepRecord(
+        step_id="maven-test",
+        tool="execute_dynamic_tool",
+        status="failed",
+        args={"cmd_template": ["mvn", "test"]},
+    )
+    assert _plan_step_repair_match(
+        maven_step,
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+    )
+
+    mysql_step = TaskStepRecord(
+        step_id="mysql-ready",
+        tool="manage_container",
+        status="failed",
+        args={"action": "exec", "name": "db", "command": ["mysqladmin", "-uroot", "-psecret", "ping"]},
+    )
+    assert _plan_step_repair_match(
+        mysql_step,
+        "manage_container",
+        {
+            "action": "wait_exec",
+            "name": "db",
+            "command": ["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "-uroot", "-psecret", "ping"],
+        },
+    )
 
 
 def test_verification_judge_rejects_generic_observation_after_mutation() -> None:
@@ -835,6 +884,80 @@ def test_react_runner_stops_repeated_no_progress_plan_deviations(tmp_path: Path)
     assert [event.stage for event in events].count("correction") >= 8
 
 
+def test_continue_on_failure_read_only_precheck_does_not_block_repair_plan(tmp_path: Path) -> None:
+    registry = _registry_with_mutation_and_validation()
+
+    def fail_info(executor):
+        return ToolResult(success=False, error="java missing")
+
+    registry.register(
+        ToolDef(
+            name="get_system_info",
+            fn=fail_info,
+            schema={
+                "name": "get_system_info",
+                "description": "Failing precheck",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "precheck",
+                            "tool": "get_system_info",
+                            "args": {},
+                            "purpose": "Expected-to-fail dependency precheck",
+                            "continue_on_failure": True,
+                        },
+                        {
+                            "step_id": "mutate",
+                            "tool": "mutate_marker",
+                            "args": {},
+                            "purpose": "Repair/install equivalent mutation",
+                        },
+                        {
+                            "step_id": "verify",
+                            "tool": "validate_config",
+                            "args": {"path": "/tmp/example.conf"},
+                            "purpose": "Verify after mutation",
+                        },
+                    ],
+                },
+                tool_id="plan_continue",
+            )
+        ],
+        [_tool_use("get_system_info", {}, tool_id="precheck_1")],
+        [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="verify_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Repair plan completed after failed precheck.",
+                "evidence": ["precheck skipped", "mutation succeeded", "validation succeeded"],
+                "verification": "validate_config ran after mutation",
+                "changed_state": True,
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, registry)
+
+    reply = controller.run_turn("repair after expected precheck failure")
+
+    assert "Repair plan completed" in reply
+    record = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    steps = {step["step_id"]: step for step in record["steps"]}
+    assert steps["precheck"]["status"] == "skipped"
+    assert steps["precheck"]["continue_on_failure"] is True
+    assert steps["mutate"]["status"] == "completed"
+    assert steps["verify"]["status"] == "completed"
+
+
 def test_failed_mutation_does_not_satisfy_completion_gate(tmp_path: Path) -> None:
     llm = FakeLLM([
         [_tool_use("fail_mutation", {}, tool_id="mutate_1")],
@@ -1061,6 +1184,88 @@ def test_execute_dynamic_tool_inline_mode_supports_one_off_command(tmp_path: Pat
     assert not (tmp_path / "dynamic_tools.json").exists()
 
 
+def test_execute_dynamic_tool_inline_mode_supports_cwd(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_name": "pwd_in_project",
+                    "cmd_template": ["pwd"],
+                    "cwd": str(workdir),
+                    "args": {},
+                    "intent_summary": "Run a read-only cwd diagnostic in the project directory.",
+                    "consequences": "Read/build project files in place.",
+                    "risk_assessment": "Build command with explicit working directory.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_inline_cwd",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Maven test command ran in the project directory.",
+                "evidence": ["execute_dynamic_tool cwd matched project directory"],
+            })
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("ok", 0) if cmd == ["pwd"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("run maven test")
+
+    assert "Maven test command ran" in reply
+    assert executor.calls == [["pwd"]]
+    assert executor.cwd_calls == [str(workdir)]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["cwd"] == str(workdir)
+
+
+def test_execute_dynamic_tool_rejects_invalid_cwd(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_name": "bad_cwd",
+                    "cmd_template": ["pwd"],
+                    "cwd": "../relative",
+                    "args": {},
+                    "intent_summary": "Bad cwd.",
+                    "consequences": "None.",
+                    "risk_assessment": "Invalid path.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_bad_cwd",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Invalid cwd was blocked.",
+                "next_steps": ["Use an absolute directory path"],
+            })
+        ],
+    ])
+    executor = RecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("run with bad cwd")
+
+    assert "Invalid cwd was blocked" in reply
+    result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert result["blocked"] is True
+    assert "cwd" in result["reason"]
+    assert executor.calls == []
+
+
 def test_registered_dynamic_tool_is_reused_by_signature(tmp_path: Path) -> None:
     registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
 
@@ -1090,6 +1295,37 @@ def test_registered_dynamic_tool_is_reused_by_signature(tmp_path: Path) -> None:
     assert second["tool_id"] == first["tool_id"]
     assert second["reused_existing"] is True
     assert len(registry.list_tools()) == 1
+
+
+def test_registered_dynamic_tool_executes_with_stored_cwd(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    tool = registry.register(
+        name="pwd_in_project",
+        description="Run pwd in a project directory",
+        cmd_template=["pwd"],
+        params={},
+        cwd=str(workdir),
+        consequences="Read-only diagnostic.",
+        risk_assessment="SAFE shape.",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+    )
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("ok", 0))
+
+    result = registry.execute(
+        tool["tool_id"],
+        {},
+        executor=executor,
+        env_profile={"remote_mode": False},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert result.success is True
+    assert result.cwd == str(workdir)
+    assert executor.calls == [["pwd"]]
+    assert executor.cwd_calls == [str(workdir)]
 
 
 def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(

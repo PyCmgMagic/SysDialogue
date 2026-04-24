@@ -518,6 +518,8 @@ class ReActRunner:
                         "tool": step.tool,
                         "args": step.args,
                         "purpose": step.purpose,
+                        "continue_on_failure": step.continue_on_failure,
+                        "repair_attempts": step.repair_attempts,
                         "finding_id": step.finding_id,
                         "severity": step.severity,
                     }
@@ -574,6 +576,18 @@ class ReActRunner:
         if task.mode != "plan":
             return None
         executable_steps = _executable_plan_steps(task.steps)
+        repair_steps = [
+            step
+            for step in task.steps
+            if _plan_step_repair_match(step, name, args)
+        ]
+        if repair_steps:
+            next_step = repair_steps[0]
+            next_step.status = "running"
+            next_step.repair_attempts += 1
+            next_step.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist_task_state(task)
+            return None
         if not executable_steps:
             remaining = _remaining_step_ids(task.steps)
             if remaining:
@@ -590,6 +604,8 @@ class ReActRunner:
             if step.tool == name and _plan_step_args_match(task.steps, step, args)
         ]
         if not matching:
+            for step in executable_steps:
+                step.last_rejected_args = _safe_result_data(args)
             expected = ", ".join(f"{step.step_id}:{step.tool}" for step in executable_steps)
             return (
                 "Frozen plan deviation rejected. "
@@ -756,13 +772,28 @@ class ReActRunner:
         next_step = _next_step_for_tool(task.steps, name, args)
         if next_step is None:
             return
-        next_step.status = "completed" if success else "failed"
+        if success:
+            next_step.status = "completed"
+            if next_step.repair_attempts:
+                next_step.repaired_from_failure = True
+        elif next_step.continue_on_failure and not _is_mutating_tool(name, args):
+            next_step.status = "skipped"
+        else:
+            next_step.status = "failed"
         next_step.error = _truncate(str(error), 600) if error else ""
         if success:
             payload = getattr(task, "_last_tool_payload", None)
             if isinstance(payload, dict):
                 next_step.result_data = _safe_result_data(payload.get("data", payload))
                 next_step.result_summary = _result_summary(payload)
+                data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                if isinstance(data, dict):
+                    next_step.read_only_reason = str(data.get("read_only_reason") or "")
+                    attempts = data.get("attempts")
+                    if isinstance(attempts, list):
+                        next_step.attempts = len(attempts)
+                    elif isinstance(attempts, int):
+                        next_step.attempts = attempts
         next_step.updated_at = datetime.now(timezone.utc).isoformat()
         if success:
             task.current_phase = "act"
@@ -993,6 +1024,18 @@ def _plan_step_args_match(steps: list[TaskStepRecord], step: TaskStepRecord, act
     return _plan_args_match(step.tool, expected if isinstance(expected, dict) else step.args, actual)
 
 
+def _plan_step_repair_match(step: TaskStepRecord, name: str, actual: dict) -> bool:
+    if step.status != "failed" or step.repair_attempts >= 3 or step.tool != name:
+        return False
+    if _plan_args_match(step.tool, step.args, actual):
+        return True
+    if name == META_EXECUTE_DYNAMIC_TOOL:
+        return _execute_dynamic_tool_repair_match(step.args, actual)
+    if name == "manage_container":
+        return _manage_container_repair_match(step.args, actual)
+    return False
+
+
 def _resolve_runtime_args_for_tool(task: TaskRun, name: str, args: Any) -> tuple[dict[str, Any], str | None]:
     if not isinstance(args, dict):
         return {}, f"{name} arguments must be an object."
@@ -1092,12 +1135,50 @@ def _plan_args_match(tool: str, expected: dict, actual: dict) -> bool:
         expected_cmd = expected.get("cmd_template") if isinstance(expected, dict) else None
         actual_cmd = actual.get("cmd_template") if isinstance(actual, dict) else None
         if expected_cmd and actual_cmd and expected_cmd == actual_cmd:
-            return True
+            expected_cwd = expected.get("cwd") if isinstance(expected, dict) else None
+            actual_cwd = actual.get("cwd") if isinstance(actual, dict) else None
+            return not expected_cwd or expected_cwd == actual_cwd
     if _has_deferred_value(expected):
         return True
     expected_norm = _normalize_plan_args(tool, expected)
     actual_norm = _normalize_plan_args(tool, actual)
     return _dict_subset(expected_norm, actual_norm)
+
+
+def _execute_dynamic_tool_repair_match(expected: dict, actual: dict) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    expected_cmd = expected.get("cmd_template")
+    actual_cmd = actual.get("cmd_template")
+    if expected_cmd and actual_cmd and expected_cmd == actual_cmd:
+        return bool(actual.get("cwd")) or bool(actual.get("cmd_template"))
+    if _is_maven_project_repair(expected_cmd, actual_cmd):
+        return True
+    return False
+
+
+def _is_maven_project_repair(expected_cmd: Any, actual_cmd: Any) -> bool:
+    if not isinstance(expected_cmd, list) or not isinstance(actual_cmd, list):
+        return False
+    if not expected_cmd or not actual_cmd:
+        return False
+    if expected_cmd[0] != "mvn" or actual_cmd[0] != "mvn":
+        return False
+    return len(actual_cmd) >= 4 and actual_cmd[1] == "-f" and str(actual_cmd[2]).endswith("pom.xml")
+
+
+def _manage_container_repair_match(expected: dict, actual: dict) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    if expected.get("name") != actual.get("name"):
+        return False
+    expected_action = str(expected.get("action") or "")
+    actual_action = str(actual.get("action") or "")
+    if expected_action != "exec" or actual_action not in {"exec", "wait_exec"}:
+        return False
+    expected_text = " ".join(str(part).lower() for part in expected.get("command") or [])
+    actual_text = " ".join(str(part).lower() for part in actual.get("command") or [])
+    return "mysqladmin" in expected_text and "ping" in expected_text and "mysqladmin" in actual_text and "ping" in actual_text
 
 
 def _normalize_plan_args(tool: str, args: Any) -> Any:
@@ -1106,8 +1187,11 @@ def _normalize_plan_args(tool: str, args: Any) -> Any:
     normalized = {k: _normalize_plan_args(tool, v) for k, v in args.items()}
     if tool == "manage_container":
         action = str(normalized.get("action") or "").lower()
-        if action != "exec":
+        if action not in {"exec", "wait_exec"}:
             normalized.pop("command", None)
+            normalized.pop("success_contains", None)
+            normalized.pop("retries", None)
+            normalized.pop("interval_sec", None)
         if normalized.get("backend") in ("auto", "docker"):
             normalized.pop("backend", None)
         if normalized.get("restart_policy") == "no":
@@ -1169,6 +1253,7 @@ class VerificationJudge:
         "manage_container:status",
         "manage_container:logs",
         "manage_container:inspect",
+        "manage_container:wait_exec",
         "manage_authorized_keys:list",
         "manage_package:list",
         "manage_package:search",
@@ -1206,7 +1291,7 @@ class VerificationJudge:
             item for item in after_action
             if item.get("action_key") in self.STRONG_ACTION_KEYS
             or (
-                item.get("action_key") == "manage_container:exec"
+                item.get("action_key") in {"manage_container:exec", "manage_container:wait_exec"}
                 and _is_read_only_container_exec_args(item.get("args") or {})
             )
         ]
@@ -1427,11 +1512,37 @@ def _blocked_no_progress_reply(task: TaskRun) -> str:
     missing = ", ".join(task.verification_judgement.get("missing_requirements") or [])
     if not missing:
         missing = "no tool or plan progress was made in repeated turns"
+    frontier = ", ".join(f"{step.step_id}:{step.tool}" for step in _executable_plan_steps(task.steps)) or "none"
+    failed = [step for step in task.steps if step.status == "failed"]
+    failed_detail = ", ".join(
+        f"{step.step_id}:{step.tool} error={step.error or '<none>'}" for step in failed[-3:]
+    ) or "none"
+    rejected = next((step.last_rejected_args for step in task.steps if step.last_rejected_args), {})
+    suggestions = _repair_suggestions(failed)
     return (
         "Task blocked after repeated no-progress ReAct turns.\n"
         f"Remaining plan steps: {remaining}.\n"
+        f"Executable frontier: {frontier}.\n"
+        f"Failed steps: {failed_detail}.\n"
+        f"Last rejected args: {_preview_json(rejected, limit=600) if rejected else 'none'}.\n"
+        f"Suggested repair args: {suggestions or 'none'}.\n"
         f"Blocking reason: {missing}."
     )
+
+
+def _repair_suggestions(failed_steps: list[TaskStepRecord]) -> str:
+    suggestions: list[str] = []
+    for step in failed_steps[-3:]:
+        if step.tool == META_EXECUTE_DYNAMIC_TOOL:
+            cmd = step.args.get("cmd_template") if isinstance(step.args, dict) else None
+            if isinstance(cmd, list) and cmd and cmd[0] in {"mvn", "gradle", "npm"}:
+                suggestions.append(f"{step.step_id}: retry execute_dynamic_tool with the same cmd_template and cwd=<observed project dir>")
+        if step.tool == "manage_container":
+            command = step.args.get("command") if isinstance(step.args, dict) else None
+            text = " ".join(str(part).lower() for part in command or [])
+            if "mysqladmin" in text and "ping" in text:
+                suggestions.append(f"{step.step_id}: retry manage_container wait_exec using mysqladmin --protocol=TCP -h127.0.0.1 ... ping")
+    return "; ".join(suggestions)
 
 
 def _final_task_store_status(status: str) -> str:
@@ -1740,7 +1851,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _is_mutating_tool(name: str, args: dict) -> bool:
-    if name == "manage_container" and _tool_action_key(name, args) == "manage_container:exec":
+    if name == "manage_container" and _tool_action_key(name, args) in {"manage_container:exec", "manage_container:wait_exec"}:
         return not _is_read_only_container_exec_args(args)
     key = _tool_action_key(name, args)
     if key in READ_ONLY_TOOLS:
@@ -1752,7 +1863,7 @@ def _is_mutating_tool(name: str, args: dict) -> bool:
 
 
 def _is_verification_tool(name: str, args: dict) -> bool:
-    if name == "manage_container" and _tool_action_key(name, args) == "manage_container:exec":
+    if name == "manage_container" and _tool_action_key(name, args) in {"manage_container:exec", "manage_container:wait_exec"}:
         return _is_read_only_container_exec_args(args)
     return name in VERIFICATION_CANDIDATE_TOOLS or _tool_action_key(name, args) in VERIFICATION_CANDIDATE_TOOLS
 
@@ -1775,10 +1886,14 @@ def _is_read_only_container_exec_args(args: dict) -> bool:
         return False
     read_markers = (
         " select ", " show ", " describe ", " desc ", " explain ",
-        "mysqladmin ping", " pg_isready", " redis-cli ping",
+        " pg_isready",
         " curl ", " wget ", " nc ", " true",
     )
-    return any(marker in padded for marker in read_markers)
+    return (
+        any(marker in padded for marker in read_markers)
+        or (" mysqladmin " in padded and " ping " in padded)
+        or (" redis-cli " in padded and " ping " in padded)
+    )
 
 
 def _tool_action_key(name: str, args: dict) -> str:

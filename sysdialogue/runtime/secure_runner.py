@@ -22,44 +22,45 @@ class RunResult:
 class SafeExecutor(ABC):
     """Base executor with timeout, truncation, and error normalization."""
 
-    def run(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
-        result = self.run_full(cmd, timeout=timeout)
+    def run(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        result = self.run_full(cmd, timeout=timeout, cwd=cwd)
         return _combine_result(result)
 
-    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+    def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
         """Run a command that requires system privileges.
 
         Tool code must opt into this path explicitly. The default implementation
         uses non-interactive sudo so callers do not hang on a password prompt.
         """
-        return self.run(["sudo", "-n", "--", *cmd], timeout=timeout)
+        return self.run(["sudo", "-n", "--", *cmd], timeout=timeout, cwd=cwd)
 
-    def run_full(self, cmd: list[str], timeout: int = 30) -> RunResult:
+    def run_full(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> RunResult:
         try:
-            return self._raw_run(cmd, timeout)
+            return self._raw_run(cmd, timeout, cwd=cwd)
         except Exception as e:
             return RunResult(stdout="", stderr=str(e), exit_code=1)
 
     @abstractmethod
-    def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
+    def _raw_run(self, cmd: list[str], timeout: int, cwd: str | None = None) -> RunResult:
         ...
 
 
 class LocalExecutor(SafeExecutor):
     """Local process executor using shell=False."""
 
-    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+    def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            return self.run(cmd, timeout=timeout)
-        return super().run_privileged(cmd, timeout=timeout)
+            return self.run(cmd, timeout=timeout, cwd=cwd)
+        return super().run_privileged(cmd, timeout=timeout, cwd=cwd)
 
-    def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
+    def _raw_run(self, cmd: list[str], timeout: int, cwd: str | None = None) -> RunResult:
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 timeout=timeout,
                 shell=False,
+                cwd=cwd,
             )
             stdout = _truncate(proc.stdout.decode("utf-8", errors="replace"))
             stderr = _truncate(proc.stderr.decode("utf-8", errors="replace"))

@@ -488,6 +488,7 @@ class AgentController:
                             actual_risk=s.actual_risk,
                             rule_ids=list(s.rule_ids),
                             depends_on=list(s.depends_on),
+                            continue_on_failure=bool(getattr(s, "continue_on_failure", False)),
                             finding_id=s.finding_id,
                             severity=s.severity,
                             blocking=s.blocking,
@@ -795,6 +796,7 @@ class AgentController:
                 description=args.get("intent_summary", ""),
                 cmd_template=args.get("cmd_template") or [],
                 params=args.get("params") or {},
+                cwd=args.get("cwd") or None,
                 consequences=args.get("consequences", ""),
                 risk_assessment=args.get("risk_assessment", ""),
                 estimated_risk=args.get("estimated_risk", "UNKNOWN"),
@@ -882,6 +884,7 @@ class AgentController:
                 is_error=True,
             )
         raw_timeout = args.get("timeout", 30)
+        cwd = args.get("cwd") or None
         try:
             timeout = int(raw_timeout)
         except (TypeError, ValueError):
@@ -1007,6 +1010,7 @@ class AgentController:
                     env_profile=self.env_profile,
                     confirm_fn=confirm_dynamic,
                     timeout=timeout,
+                    cwd=cwd,
                 )
             else:
                 result = self.dynamic_registry.execute_inline(
@@ -1014,6 +1018,7 @@ class AgentController:
                     description=str(args.get("intent_summary") or ""),
                     cmd_template=list(cmd_template),
                     params=inline_params if isinstance(inline_params, dict) else {},
+                    cwd=cwd,
                     args=dyn_args,
                     consequences=str(args.get("consequences") or "未说明"),
                     risk_assessment=str(args.get("risk_assessment") or "未提供风险评估"),
@@ -1048,6 +1053,7 @@ class AgentController:
             "exit_code": result.exit_code,
             "reason": result.reason,
             "cmd": result.cmd,
+            "cwd": result.cwd,
             "final_risk": result.final_risk,
             "declared_changes_state": result.declared_changes_state,
             "changes_state": result.changes_state,
@@ -1069,6 +1075,7 @@ class AgentController:
                 "dynamic_mode": "registered" if has_tool_id else "inline",
                 "tool_id": raw_tool_id.strip() if has_tool_id else "",
                 "exit_code": result.exit_code,
+                "cwd": result.cwd,
                 "changes_state": result.changes_state,
             },
         )

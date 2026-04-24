@@ -33,6 +33,7 @@ SET_EXECUTION_MODE_SCHEMA: dict = {
                         "args": {"type": "object"},
                         "purpose": {"type": "string"},
                         "depends_on": {"type": "array", "items": {"type": "string"}},
+                        "continue_on_failure": {"type": "boolean"},
                         "finding_id": {"type": "string"},
                         "severity": {"type": "string"},
                         "blocking": {"type": "boolean"},
@@ -72,6 +73,10 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "items": {"type": "string"},
                 "maxItems": 10,
                 "description": "subprocess argv，用 {param_name} 表示参数占位符，每元素 ≤ 256 字符",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Optional absolute working directory. Use it for project commands instead of shell cd.",
             },
             "params": {
                 "type": "object",
@@ -121,6 +126,10 @@ EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "items": {"type": "string"},
                 "maxItems": 10,
                 "description": "inline mode 使用的 subprocess argv 模板，用 {param_name} 表示参数占位符",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Optional absolute working directory. Use it for Maven/Gradle/npm project commands.",
             },
             "args": {
                 "type": "object",

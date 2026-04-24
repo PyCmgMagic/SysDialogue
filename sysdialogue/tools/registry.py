@@ -539,7 +539,7 @@ SCHEMA_MANAGE_CONTAINER = _schema(
     "容器管理（docker/podman）。不提供 privileged/host network。敏感 bind mount BLOCK（B022）。exec 仅接受 argv 数组并需确认。",
     {
         "backend": {"type": "string", "enum": ["auto", "docker", "podman"], "default": "auto"},
-        "action": {"type": "string", "enum": ["list", "status", "pull", "start", "stop", "restart", "logs", "inspect", "run", "remove", "exec"]},
+        "action": {"type": "string", "enum": ["list", "status", "pull", "start", "stop", "restart", "logs", "inspect", "run", "remove", "exec", "wait_exec"]},
         "name": {"type": "string"},
         "image": {"type": "string"},
         "ports": {
@@ -574,6 +574,9 @@ SCHEMA_MANAGE_CONTAINER = _schema(
             "description": "exec 动作的容器内 argv，例如 [\"mysql\", \"-uroot\", \"-e\", \"SELECT 1\"]",
         },
         "lines": {"type": "integer", "minimum": 10, "maximum": 1000, "default": 50},
+        "retries": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10},
+        "interval_sec": {"type": "number", "minimum": 0, "maximum": 30, "default": 2},
+        "success_contains": {"type": "string"},
     },
     required=["action"],
     additionalProperties=False,

@@ -418,7 +418,7 @@ def run_baseline() -> None:
 
 
 def run_mysql_check(case_id: str) -> None:
-    cmd = f"docker exec {MYSQL_CONTAINER} mysqladmin ping -uroot -p{DB_ROOT_PASSWORD} --silent && docker exec {MYSQL_CONTAINER} mysql -uroot -p{DB_ROOT_PASSWORD} -N -e \"SELECT user,host FROM mysql.user WHERE user='{DB_USER}'; USE {DB_NAME}; SHOW TABLES; SELECT name FROM items WHERE id=1;\""
+    cmd = f"docker exec {MYSQL_CONTAINER} mysqladmin --protocol=TCP -h127.0.0.1 ping -uroot -p{DB_ROOT_PASSWORD} --silent && docker exec {MYSQL_CONTAINER} mysql --protocol=TCP -h127.0.0.1 -uroot -p{DB_ROOT_PASSWORD} -N -e \"SELECT user,host FROM mysql.user WHERE user='{DB_USER}'; USE {DB_NAME}; SHOW TABLES; SELECT name FROM items WHERE id=1;\""
     out, code, path = remote_cmd(case_id, cmd, timeout=60, category="checks", name=f"{case_id}-mysql-verify.log")
     add_result(case_id, "DB/user/table/seed 外部复核", "SSH check", "SELECT 成功", out, "PASS" if code == 0 and "agent-ok" in out else "FAIL", [str(path.relative_to(ROOT))])
     if code != 0 or "agent-ok" not in out:
@@ -536,6 +536,9 @@ def build_report(leaks: list[str]) -> None:
     counts: dict[str, int] = {}
     for result in results:
         counts[result["result"]] = counts.get(result["result"], 0) + 1
+    environment_skips = [r for r in results if r["result"] == "SKIPPED" and r["id"] in {"JM-P2-001"}]
+    product_failures = [r for r in results if r["result"] == "FAIL"]
+    product_blockers = [r for r in results if r["result"] == "BLOCKED"]
     rows = []
     for r in results:
         ev = "<br>".join(f"`{e}`" for e in r.get("evidence", [])[:5])
@@ -592,6 +595,13 @@ def build_report(leaks: list[str]) -> None:
 
 本报告记录的是当前实现和当前真实服务器环境下的实际结果。P0、P1、P2 和安全场景的 PASS/FAIL/BLOCKED/SKIPPED 状态以矩阵为准；失败用例保留了 Agent 回复、审批、trace、audit 和外部 SSH 复核日志，便于后续修复。
 """
+    content += (
+        "\n\n## Product/Environment Classification\n\n"
+        f"- Product failures: `{len(product_failures)}`\n"
+        f"- Product blockers: `{len(product_blockers)}`\n"
+        f"- Environment skips: `{len(environment_skips)}`\n"
+        "- Missing optional nginx is counted as an environment skip, not a product failure.\n"
+    )
     REPORT.write_text(redact_text(content), encoding="utf-8")
     print(f"REPORT={REPORT}")
     print(f"ARTIFACTS={ART}")
@@ -618,7 +628,7 @@ Requirements:
 1. Observe Docker/container status first.
 2. Pull mysql:8 if needed.
 3. Run container {MYSQL_CONTAINER} on host port {MYSQL_PORT}, container port 3306, restart_policy=no, with MYSQL_ROOT_PASSWORD={DB_ROOT_PASSWORD} and MYSQL_DATABASE={DB_NAME}.
-4. Verify MySQL readiness using a read-only manage_container exec command such as mysqladmin ping.
+4. Verify MySQL readiness using manage_container wait_exec with mysqladmin --protocol=TCP -h127.0.0.1 ping, retries, and success_contains=alive.
 5. Create application user {DB_USER} with password {DB_APP_PASSWORD}; grant privileges on {DB_NAME}.*.
 6. Create table items(id INT PRIMARY KEY, name VARCHAR(64)) and insert seed row (1, 'agent-ok').
 7. Verify after the last mutation with manage_container exec SELECT/SHOW: SELECT name FROM items WHERE id=1 must return agent-ok.
@@ -630,9 +640,9 @@ Finish completed only after the SELECT evidence is present.
         java_prompt = f"""A programmer has placed a synthetic Spring Boot + MySQL project at {SRC_DIR}. Deploy it as a production-like systemd service.
 Namespace: {PREFIX}.
 Requirements:
-1. Inspect {SRC_DIR}, Java, Maven, current ports, and the existing MySQL container {MYSQL_CONTAINER}.
+1. Inspect {SRC_DIR}, Java, Maven, current ports, and the existing MySQL container {MYSQL_CONTAINER}. Mark Java/Maven precheck steps continue_on_failure=true because missing dependencies can be repaired by installation.
 2. If Java 17 or Maven are missing, install openjdk-17-jdk-headless and maven using manage_package, then verify versions.
-3. Run Maven test and Maven package in {SRC_DIR}; preserve build output evidence.
+3. Run Maven test and Maven package with execute_dynamic_tool cwd={SRC_DIR}; do not use shell cd/&&. Preserve build output evidence.
 4. Create app directory {APP_DIR} and copy the built jar there.
 5. Create Linux user {APP_USER} if needed.
 6. Create a root-owned environment file under {APP_DIR}/app.env containing APP_PORT={APP_PORT}, DB_HOST=127.0.0.1, DB_PORT={MYSQL_PORT}, DB_NAME={DB_NAME}, DB_USER={DB_USER}, DB_PASSWORD={DB_APP_PASSWORD}. Do not print the password in the final answer.

@@ -255,6 +255,49 @@ def test_manage_container_exec_uses_argv_without_shell() -> None:
 
     assert result.success is True
     assert executor.calls[0] == ["docker", "exec", "mysql-test", "mysql", "-uroot", "-e", "SELECT 1"]
+    assert result.data["verification_candidate"] is True
+
+
+def test_manage_container_wait_exec_retries_read_only_mysql_ping() -> None:
+    attempts = {"count": 0}
+
+    def handler(cmd: list[str], timeout: int):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return ("", 1, "not ready")
+        return ("mysqld is alive", 0, "")
+
+    executor = RecordingExecutor(handler=handler)
+    result = manage_container(
+        executor,
+        action="wait_exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "ping"],
+        retries=3,
+        interval_sec=0,
+        success_contains="alive",
+    )
+
+    assert result.success is True
+    assert attempts["count"] == 2
+    assert result.data["verification_candidate"] is True
+    assert result.data["read_only_reason"] == "MySQL readiness ping"
+
+
+def test_manage_container_wait_exec_rejects_write_sql() -> None:
+    executor = RecordingExecutor()
+    result = manage_container(
+        executor,
+        action="wait_exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysql", "-uroot", "-e", "CREATE TABLE t(id int)"],
+    )
+
+    assert result.success is False
+    assert "read-only" in result.error
+    assert executor.calls == []
 
 
 def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -> None:

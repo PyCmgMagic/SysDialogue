@@ -112,6 +112,12 @@ class TaskStepRecord:
     audit_refs: list[str] = field(default_factory=list)
     lock_scope: str = ""
     depends_on: list[str] = field(default_factory=list)
+    continue_on_failure: bool = False
+    repair_attempts: int = 0
+    repaired_from_failure: bool = False
+    last_rejected_args: dict[str, Any] = field(default_factory=dict)
+    read_only_reason: str = ""
+    attempts: int = 0
     finding_id: str = ""
     severity: str = ""
     blocking: bool = False

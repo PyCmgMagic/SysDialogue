@@ -47,9 +47,15 @@ After any mutation, run a targeted read-only verification tool before finish_tas
 - service: manage_service(status), then read_log or check_endpoint when applicable.
 - cron: manage_cron(list) and verify the target job_id/state.
 - SSH keys: manage_authorized_keys(list) and verify the expected user/fingerprint.
-- containers: manage_container(status/inspect/logs), or manage_container(exec) only for read-only checks such as SELECT/SHOW, mysqladmin ping, redis-cli PING, or HTTP health checks.
+- containers: manage_container(status/inspect/logs), or manage_container(exec/wait_exec) only for read-only checks such as SELECT/SHOW, mysqladmin --protocol=TCP -h127.0.0.1 ping, redis-cli PING, or HTTP health checks.
 - packages, firewall, sysctl, hosts, mounts, archives: use the corresponding list/get/status tool.
 The verification must happen after the last mutation and must refer to the object that was changed."""
+
+
+_JAVA_MYSQL_DEPLOYMENT_GUIDANCE = """[Java + MySQL Deployment Guidance]
+For Java/Spring + MySQL deployments, use this order: inspect project tree and ports -> run Docker MySQL -> wait_exec TCP readiness -> initialize DB/user/table/seed -> verify with SELECT -> install Java/Maven if missing -> rerun java -version and mvn -version -> run mvn test/package with execute_dynamic_tool cwd set to the project directory -> verify JAR with stat_path -> create app user/config/systemd -> daemon-reload/start/status -> verify journal plus /actuator/health and CRUD endpoints.
+For Maven/Gradle/npm project commands, set execute_dynamic_tool.cwd to the observed absolute project directory. Do not encode cd, &&, ;, or shell syntax inside cmd_template.
+Use continue_on_failure=true only for read-only dependency prechecks that are expected to fail before an install/repair step. Completion requires JAR, systemd status, endpoint, and DB/CRUD evidence."""
 
 
 _SAFETY_SUMMARY = """[Safety Summary]
@@ -113,6 +119,7 @@ def build_system_prompt(
             _REACT_PROTOCOL,
             _EXECUTION_MODE_RULES,
             _VERIFICATION_GUIDANCE,
+            _JAVA_MYSQL_DEPLOYMENT_GUIDANCE,
             _SAFETY_SUMMARY,
             _render_tools(registry),
         ]

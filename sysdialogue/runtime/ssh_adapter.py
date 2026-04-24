@@ -82,12 +82,15 @@ class RemoteExecutor(SafeExecutor):
     def __exit__(self, *_) -> None:
         self.disconnect()
 
-    def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
+    def _raw_run(self, cmd: list[str], timeout: int, cwd: str | None = None) -> RunResult:
         if self._client is None:
             self.connect()
-        return self._run_command_string(_quote_command(cmd), timeout=timeout)
+        cmd_str = _quote_command(cmd)
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
+        return self._run_command_string(cmd_str, timeout=timeout)
 
-    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+    def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
         """Run a command through the configured privilege path.
 
         Root remotes run directly. Non-root remotes use sudo non-interactively:
@@ -96,16 +99,22 @@ class RemoteExecutor(SafeExecutor):
         stdout/stderr, command traces, or audit logs.
         """
         if self._config.username == "root":
-            return self.run(cmd, timeout=timeout)
+            return self.run(cmd, timeout=timeout, cwd=cwd)
+        cmd_str = _quote_command(["sudo", "-S", "-p", "", "--", *cmd])
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         if self._config.sudo_password:
             result = self._run_command_string(
-                _quote_command(["sudo", "-S", "-p", "", "--", *cmd]),
+                cmd_str,
                 timeout=timeout,
                 stdin_text=f"{self._config.sudo_password}\n",
             )
         else:
+            cmd_str = _quote_command(["sudo", "-n", "--", *cmd])
+            if cwd:
+                cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
             result = self._run_command_string(
-                _quote_command(["sudo", "-n", "--", *cmd]),
+                cmd_str,
                 timeout=timeout,
             )
         return _combine_result(result)
