@@ -63,6 +63,7 @@ def test_load_config_clamps_max_iterations(monkeypatch, tmp_path) -> None:
 def test_load_config_reads_ssh_password_from_environment(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SYSDIALOGUE_SSH_PASSWORD", "secret")
+    monkeypatch.setenv("SYSDIALOGUE_SUDO_PASSWORD", "sudo-secret")
 
     config = load_config(
         remote=True,
@@ -72,6 +73,7 @@ def test_load_config_reads_ssh_password_from_environment(monkeypatch, tmp_path) 
     assert config.remote_mode is True
     assert config.ssh_host == "example.test"
     assert config.ssh_password == "secret"
+    assert config.ssh_sudo_password == "sudo-secret"
 
 
 def test_cli_help_no_longer_exposes_dev_mode() -> None:

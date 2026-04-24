@@ -25,6 +25,19 @@ class _FakeStream:
         return self.payload[:size]
 
 
+class _FakeStdin:
+    def __init__(self):
+        self.writes: list[str] = []
+        self.flushed = False
+        self.channel = _FakeChannel()
+
+    def write(self, text: str) -> None:
+        self.writes.append(text)
+
+    def flush(self) -> None:
+        self.flushed = True
+
+
 class _TimeoutStream(_FakeStream):
     def read(self, size: int = -1) -> bytes:
         raise socket.timeout("timed out")
@@ -34,9 +47,12 @@ class _FakeClient:
     def __init__(self, stdout, stderr):
         self.stdout = stdout
         self.stderr = stderr
+        self.stdin = _FakeStdin()
+        self.commands: list[str] = []
 
     def exec_command(self, cmd: str, timeout: int, get_pty: bool):
-        return None, self.stdout, self.stderr
+        self.commands.append(cmd)
+        return self.stdin, self.stdout, self.stderr
 
 
 def test_remote_executor_reports_stderr_truncation() -> None:
@@ -61,3 +77,19 @@ def test_remote_executor_reports_socket_timeout() -> None:
     assert result.exit_code == 124
     assert result.timed_out is True
     assert result.stderr == "Command timed out"
+
+
+def test_remote_executor_runs_privileged_command_with_sudo_password() -> None:
+    executor = RemoteExecutor(
+        SSHConfig(host="example.test", username="alice", sudo_password="secret")
+    )
+    client = _FakeClient(_FakeStream(b"ok"), _FakeStream(b""))
+    executor._client = client
+
+    out, code = executor.run_privileged(["systemctl", "restart", "demo.service"], timeout=5)
+
+    assert code == 0
+    assert out == "ok"
+    assert client.stdin.writes == ["secret\n"]
+    assert "secret" not in client.commands[0]
+    assert client.commands[0].startswith("sudo -S -p '' -- systemctl restart demo.service")

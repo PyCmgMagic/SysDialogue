@@ -201,8 +201,12 @@ def _load_index_for_job(executor: SafeExecutor, job_id: str | None) -> tuple[str
 def _save_index(executor: SafeExecutor, data: dict, scope: str = "user") -> None:
     fs = TargetFileAccess(executor)
     state_dir = cron_state_dir(executor, scope)
-    fs.mkdir(state_dir, parents=True)
-    fs.write_json(cron_index_path(executor, scope), data, atomic=True)
+    if scope == "system":
+        fs.mkdir_privileged(state_dir)
+        fs.write_json_privileged(cron_index_path(executor, scope), data, mode=0o644)
+    else:
+        fs.mkdir(state_dir, parents=True)
+        fs.write_json(cron_index_path(executor, scope), data, atomic=True)
 
 
 def _save_and_sync(executor: SafeExecutor, data: dict, job_id: str) -> None:
@@ -281,11 +285,10 @@ def _sync_system_cron(executor: SafeExecutor, data: dict) -> None:
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n\n"
                 f"{entry['schedule']} root {cron_command(job_id)}\n"
             )
-            fs.write_text(cron_path, content, atomic=True)
-            fs.chmod(cron_path, 0o644)
+            fs.write_text_privileged(cron_path, content, mode=0o644)
             enabled_ids.add(job_id)
         elif fs.exists(cron_path):
-            fs.remove(cron_path)
+            fs.remove_privileged(cron_path)
 
     ls_out, ls_code = executor.run(["ls", "-1", _SYSTEM_CRON_DIR], timeout=5)
     if ls_code != 0:
@@ -295,7 +298,7 @@ def _sync_system_cron(executor: SafeExecutor, data: dict) -> None:
             continue
         job_id = line.removeprefix("sysdialogue-")
         if job_id not in enabled_ids and job_id not in data:
-            fs.remove(f"{_SYSTEM_CRON_DIR}/{line}")
+            fs.remove_privileged(f"{_SYSTEM_CRON_DIR}/{line}")
 
 
 def _remove_installed_job(
@@ -308,7 +311,7 @@ def _remove_installed_job(
     if entry.get("scope") == "system":
         cron_path = system_cron_path(entry["job_id"])
         if fs.exists(cron_path):
-            fs.remove(cron_path)
+            fs.remove_privileged(cron_path)
         return
     data = remaining_index
     if data is None:

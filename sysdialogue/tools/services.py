@@ -38,7 +38,10 @@ def manage_service(
             return ToolResult(success=False, error=f"sysvinit 不支持 {action}，请手动配置 /etc/rc.d/")
         cmd = ["service", name, action]
 
-    out, code = executor.run(cmd, timeout=30)
+    if action == "status":
+        out, code = executor.run(cmd, timeout=30)
+    else:
+        out, code = executor.run_privileged(cmd, timeout=30)
     traces.append(" ".join(cmd))
 
     # status 返回 1 时可能只是服务停止，不算错误

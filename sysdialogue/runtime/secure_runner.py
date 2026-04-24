@@ -1,9 +1,9 @@
-"""SafeExecutor — 统一超时、截断、异常处理的执行器基类。"""
+"""Shared safe command executor primitives."""
 
 from __future__ import annotations
 
+import os
 import subprocess
-import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -20,19 +20,19 @@ class RunResult:
 
 
 class SafeExecutor(ABC):
-    """抽象执行器，子类实现 _raw_run。"""
+    """Base executor with timeout, truncation, and error normalization."""
 
     def run(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
-        """执行命令，返回 (output, exit_code)；output 是 stdout+stderr 的合并。"""
         result = self.run_full(cmd, timeout=timeout)
-        combined = result.stdout
-        if result.stderr:
-            combined = (combined + "\n" + result.stderr).strip()
-        if result.timed_out:
-            combined += "\n[TIMEOUT]"
-        if result.truncated:
-            combined += "\n[OUTPUT TRUNCATED]"
-        return combined, result.exit_code
+        return _combine_result(result)
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+        """Run a command that requires system privileges.
+
+        Tool code must opt into this path explicitly. The default implementation
+        uses non-interactive sudo so callers do not hang on a password prompt.
+        """
+        return self.run(["sudo", "-n", "--", *cmd], timeout=timeout)
 
     def run_full(self, cmd: list[str], timeout: int = 30) -> RunResult:
         try:
@@ -46,7 +46,12 @@ class SafeExecutor(ABC):
 
 
 class LocalExecutor(SafeExecutor):
-    """本地进程执行器，shell=False，避免注入。"""
+    """Local process executor using shell=False."""
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return self.run(cmd, timeout=timeout)
+        return super().run_privileged(cmd, timeout=timeout)
 
     def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
         try:
@@ -71,6 +76,17 @@ class LocalExecutor(SafeExecutor):
             return RunResult(stdout="", stderr="Command timed out", exit_code=124, timed_out=True)
         except FileNotFoundError:
             return RunResult(stdout="", stderr=f"Command not found: {cmd[0]}", exit_code=127)
+
+
+def _combine_result(result: RunResult) -> tuple[str, int]:
+    combined = result.stdout
+    if result.stderr:
+        combined = (combined + "\n" + result.stderr).strip()
+    if result.timed_out:
+        combined += "\n[TIMEOUT]"
+    if result.truncated:
+        combined += "\n[OUTPUT TRUNCATED]"
+    return combined, result.exit_code
 
 
 def _truncate(text: str) -> str:

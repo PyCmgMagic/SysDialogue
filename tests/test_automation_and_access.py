@@ -17,6 +17,8 @@ from sysdialogue.tools.config_validate import validate_config
 from sysdialogue.tools.cron_jobs import get_cron_job, manage_cron
 from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
+from sysdialogue.tools.services import manage_service
+from sysdialogue.tools.users_groups import create_user
 
 from tests.helpers import RecordingExecutor
 
@@ -198,6 +200,28 @@ def test_manage_firewall_iptables_delete_uses_delete_op_and_policy() -> None:
     ]
 
 
+class PrivilegeRecordingExecutor(RecordingExecutor):
+    def __init__(self):
+        super().__init__()
+        self.privileged_calls: list[list[str]] = []
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30):
+        self.privileged_calls.append(cmd)
+        return "", 0
+
+
+def test_system_tools_use_privileged_executor_path() -> None:
+    executor = PrivilegeRecordingExecutor()
+
+    service_result = manage_service(executor, name="demo.service", action="restart")
+    user_result = create_user(executor, username="sdft_user")
+
+    assert service_result.success is True
+    assert user_result.success is True
+    assert executor.privileged_calls[0] == ["systemctl", "restart", "demo.service"]
+    assert executor.privileged_calls[1][:1] == ["useradd"]
+
+
 def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -> None:
     def handler(cmd: list[str], timeout: int):
         if cmd == ["cat", "/etc/os-release"]:
@@ -230,6 +254,33 @@ def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -
 
     profile_without_cron = CapabilityProbe(RecordingExecutor(handler=no_crontab_handler)).probe()
     assert profile_without_cron["supports_system_cron"] is False
+
+
+class PasswordSudoExecutor(RecordingExecutor):
+    has_sudo_password = True
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30):
+        return "", 0
+
+
+def test_capability_probe_reports_password_backed_sudo() -> None:
+    def handler(cmd: list[str], timeout: int):
+        if cmd == ["whoami"]:
+            return ("alice", 0)
+        if cmd == ["id", "-u"]:
+            return ("1000", 0)
+        if cmd == ["sudo", "-n", "true"]:
+            return ("password required", 1)
+        if cmd and cmd[0] == "which":
+            return ("", 1)
+        return ("", 1)
+
+    profile = CapabilityProbe(PasswordSudoExecutor(handler=handler)).probe()
+
+    assert profile["is_root"] is False
+    assert profile["sudo_passwordless"] is False
+    assert profile["has_sudo"] is True
+    assert profile["cron_writable"] is True
 
 
 def test_validate_config_supports_fstab_and_cron_static_checks(tmp_path: Path) -> None:

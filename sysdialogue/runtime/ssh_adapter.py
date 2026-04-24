@@ -1,4 +1,4 @@
-"""RemoteExecutor — SSH 远程命令执行（known_hosts 校验，单命令 exec）。"""
+"""SSH remote command execution."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from dataclasses import dataclass
 
 try:
     import paramiko
+
     _HAS_PARAMIKO = True
 except ImportError:
     _HAS_PARAMIKO = False
 
-from sysdialogue.runtime.secure_runner import RunResult, SafeExecutor, MAX_OUTPUT_BYTES
+from sysdialogue.runtime.secure_runner import MAX_OUTPUT_BYTES, RunResult, SafeExecutor
 
 
 @dataclass
@@ -23,25 +24,21 @@ class SSHConfig:
     password: str | None = None
     key_filename: str | None = None
     known_hosts_file: str | None = None  # None = ~/.ssh/known_hosts
+    sudo_password: str | None = None
 
 
 class RemoteExecutor(SafeExecutor):
-    """通过 SSH 连接远程 Linux 执行命令。
-
-    安全约束：
-    - 强制 known_hosts 校验（RejectPolicy），防止中间人攻击
-    - 每条命令独立 exec_command（不复用 shell 会话）
-    - 不开放 PTY（避免交互式 shell 逃逸）
-    """
+    """Execute commands on a remote Linux host over SSH."""
 
     def __init__(self, config: SSHConfig):
         if not _HAS_PARAMIKO:
-            raise RuntimeError("paramiko 未安装，无法使用远程模式。请运行: pip install paramiko")
+            raise RuntimeError("paramiko is required for remote mode. Install it with: pip install paramiko")
         self._config = config
         self._client: "paramiko.SSHClient | None" = None
 
     def connect(self) -> None:
         import paramiko
+
         client = paramiko.SSHClient()
         if self._config.known_hosts_file:
             client.load_host_keys(self._config.known_hosts_file)
@@ -70,6 +67,14 @@ class RemoteExecutor(SafeExecutor):
             self.connect()
         return self._client.open_sftp()  # type: ignore[union-attr]
 
+    @property
+    def username(self) -> str:
+        return self._config.username
+
+    @property
+    def has_sudo_password(self) -> bool:
+        return bool(self._config.sudo_password)
+
     def __enter__(self) -> "RemoteExecutor":
         self.connect()
         return self
@@ -80,28 +85,75 @@ class RemoteExecutor(SafeExecutor):
     def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
         if self._client is None:
             self.connect()
-        # 构造单条命令字符串（list→shell-quoted 字符串）
-        cmd_str = " ".join(shlex.quote(c) for c in cmd)
+        return self._run_command_string(_quote_command(cmd), timeout=timeout)
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30) -> tuple[str, int]:
+        """Run a command through the configured privilege path.
+
+        Root remotes run directly. Non-root remotes use sudo non-interactively:
+        first with the configured sudo password, otherwise with passwordless
+        sudo. The password is passed over stdin and never appears in argv,
+        stdout/stderr, command traces, or audit logs.
+        """
+        if self._config.username == "root":
+            return self.run(cmd, timeout=timeout)
+        if self._config.sudo_password:
+            result = self._run_command_string(
+                _quote_command(["sudo", "-S", "-p", "", "--", *cmd]),
+                timeout=timeout,
+                stdin_text=f"{self._config.sudo_password}\n",
+            )
+        else:
+            result = self._run_command_string(
+                _quote_command(["sudo", "-n", "--", *cmd]),
+                timeout=timeout,
+            )
+        return _combine_result(result)
+
+    def _run_command_string(
+        self,
+        cmd_str: str,
+        *,
+        timeout: int,
+        stdin_text: str | None = None,
+    ) -> RunResult:
+        if self._client is None:
+            self.connect()
         try:
-            _, stdout_f, stderr_f = self._client.exec_command(  # type: ignore[union-attr]
+            stdin_f, stdout_f, stderr_f = self._client.exec_command(  # type: ignore[union-attr]
                 cmd_str, timeout=timeout, get_pty=False
             )
+            if stdin_text:
+                stdin_f.write(stdin_text)
+                stdin_f.flush()
+                try:
+                    stdin_f.channel.shutdown_write()
+                except Exception:
+                    pass
             stdout_bytes = stdout_f.read(MAX_OUTPUT_BYTES + 1)
             stderr_bytes = stderr_f.read(MAX_OUTPUT_BYTES + 1)
             exit_code = stdout_f.channel.recv_exit_status()
         except socket.timeout:
-            return RunResult(
-                stdout="",
-                stderr="Command timed out",
-                exit_code=124,
-                timed_out=True,
-            )
+            return RunResult(stdout="", stderr="Command timed out", exit_code=124, timed_out=True)
         truncated = len(stdout_bytes) > MAX_OUTPUT_BYTES or len(stderr_bytes) > MAX_OUTPUT_BYTES
-        stdout = stdout_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip()
-        stderr = stderr_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip()
         return RunResult(
-            stdout=stdout,
-            stderr=stderr,
+            stdout=stdout_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip(),
+            stderr=stderr_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip(),
             exit_code=exit_code,
             truncated=truncated,
         )
+
+
+def _quote_command(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(c) for c in cmd)
+
+
+def _combine_result(result: RunResult) -> tuple[str, int]:
+    combined = result.stdout
+    if result.stderr:
+        combined = (combined + "\n" + result.stderr).strip()
+    if result.timed_out:
+        combined += "\n[TIMEOUT]"
+    if result.truncated:
+        combined += "\n[OUTPUT TRUNCATED]"
+    return combined, result.exit_code
