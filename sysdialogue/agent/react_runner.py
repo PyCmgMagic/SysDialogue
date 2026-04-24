@@ -634,6 +634,29 @@ class ReActRunner:
             return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
 
         status = args["status"]
+        if status == "completed" and (task.changed_state or args.get("changed_state")):
+            judgement = self._completion_verification_judgement(task, args)
+            task.verification_judgement = judgement
+            self._trace_verification_judge(
+                task,
+                "ok" if judgement.get("sufficient") else "rejected",
+                judgement.get("reason", "") or "; ".join(judgement.get("missing_requirements") or []),
+                judgement,
+            )
+            if not judgement.get("sufficient"):
+                errors = [
+                    "Changed-state tasks require LLM verification approval before completed.",
+                    "Missing verification: " + "; ".join(judgement.get("missing_requirements") or ["unknown"]),
+                ]
+                recommended = judgement.get("recommended_next_verification") or []
+                if recommended:
+                    errors.append("Recommended next verification: " + "; ".join(str(item) for item in recommended))
+                self._emit_correction(task, "finish_task rejected by LLM verification judge.", {"errors": errors, "judgement": judgement})
+                self._persist_task_state(task)
+                return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
+            task.verified = True
+            task.last_verification_step = _latest_post_mutation_candidate_step(task)
+
         task.final_status = status
         task.changed_state = task.changed_state or bool(args.get("changed_state"))
         task.current_phase = "finish"
@@ -686,8 +709,18 @@ class ReActRunner:
                     task.changed_state = True
                     task.last_action_step = task.tool_steps
                 if success and workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
-                    task.verified = True
                     task.last_verification_step = task.tool_steps + 1
+                    task.verification_candidates.append(
+                        {
+                            "tool": META_SET_EXECUTION_MODE,
+                            "action_key": f"workflow:{workflow_name}",
+                            "args": _safe_result_data(args),
+                            "data": _safe_result_data(payload),
+                            "step": task.tool_steps + 1,
+                            "after_last_action": True,
+                        }
+                    )
+                    task.verification_candidates = task.verification_candidates[-20:]
                     task.verification_judgement = {
                         "sufficient": True,
                         "confidence": "high",
@@ -761,9 +794,9 @@ class ReActRunner:
 
         if _is_verification_tool(name, args):
             task.current_phase = "verify"
-            self._record_verification_candidate(task, name, args, payload)
 
         task.observed = True
+        self._record_verification_candidate(task, name, args, payload)
         self._update_plan_step(task, name, args, success=True)
         self._persist_task_state(task)
 
@@ -811,33 +844,39 @@ class ReActRunner:
         task.verification_candidates.append(candidate)
         task.verification_candidates = task.verification_candidates[-20:]
         rule_judgement = VerificationJudge().judge(task)
-        judgement = self._verification_judgement(task, rule_judgement)
-        task.verification_judgement = judgement
-        if judgement.get("sufficient"):
-            task.verified = True
-            task.last_verification_step = task.tool_steps
+        task.verification_judgement = rule_judgement
         self._emit(
             task,
             "verification",
-            "Verification evidence accepted." if judgement.get("sufficient") else "Verification evidence recorded.",
-            judgement,
+            "Verification evidence recorded.",
+            rule_judgement,
         )
 
-    def _verification_judgement(self, task: TaskRun, rule_judgement: dict[str, Any]) -> dict[str, Any]:
+    def _completion_verification_judgement(self, task: TaskRun, finish_args: dict[str, Any]) -> dict[str, Any]:
+        rule_judgement = VerificationJudge().judge(task)
         if not rule_judgement.get("sufficient"):
             return {**rule_judgement, "judge": "rules"}
-        if not _needs_llm_verification_judge(task):
-            return {**rule_judgement, "judge": "rules"}
         llm_client = getattr(self.controller, "llm_client", None)
-        if llm_client is None or llm_client.__class__.__name__ in {"NullLLMClient", "FakeLLM", "NoLLM"}:
-            return {**rule_judgement, "judge": "rules", "llm_judge_skipped": "no llm client"}
+        if llm_client is None or llm_client.__class__.__name__ in {"NullLLMClient", "NoLLM"}:
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm_unavailable",
+                "missing_requirements": ["verification judge unavailable"],
+                "recommended_next_verification": ["retry with an LLM-capable runtime or finish blocked/partial"],
+            }
         judge = LLMVerificationJudge(llm_client)
         try:
-            judgement = judge.judge(task, rule_judgement)
+            judgement = judge.judge(task, rule_judgement, finish_args=finish_args)
         except Exception as exc:
-            self._trace_verification_judge(task, "error", str(exc))
-            return {**rule_judgement, "judge": "rules", "llm_judge_error": sanitize_text(str(exc), limit=300)}
-        self._trace_verification_judge(task, "ok", judgement.get("reason", ""), judgement)
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm",
+                "llm_judge_error": sanitize_text(str(exc), limit=300),
+                "missing_requirements": [f"verification judge error: {type(exc).__name__}"],
+                "recommended_next_verification": ["finish blocked/partial or retry verification judge"],
+            }
         return judgement
 
     def _trace_verification_judge(
@@ -1242,40 +1281,13 @@ def _dict_subset(expected: Any, actual: Any) -> bool:
 
 
 class VerificationJudge:
-    """Rule-backed evidence judge for post-mutation completion gates.
+    """Minimal hard gate before LLM evidence sufficiency judgement.
 
-    The judge intentionally only considers real tool evidence. It is structured
-    so an LLM sufficiency pass can be inserted later without weakening the
-    hard rule that evidence must exist after the last mutation.
+    This class no longer decides whether evidence is semantically enough. It
+    only enforces the non-negotiable fact constraints: real successful tool
+    output must exist, and for changed-state tasks it must occur after the last
+    successful mutation. The LLM judge decides coverage and target match.
     """
-
-    STRONG_ACTION_KEYS = {
-        "validate_config",
-        "check_endpoint",
-        "get_port_status",
-        "read_log",
-        "read_file",
-        "stat_path",
-        "list_directory",
-        "search_file_content",
-        "manage_service:status",
-        "manage_cron:list",
-        "manage_container:status",
-        "manage_container:logs",
-        "manage_container:inspect",
-        "manage_container:wait_exec",
-        "manage_authorized_keys:list",
-        "manage_package:list",
-        "manage_package:search",
-        "manage_firewall:list",
-        "manage_sysctl:get",
-        "manage_sysctl:list",
-        "get_set_system_config:get",
-        "manage_hosts_entries:list",
-        "manage_mount:list",
-        "backup_path:list",
-        "manage_archive:list",
-    }
 
     def judge(self, task: TaskRun) -> dict[str, Any]:
         if not task.verification_candidates:
@@ -1296,27 +1308,15 @@ class VerificationJudge:
         ]
         if not after_action:
             return self._missing("verification must run after the last mutation")
-
-        strong = [
-            item for item in after_action
-            if item.get("action_key") in self.STRONG_ACTION_KEYS
-            or (
-                item.get("action_key") in {"manage_container:exec", "manage_container:wait_exec"}
-                and _is_read_only_container_exec_args(item.get("args") or {})
-            )
-        ]
-        if not strong:
-            return self._missing(
-                "post-mutation evidence is too generic; run a domain-specific status/list/read/query check"
-            )
         return {
             "sufficient": True,
             "covered_requirements": [
-                f"{item.get('action_key')} after mutation" for item in strong[-3:]
+                f"{item.get('action_key')} produced post-mutation evidence" for item in after_action[-3:]
             ],
             "missing_requirements": [],
-            "confidence": "high",
+            "confidence": "low",
             "recommended_next_verification": [],
+            "judge": "hard_gate",
         }
 
     @staticmethod
@@ -1331,7 +1331,7 @@ class VerificationJudge:
 
 
 class LLMVerificationJudge:
-    """LLM-assisted evidence sufficiency judge with rule hard-gates."""
+    """LLM evidence sufficiency judge with minimal fact hard-gates."""
 
     TOOL_SCHEMA = {
         "name": "submit_verification_judgement",
@@ -1360,7 +1360,13 @@ class LLMVerificationJudge:
     def __init__(self, llm_client: Any):
         self.llm_client = llm_client
 
-    def judge(self, task: TaskRun, rule_judgement: dict[str, Any]) -> dict[str, Any]:
+    def judge(
+        self,
+        task: TaskRun,
+        rule_judgement: dict[str, Any],
+        *,
+        finish_args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not rule_judgement.get("sufficient"):
             return {**rule_judgement, "judge": "rules"}
         payload = sanitize_value(
@@ -1369,7 +1375,8 @@ class LLMVerificationJudge:
                 "mode": task.mode,
                 "last_action_step": task.last_action_step,
                 "current_tool_step": task.tool_steps,
-                "rule_judgement": rule_judgement,
+                "hard_gate": rule_judgement,
+                "finish_request": finish_args or {},
                 "plan_steps": [
                     {
                         "step_id": step.step_id,
@@ -1387,8 +1394,11 @@ class LLMVerificationJudge:
         response = self.llm_client.messages_create(
             system=(
                 "You are a verification evidence judge for a Linux operations agent. "
-                "Only decide whether real post-change tool evidence proves the user's requested change. "
-                "Never treat model reasoning as evidence. Return only the required structured judgement."
+                "You are the only semantic sufficiency judge: decide whether real post-change "
+                "tool evidence proves the user's requested change. The system already checked "
+                "that at least one real tool result exists after the last mutation. Never treat "
+                "model reasoning, plans, or promises as evidence. Return only the required "
+                "structured judgement."
             ),
             messages=[
                 {
@@ -1397,9 +1407,11 @@ class LLMVerificationJudge:
                         {
                             "type": "text",
                             "text": (
-                                "Assess this verification payload. If the evidence does not match every "
-                                "concrete requested object or was not produced by a targeted read-only tool, "
-                                "return sufficient=false.\n"
+                                "Assess this verification payload. Return sufficient=true only when the "
+                                "post-mutation tool evidence covers the concrete objects and requirements "
+                                "in the user goal. If evidence is generic, before the relevant mutation, "
+                                "failed, or missing an important target, return sufficient=false and "
+                                "recommend the next verification tool.\n"
                                 + json.dumps(payload, ensure_ascii=False)
                             ),
                         }
@@ -1410,7 +1422,14 @@ class LLMVerificationJudge:
         )
         parsed = _parse_llm_verification_response(response.content)
         if parsed is None:
-            return {**rule_judgement, "judge": "rules", "llm_judge_error": "invalid llm judgement"}
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm",
+                "llm_judge_error": "invalid llm judgement",
+                "missing_requirements": ["verification judge returned invalid JSON"],
+                "recommended_next_verification": ["retry verification judge or finish blocked/partial"],
+            }
         judgement = _normalize_llm_judgement(parsed)
         if not judgement.get("sufficient"):
             return judgement
@@ -1538,6 +1557,15 @@ def _blocked_no_progress_reply(task: TaskRun) -> str:
         f"Suggested repair args: {suggestions or 'none'}.\n"
         f"Blocking reason: {missing}."
     )
+
+
+def _latest_post_mutation_candidate_step(task: TaskRun) -> int:
+    steps = [
+        int(item.get("step") or 0)
+        for item in task.verification_candidates
+        if int(item.get("step") or 0) > int(task.last_action_step or 0)
+    ]
+    return max(steps) if steps else 0
 
 
 def _repair_suggestions(failed_steps: list[TaskStepRecord]) -> str:
@@ -1719,8 +1747,6 @@ def _validate_finish_args(task: TaskRun, args: dict) -> list[str]:
         if task.changed_state or args.get("changed_state"):
             if not task.acted:
                 errors.append("Changed-state completions require an executed mutation before completed.")
-            if not task.verified or task.last_verification_step <= task.last_action_step:
-                errors.append("Changed-state tasks require a verification tool/workflow after the mutation before completed.")
         if task.failed_mutations and not task.acted:
             errors.append(
                 "Failed mutation attempts cannot be reported as completed before a later successful mutation and verification."

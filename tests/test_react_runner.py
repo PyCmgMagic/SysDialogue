@@ -32,6 +32,26 @@ class FakeLLM:
         self.calls: list[dict] = []
 
     def messages_create(self, *, system, messages, tools):
+        if any(tool.get("name") == "submit_verification_judgement" for tool in tools):
+            self.calls.append({"system": system, "messages": deepcopy(messages), "tools": deepcopy(tools)})
+            return LLMResponse(
+                content=[
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "sufficient": True,
+                                "covered_requirements": ["test evidence accepted"],
+                                "missing_requirements": [],
+                                "confidence": "high",
+                                "recommended_next_verification": [],
+                                "reason": "Unit-test judge accepted the provided tool evidence.",
+                            }
+                        ),
+                    }
+                ],
+                stop_reason="stop",
+            )
         self.calls.append({"system": system, "messages": deepcopy(messages), "tools": deepcopy(tools)})
         content = self.responses.pop(0)
         stop_reason = "tool_use" if any(block.get("type") == "tool_use" for block in content) else "stop"
@@ -138,8 +158,8 @@ def test_llm_verification_judge_parse_failure_falls_back_to_rules() -> None:
 
     judgement = LLMVerificationJudge(llm).judge(task, rule)
 
-    assert judgement["sufficient"] is True
-    assert judgement["judge"] == "rules"
+    assert judgement["sufficient"] is False
+    assert judgement["judge"] == "llm"
     assert judgement["llm_judge_error"] == "invalid llm judgement"
 
 
@@ -268,7 +288,7 @@ def test_frozen_plan_allows_limited_repairs_for_cwd_and_mysql_tcp() -> None:
     )
 
 
-def test_verification_judge_rejects_generic_observation_after_mutation() -> None:
+def test_verification_judge_only_requires_post_mutation_tool_evidence() -> None:
     task = TaskRun(
         task_id="task_verify",
         goal="create a user",
@@ -289,8 +309,9 @@ def test_verification_judge_rejects_generic_observation_after_mutation() -> None
 
     judgement = VerificationJudge().judge(task)
 
-    assert judgement["sufficient"] is False
-    assert "too generic" in judgement["missing_requirements"][0]
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "hard_gate"
+    assert "get_system_info" in judgement["covered_requirements"][0]
 
 
 def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
@@ -662,7 +683,7 @@ def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> N
     assert "完成验证" in reply
     rejected_result = llm.calls[3]["messages"][-1]["content"][0]
     assert rejected_result["is_error"] is True
-    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+    assert "verification must run after the last mutation" in rejected_result["content"]
     stages = [event.stage for event in events]
     assert stages.count("correction") == 1
 
@@ -1506,7 +1527,7 @@ def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(
     assert execute_result["changes_state"] is True
     rejected_result = llm.calls[2]["messages"][-1]["content"][0]
     assert rejected_result["is_error"] is True
-    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+    assert "verification must run after the last mutation" in rejected_result["content"]
 
 
 def test_execute_dynamic_tool_invalid_args_return_tool_errors(tmp_path: Path) -> None:

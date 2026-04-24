@@ -32,7 +32,7 @@ _REACT_PROTOCOL = """[ReAct Task Protocol]
 All user inputs must close through the ReAct protocol:
 1. Do not end a task with plain natural-language output. The final step must be finish_task.
 2. Operational, diagnostic, mutating, remote-target, security, audit, key, and configuration tasks must observe the target environment before status=completed.
-3. Mutating tasks must follow observe -> act -> verify -> finish. Without post-mutation verification, status=completed is invalid.
+3. Mutating tasks must follow observe -> act -> verify -> finish. Without post-mutation verification and LLM verification-judge approval, status=completed is invalid.
 4. Casual chat, project explanations, documentation explanations, and design discussions must still call finish_task, using no_action_reason when no system action was taken.
 5. After a tool failure, repair, downgrade, request more information, or finish with failed/blocked/need_info. Do not ignore the failed tool result.
 6. Failed or blocked mutation attempts do not count as completed changes. To complete, there must be a successful mutation plus later verification, or a successful built-in workflow that includes its own validation.
@@ -49,7 +49,7 @@ After any mutation, run a targeted read-only verification tool before finish_tas
 - SSH keys: manage_authorized_keys(list) and verify the expected user/fingerprint.
 - containers: manage_container(status/inspect/logs), or manage_container(exec/wait_exec) only for read-only checks such as SELECT/SHOW, mysqladmin --protocol=TCP -h127.0.0.1 ping, redis-cli PING, or HTTP health checks.
 - packages, firewall, sysctl, hosts, mounts, archives: use the corresponding list/get/status tool.
-The verification must happen after the last mutation and must refer to the object that was changed."""
+The verification must happen after the last mutation and must refer to the object that was changed. The LLM verification judge decides whether the evidence is sufficient; if it rejects completion, run the recommended verification or finish blocked/partial."""
 
 
 _JAVA_MYSQL_DEPLOYMENT_GUIDANCE = """[Java + MySQL Deployment Guidance]
