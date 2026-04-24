@@ -39,9 +39,9 @@ class EnvPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("🖥  环境画像 (F4 切换)")
-        yield Static(self._render(), id="env_content")
+        yield Static(self._build_env_text(), id="env_content")
 
-    def _render(self) -> str:
+    def _build_env_text(self) -> str:
         sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         lines = []
         for key, value in sanitized.items():
