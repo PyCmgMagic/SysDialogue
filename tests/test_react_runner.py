@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
-from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
+from sysdialogue.agent.react_runner import _iteration_budget, _plan_args_match, _requires_environment_feedback
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
@@ -49,6 +49,33 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
+
+
+def test_plan_args_match_tolerates_container_defaults_and_deferred_values() -> None:
+    expected = {
+        "action": "run",
+        "backend": "docker",
+        "command": ["sh", "-c", "ignored for run"],
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306, "protocol": "tcp"}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+        "restart_policy": "no",
+    }
+    actual = {
+        "action": "run",
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+    }
+
+    assert _plan_args_match("manage_container", expected, actual)
+    assert _plan_args_match(
+        "manage_authorized_keys",
+        {"action": "add", "username": "alice", "public_key_from_file": "/tmp/key.pub"},
+        {"action": "add", "username": "alice", "public_key": "ssh-ed25519 AAAA test"},
+    )
 
 
 def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):

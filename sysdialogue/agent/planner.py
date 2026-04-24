@@ -98,7 +98,22 @@ class PlanningEngine:
         frozen: list[PlanStep] = []
         warnings: list[str] = []
 
-        for raw in plan_steps or []:
+        if not isinstance(plan_steps, list):
+            warnings.append("plan_steps must be a list; ignoring invalid plan payload")
+            plan_steps = []
+
+        for index, raw in enumerate(plan_steps or [], 1):
+            if not isinstance(raw, dict):
+                step = PlanStep(
+                    step_id=f"step_{index}",
+                    tool="",
+                    args={},
+                    purpose=str(raw),
+                    actual_risk="UNKNOWN",
+                )
+                warnings.append(f"{step.step_id}: invalid plan step format; expected object")
+                frozen.append(step)
+                continue
             step = PlanStep(
                 step_id=raw.get("step_id", ""),
                 tool=raw.get("tool", ""),

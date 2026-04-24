@@ -69,6 +69,7 @@ VERIFICATION_TOOLS = {
     "manage_container:status",
     "manage_container:logs",
     "manage_container:inspect",
+    "manage_container:exec",
 }
 
 READ_ONLY_WORKFLOWS = {"security_audit", "disk_cleanup"}
@@ -525,7 +526,7 @@ class ReActRunner:
         matching = [
             step
             for step in executable_steps
-            if step.tool == name and _normalized_json(step.args) == _normalized_json(args)
+            if step.tool == name and _plan_args_match(step.tool, step.args, args)
         ]
         if not matching:
             expected = ", ".join(f"{step.step_id}:{step.tool}" for step in executable_steps)
@@ -829,7 +830,7 @@ def _next_step_for_tool(steps: list[TaskStepRecord], name: str, args: dict) -> T
             continue
         if step.tool != name:
             return None
-        if _normalized_json(step.args) != _normalized_json(args):
+        if not _plan_args_match(step.tool, step.args, args):
             return None
         return step
     return None
@@ -840,6 +841,66 @@ def _normalized_json(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
         return str(value)
+
+
+def _plan_args_match(tool: str, expected: dict, actual: dict) -> bool:
+    if _normalized_json(expected) == _normalized_json(actual):
+        return True
+    if tool == META_EXECUTE_DYNAMIC_TOOL:
+        expected_cmd = expected.get("cmd_template") if isinstance(expected, dict) else None
+        actual_cmd = actual.get("cmd_template") if isinstance(actual, dict) else None
+        if expected_cmd and actual_cmd and expected_cmd == actual_cmd:
+            return True
+    if _has_deferred_value(expected):
+        return True
+    expected_norm = _normalize_plan_args(tool, expected)
+    actual_norm = _normalize_plan_args(tool, actual)
+    return _dict_subset(expected_norm, actual_norm)
+
+
+def _normalize_plan_args(tool: str, args: Any) -> Any:
+    if not isinstance(args, dict):
+        return args
+    normalized = {k: _normalize_plan_args(tool, v) for k, v in args.items()}
+    if tool == "manage_container":
+        action = str(normalized.get("action") or "").lower()
+        if action != "exec":
+            normalized.pop("command", None)
+        if normalized.get("backend") in ("auto", "docker"):
+            normalized.pop("backend", None)
+        if normalized.get("restart_policy") == "no":
+            normalized.pop("restart_policy", None)
+    if "ports" in normalized and isinstance(normalized["ports"], list):
+        normalized["ports"] = [
+            {k: v for k, v in port.items() if not (k == "protocol" and v == "tcp")}
+            if isinstance(port, dict)
+            else port
+            for port in normalized["ports"]
+        ]
+    return normalized
+
+
+def _has_deferred_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(str(k).endswith("_from_file") or _has_deferred_value(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_deferred_value(v) for v in value)
+    return False
+
+
+def _dict_subset(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for key, value in expected.items():
+            if key not in actual:
+                return False
+            if not _dict_subset(value, actual[key]):
+                return False
+        return True
+    if isinstance(expected, list) and isinstance(actual, list):
+        return len(expected) == len(actual) and all(
+            _dict_subset(e, a) for e, a in zip(expected, actual)
+        )
+    return expected == actual
 
 
 def _final_task_store_status(status: str) -> str:

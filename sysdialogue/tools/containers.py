@@ -8,7 +8,7 @@ from sysdialogue.security import path_policies as pp
 
 VALID_ACTIONS = {
     "list", "status", "pull", "start", "stop", "restart",
-    "logs", "inspect", "run", "remove",
+    "logs", "inspect", "run", "remove", "exec",
 }
 
 
@@ -22,6 +22,7 @@ def manage_container(
     env_vars: dict | None = None,
     volumes: list[dict] | None = None,
     restart_policy: str | None = None,
+    command: list[str] | None = None,
     lines: int = 50,
     env_profile: dict | None = None,
 ) -> ToolResult:
@@ -53,6 +54,16 @@ def manage_container(
         cmd = [be, "inspect", name or ""]
     elif action == "remove":
         cmd = [be, "rm", "-f", name or ""]
+    elif action == "exec":
+        if not name:
+            return ToolResult(success=False, error="exec 需要 name 参数")
+        if not command:
+            return ToolResult(success=False, error="exec 需要 command 参数")
+        if not isinstance(command, list) or not all(isinstance(item, str) and item for item in command):
+            return ToolResult(success=False, error="exec command 必须是非空字符串数组")
+        if len(command) > 20:
+            return ToolResult(success=False, error="exec command 参数过长")
+        cmd = [be, "exec", name, *command]
     elif action == "run":
         cmd = _build_run_cmd(be, name, image, ports, env_vars, volumes, restart_policy)
         if isinstance(cmd, str):

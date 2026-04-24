@@ -17,6 +17,7 @@ from sysdialogue.tools.config_validate import validate_config
 from sysdialogue.tools.cron_jobs import get_cron_job, manage_cron
 from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
+from sysdialogue.tools.containers import manage_container
 from sysdialogue.tools.services import manage_service
 from sysdialogue.tools.users_groups import create_user
 
@@ -53,6 +54,26 @@ def test_manage_authorized_keys_removes_key_by_fingerprint(tmp_path: Path, monke
     authorized_keys = key_path.read_text(encoding="utf-8")
     assert key_one not in authorized_keys
     assert key_two in authorized_keys
+
+
+def test_manage_authorized_keys_can_add_public_key_from_path(tmp_path: Path, monkeypatch) -> None:
+    home_dir = tmp_path / "alice"
+    key_path = home_dir / ".ssh" / "authorized_keys"
+    public_key_path = tmp_path / "id_ed25519.pub"
+    public_key = _fake_public_key("path-key")
+    public_key_path.write_text(public_key + "\n", encoding="utf-8")
+    executor = RecordingExecutor()
+    monkeypatch.setattr(auth_keys_module, "_auth_keys_path", lambda executor, username: str(key_path))
+
+    result = manage_authorized_keys(
+        executor,
+        "add",
+        "alice",
+        public_key_path=str(public_key_path),
+    )
+
+    assert result.success is True
+    assert public_key in key_path.read_text(encoding="utf-8")
 
 
 def test_manage_cron_create_updates_index_and_installs_user_crontab(
@@ -220,6 +241,20 @@ def test_system_tools_use_privileged_executor_path() -> None:
     assert user_result.success is True
     assert executor.privileged_calls[0] == ["systemctl", "restart", "demo.service"]
     assert executor.privileged_calls[1][:1] == ["useradd"]
+
+
+def test_manage_container_exec_uses_argv_without_shell() -> None:
+    executor = RecordingExecutor()
+    result = manage_container(
+        executor,
+        action="exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysql", "-uroot", "-e", "SELECT 1"],
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["docker", "exec", "mysql-test", "mysql", "-uroot", "-e", "SELECT 1"]
 
 
 def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -> None:
