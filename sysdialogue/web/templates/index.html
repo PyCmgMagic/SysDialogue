@@ -287,6 +287,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
               <span id="tag-label">就绪</span>
             </span>
             <span class="tag" id="tag-cancel" style="display:none;color:#cf222e;border-color:#f5c0c4;background:#ffeef0" onclick="doCancel()">取消执行</span>
+            <span class="tag" id="tag-resume" style="display:none;color:#0969da;border-color:#b6d7ff;background:#eef6ff" onclick="doResume()">继续上次任务</span>
           </div>
           <button id="btn-send" onclick="sendMessage()">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.75a.75.75 0 0 1 .673.418l5.25 10.5A.75.75 0 0 1 13.25 14H2.75a.75.75 0 0 1-.673-1.082l5.25-10.5A.75.75 0 0 1 8 1.75Z"/></svg>
@@ -317,12 +318,18 @@ const confirmBanner = document.getElementById("confirm-banner");
 const inputBanner = document.getElementById("input-banner");
 const tagLabel = document.getElementById("tag-label");
 const tagCancel = document.getElementById("tag-cancel");
+const tagResume = document.getElementById("tag-resume");
 const statusDot = document.getElementById("status-dot");
 
-function api(path, method = "GET", body) {
+async function api(path, method = "GET", body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  return fetch(`/api/session/${SESSION_ID}${path}`, opts).then(r => r.json());
+  const response = await fetch(`/api/session/${SESSION_ID}${path}`, opts);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+  }
+  return payload;
 }
 
 function autoResize(el) {
@@ -376,19 +383,55 @@ function hideThinking() {
   if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
 }
 
-const STATUS_LABEL = { ready: "就绪", thinking: "执行中", confirming: "待确认", input: "待输入", cancelling: "取消中" };
-const DOT_COLOR = { ready: "#2da44e", thinking: "#0969da", confirming: "#bf8700", input: "#8250df", cancelling: "#cf222e" };
+const STATUS_LABEL = {
+  ready: "就绪",
+  running: "执行中",
+  waiting_confirm: "待确认",
+  waiting_input: "待输入",
+  cancelling: "取消中",
+  interrupted: "已中断",
+  failed: "失败",
+  completed: "完成",
+  blocked: "已阻塞",
+  cancelled: "已取消",
+  rolled_back: "已回滚",
+  partial: "部分完成",
+  thinking: "执行中",
+  confirming: "待确认",
+  input: "待输入"
+};
+const DOT_COLOR = {
+  ready: "#2da44e",
+  running: "#0969da",
+  waiting_confirm: "#bf8700",
+  waiting_input: "#8250df",
+  cancelling: "#cf222e",
+  interrupted: "#bf8700",
+  failed: "#cf222e",
+  completed: "#2da44e",
+  blocked: "#cf222e",
+  cancelled: "#999",
+  rolled_back: "#bf8700",
+  partial: "#bf8700",
+  thinking: "#0969da",
+  confirming: "#bf8700",
+  input: "#8250df"
+};
+const BUSY_STATUSES = new Set(["running", "waiting_confirm", "waiting_input", "cancelling", "thinking", "confirming", "input"]);
+const INPUT_STATUSES = new Set(["ready", "waiting_input", "completed", "failed", "blocked", "cancelled", "interrupted", "partial", "rolled_back", "input"]);
+const CANCEL_STATUSES = new Set(["running", "waiting_confirm", "waiting_input", "thinking", "confirming", "input"]);
 
 function renderState(s) {
   const st = s.status;
   tagLabel.textContent = STATUS_LABEL[st] || st;
   statusDot.style.background = DOT_COLOR[st] || "#999";
-  tagCancel.style.display = ["thinking","confirming","input"].includes(st) ? "" : "none";
+  tagCancel.style.display = CANCEL_STATUSES.has(st) ? "" : "none";
+  tagResume.style.display = s.resume_available ? "" : "none";
 
-  input.disabled = st !== "ready" && st !== "input";
-  btnSend.disabled = st !== "ready" && st !== "input";
+  input.disabled = !INPUT_STATUSES.has(st);
+  btnSend.disabled = !INPUT_STATUSES.has(st);
 
-  if (st === "thinking") showThinking(); else hideThinking();
+  if (st === "running" || st === "thinking") showThinking(); else hideThinking();
 
   // confirm banner
   if (s.pending_confirmation) {
@@ -468,6 +511,11 @@ async function doConfirm(approved) {
 
 async function doCancel() {
   await api("/cancel", "POST", {});
+  await poll();
+}
+
+async function doResume() {
+  await api("/resume", "POST", {});
   await poll();
 }
 

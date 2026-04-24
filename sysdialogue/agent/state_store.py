@@ -110,6 +110,12 @@ class TaskStepRecord:
     workflow_step_type: str = ""
     audit_refs: list[str] = field(default_factory=list)
     lock_scope: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    finding_id: str = ""
+    severity: str = ""
+    blocking: bool = False
+    resolution: str = ""
+    source_ref: str = ""
     updated_at: str = field(default_factory=_now_iso)
 
 
@@ -381,6 +387,62 @@ class SessionStore:
             record.pending_input = _json_safe(pending_input) if pending_input else None
             if technical_details is not None:
                 record.technical_details = technical_details
+
+        return self.mutate(session_id, mutate, surface=surface)
+
+    def resolve_pending_confirmation(
+        self,
+        session_id: str,
+        *,
+        approved: bool,
+        surface: str = "unknown",
+    ) -> SessionRecord:
+        def mutate(record: SessionRecord) -> None:
+            if not record.pending_confirmation:
+                raise RuntimeError("当前没有待确认请求")
+            pending = dict(record.pending_confirmation)
+            pending["resolved"] = True
+            pending["approved"] = bool(approved)
+            pending["resolved_at"] = _now_iso()
+            record.pending_confirmation = _json_safe(pending)
+            record.status = "running"
+            record.surface = surface or record.surface
+
+        return self.mutate(session_id, mutate, surface=surface)
+
+    def resolve_pending_input(
+        self,
+        session_id: str,
+        *,
+        value: str,
+        surface: str = "unknown",
+    ) -> SessionRecord:
+        def mutate(record: SessionRecord) -> None:
+            if not record.pending_input:
+                raise RuntimeError("当前没有待输入请求")
+            pending = dict(record.pending_input)
+            pending["resolved"] = True
+            pending["value"] = str(value or "")
+            pending["resolved_at"] = _now_iso()
+            record.pending_input = _json_safe(pending)
+            record.status = "running"
+            record.surface = surface or record.surface
+
+        return self.mutate(session_id, mutate, surface=surface)
+
+    def clear_pending(
+        self,
+        session_id: str,
+        *,
+        surface: str = "unknown",
+        status: str | None = None,
+    ) -> SessionRecord:
+        def mutate(record: SessionRecord) -> None:
+            record.surface = surface or record.surface
+            if status is not None:
+                record.status = status
+            record.pending_confirmation = None
+            record.pending_input = None
 
         return self.mutate(session_id, mutate, surface=surface)
 

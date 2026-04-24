@@ -168,3 +168,41 @@ def test_tui_persists_history_to_shared_runtime_session(tmp_path) -> None:
 
     assert (tmp_path / "current_session.json").exists()
     assert not (tmp_path / "restored_session.json").exists()
+
+
+def test_tui_restore_switches_to_restored_session_before_sync(tmp_path) -> None:
+    from sysdialogue.agent.state_store import SessionStore
+
+    class FakeController:
+        def __init__(self) -> None:
+            self.audit_log = SimpleNamespace(session_id="current_session")
+            self.session_id = "current_session"
+            self.surface = "tui"
+            self.session_store = SessionStore(str(tmp_path))
+            self.task_store = None
+            self.conversation_manager = ConversationManager()
+
+        def switch_session(self, session_id: str) -> None:
+            self.session_id = session_id
+            self.audit_log.session_id = session_id
+
+    manager = ConversationManager()
+    manager.history = [{"role": "user", "content": "old request"}]
+    store = ConversationStore(storage_dir=str(tmp_path))
+    store.save_turn(
+        session_id="restored_session",
+        manager=manager,
+        user_message="old request",
+        final_reply="old reply",
+        status="completed",
+    )
+    controller = FakeController()
+    app = SysDialogueTUI(controller)
+    app._history_store = store
+    app._write_log = lambda renderable: None
+
+    app._restore_history("restored_session")
+
+    assert controller.session_id == "restored_session"
+    assert (tmp_path / "restored_session.json").exists()
+    assert not (tmp_path / "current_session.json").exists()

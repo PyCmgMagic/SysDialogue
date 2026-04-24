@@ -32,6 +32,11 @@ SET_EXECUTION_MODE_SCHEMA: dict = {
                         "tool": {"type": "string"},
                         "args": {"type": "object"},
                         "purpose": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
+                        "finding_id": {"type": "string"},
+                        "severity": {"type": "string"},
+                        "blocking": {"type": "boolean"},
+                        "source_ref": {"type": "string"},
                         "expected_risk": {
                             "type": "string",
                             "enum": ["SAFE", "WARN-LOW", "WARN-HIGH", "BLOCK", "UNKNOWN"],

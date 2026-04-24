@@ -605,8 +605,17 @@ class SysDialogueTUI(App):
             self._write_log(Panel(f"恢复历史失败：{exc}", border_style="red", title="历史"))
             return
         try:
+            if hasattr(self.controller, "switch_session"):
+                self.controller.switch_session(record.session_id)
+            task_store = getattr(self.controller, "task_store", None)
+            if task_store is not None:
+                self.controller.session_store.recover_interrupted(
+                    record.session_id,
+                    task_store,
+                    surface=self.controller.surface,
+                )
             self.controller.session_store.sync_manager(
-                self.controller.session_id,
+                record.session_id,
                 self.controller.conversation_manager,
                 surface=self.controller.surface,
             )

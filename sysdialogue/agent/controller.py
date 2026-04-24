@@ -174,6 +174,7 @@ class AgentController:
     _task_state_lock: threading.Lock = field(default_factory=threading.Lock)
     _task_heartbeat_thread: threading.Thread | None = None
     _task_heartbeat_stop: threading.Event = field(default_factory=threading.Event)
+    _forced_resume_task_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.session_store is None:
@@ -395,6 +396,11 @@ class AgentController:
                             expected_risk=s.expected_risk,
                             actual_risk=s.actual_risk,
                             rule_ids=list(s.rule_ids),
+                            depends_on=list(s.depends_on),
+                            finding_id=s.finding_id,
+                            severity=s.severity,
+                            blocking=s.blocking,
+                            source_ref=s.source_ref,
                         )
                         for index, s in enumerate(frozen.steps)
                     ],
@@ -491,6 +497,22 @@ class AgentController:
     @property
     def session_id(self) -> str:
         return self.audit_log.session_id
+
+    def switch_session(self, session_id: str) -> None:
+        """Move this interactive controller to another persisted session."""
+        self.audit_log.rebind_session(session_id)
+        if self.session_store is not None:
+            self.session_store.ensure(session_id, surface=self.surface)
+        self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
+
+    def force_resume_task(self, task_id: str) -> None:
+        """Request the next ReAct turn to resume a specific interrupted task."""
+        self._forced_resume_task_id = str(task_id or "").strip() or None
+
+    def consume_forced_resume_task_id(self) -> str | None:
+        task_id = self._forced_resume_task_id
+        self._forced_resume_task_id = None
+        return task_id
 
     @property
     def current_task_id(self) -> str | None:
@@ -894,6 +916,8 @@ class AgentController:
 def _direct_lock_scopes(name: str, args: dict) -> list[str]:
     if _is_direct_read_only_tool(name, args):
         return []
+    if not isinstance(args, dict):
+        return [f"tool:{name}"]
     args = args or {}
 
     if name == "write_file":
@@ -945,11 +969,13 @@ def _direct_lock_scopes(name: str, args: dict) -> list[str]:
 def _is_direct_read_only_tool(name: str, args: dict) -> bool:
     if name in _READ_ONLY_DIRECT_TOOLS:
         return True
+    if not isinstance(args, dict):
+        return False
     action = str((args or {}).get("action") or "").lower()
     if (name, action) in _READ_ONLY_DIRECT_ACTIONS:
         return True
-    if name == "get_set_system_config" and not (args or {}).get("value"):
-        return True
+    if name == "get_set_system_config":
+        return "value" not in args or args.get("value") is None
     return False
 
 

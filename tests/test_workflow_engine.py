@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.agent.workflow_engine import WorkflowEngine
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
-from sysdialogue.tools.registry import ToolRegistry
+from sysdialogue.tools.base import ToolResult
+from sysdialogue.tools.registry import ToolDef, ToolRegistry
 
 
 def _engine(tmp_path: Path) -> WorkflowEngine:
@@ -67,3 +69,77 @@ steps:
     assert execution.final_status == "failed"
     assert execution.steps_state["guarded_step"].status == "failed"
     assert "模板插值失败" in execution.steps_state["guarded_step"].error
+
+
+def test_workflow_tool_call_uses_direct_resource_lease_when_no_lock_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import sysdialogue.agent.controller as controller_module
+
+    monkeypatch.setattr(controller_module, "_DIRECT_LOCK_TIMEOUT", 0.1)
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "mutate_without_scope.yaml").write_text(
+        """
+name: mutate_without_scope
+parameters: []
+steps:
+  - id: mutate
+    type: tool_call
+    tool: mutate_marker
+    args: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = ToolRegistry()
+    registry.register(
+        ToolDef(
+            name="mutate_marker",
+            fn=lambda executor: ToolResult(success=True, data={"changed": True}),
+            schema={
+                "name": "mutate_marker",
+                "description": "Mutate marker",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    session_store = SessionStore(str(tmp_path / "sessions"))
+    task_store = TaskStore(str(tmp_path / "tasks"))
+    lock_store = LockStore(str(tmp_path / "locks"))
+    controller = AgentController(
+        executor=LocalExecutor(),
+        env_profile={"remote_mode": False, "current_user": "tester"},
+        audit_log=AuditLog(log_dir=str(tmp_path / "audit")),
+        registry=registry,
+        llm_client=None,
+        session_store=session_store,
+        task_store=task_store,
+        lock_store=lock_store,
+    )
+    task_store.create(
+        task_id="task_wf",
+        session_id=controller.session_id,
+        surface="test",
+        goal="mutate",
+        status="running",
+    )
+    lock_store.acquire(
+        "tool:mutate_marker",
+        task_id="other_task",
+        session_id="other_session",
+        surface="web",
+        timeout=0.1,
+    )
+    controller.bind_task("task_wf")
+    try:
+        execution = WorkflowEngine(controller=controller, workflows_dir=workflows_dir).run(
+            "mutate_without_scope",
+            {},
+        )
+    finally:
+        controller.unbind_task()
+
+    assert execution.final_status == "failed"
+    assert execution.steps_state["mutate"].status == "failed"
+    assert "resource_locked: tool:mutate_marker" in execution.steps_state["mutate"].error

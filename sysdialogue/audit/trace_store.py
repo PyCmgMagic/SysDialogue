@@ -146,6 +146,15 @@ class AuditLog:
                         pass
         return records
 
+    def rebind_session(self, session_id: str) -> None:
+        """Point subsequent audit writes at an existing or new session file."""
+        safe = str(session_id or "").strip()
+        if not safe:
+            raise ValueError("session_id cannot be empty")
+        with self._lock:
+            self.session_id = safe
+            self._path = self._path.parent / f"{self.session_id}.jsonl"
+
     @property
     def path(self) -> Path:
         return self._path

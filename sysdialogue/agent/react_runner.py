@@ -366,6 +366,30 @@ class ReActRunner:
             if session_store is not None
             else None
         )
+        forced_resume_task_id = self.controller.consume_forced_resume_task_id()
+        if task_store is not None and forced_resume_task_id:
+            existing = task_store.load(forced_resume_task_id)
+            if existing is not None and existing.status == "interrupted":
+                task_store.update(
+                    existing.task_id,
+                    status="running",
+                    current_phase=existing.current_phase or "resume",
+                    resume_message=(
+                        existing.resume_message
+                        or "Previous task was explicitly resumed by the user."
+                    ),
+                    heartbeat_ts=datetime.now(timezone.utc).isoformat(),
+                )
+                if session_store is not None:
+                    session_store.set_status(
+                        session_id,
+                        "running",
+                        surface=self.controller.surface,
+                        active_task_id=existing.task_id,
+                    )
+                existing = task_store.load(existing.task_id) or existing
+                return _task_run_from_record(existing, resumed=True)
+
         active_task_id = session_record.active_task_id if session_record is not None else ""
         if task_store is not None and active_task_id:
             existing = task_store.load(active_task_id)
@@ -421,16 +445,26 @@ class ReActRunner:
                 }
             )
         if task.mode == "plan" and task.steps:
-            next_step = _next_pending_step(task.steps)
-            if next_step is not None:
+            executable_steps = _executable_plan_steps(task.steps)
+            if executable_steps:
+                frontier = [
+                    {
+                        "step_id": step.step_id,
+                        "tool": step.tool,
+                        "args": step.args,
+                        "purpose": step.purpose,
+                        "finding_id": step.finding_id,
+                        "severity": step.severity,
+                    }
+                    for step in executable_steps
+                ]
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "Frozen plan is active. You must follow the next executable plan step exactly. "
+                            "Frozen plan is active. You must follow one executable plan step exactly. "
                             f"plan_id={task.plan_id or '<unknown>'}; "
-                            f"next_step={next_step.step_id}; tool={next_step.tool}; "
-                            f"args={json.dumps(next_step.args, ensure_ascii=False)}"
+                            f"frontier={json.dumps(frontier, ensure_ascii=False)}"
                         ),
                         "sysdialogue_internal": True,
                     }
@@ -474,20 +508,21 @@ class ReActRunner:
     def _guard_plan_step(self, task: TaskRun, name: str, args: dict[str, Any]) -> str | None:
         if task.mode != "plan":
             return None
-        next_step = _next_pending_step(task.steps)
-        if next_step is None:
+        executable_steps = _executable_plan_steps(task.steps)
+        if not executable_steps:
             return "All frozen plan steps are already completed. Finish with finish_task or create a new plan."
-        if name != next_step.tool:
+        matching = [
+            step
+            for step in executable_steps
+            if step.tool == name and _normalized_json(step.args) == _normalized_json(args)
+        ]
+        if not matching:
+            expected = ", ".join(f"{step.step_id}:{step.tool}" for step in executable_steps)
             return (
                 "Frozen plan deviation rejected. "
-                f"Next required step is {next_step.step_id} using {next_step.tool}, "
-                f"but the model tried to call {name}."
+                f"Executable frontier is [{expected}], but the model tried {name} with non-matching args."
             )
-        if _normalized_json(next_step.args) != _normalized_json(args):
-            return (
-                "Frozen plan deviation rejected. "
-                f"Step {next_step.step_id} args must match the frozen plan exactly."
-            )
+        next_step = matching[0]
         next_step.status = "running"
         next_step.updated_at = datetime.now(timezone.utc).isoformat()
         self._persist_task_state(task)
@@ -760,6 +795,21 @@ def _next_pending_step(steps: list[TaskStepRecord]) -> TaskStepRecord | None:
         if step.status in {"pending", "running"}:
             return step
     return None
+
+
+def _executable_plan_steps(steps: list[TaskStepRecord]) -> list[TaskStepRecord]:
+    completed = {
+        step.step_id
+        for step in steps
+        if step.status in {"completed", "skipped", "rolled_back"}
+    }
+    executable: list[TaskStepRecord] = []
+    for step in steps:
+        if step.status not in {"pending", "running"}:
+            continue
+        if all(dep in completed for dep in (step.depends_on or [])):
+            executable.append(step)
+    return executable
 
 
 def _next_step_for_tool(steps: list[TaskStepRecord], name: str, args: dict) -> TaskStepRecord | None:
@@ -1111,10 +1161,12 @@ def _is_verification_tool(name: str, args: dict) -> bool:
 
 
 def _tool_action_key(name: str, args: dict) -> str:
+    if not isinstance(args, dict):
+        return name
     action = (args.get("action") or "").lower()
     if action:
         return f"{name}:{action}"
-    if name == "get_set_system_config" and not args.get("value"):
+    if name == "get_set_system_config" and ("value" not in args or args.get("value") is None):
         return "get_set_system_config:get"
     return name
 

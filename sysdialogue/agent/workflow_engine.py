@@ -529,6 +529,18 @@ class WorkflowEngine:
                 )
                 return StepResult(step_id=sid, status="failed", error="用户已取消")
 
+        lock_error = self.controller._acquire_direct_tool_locks(
+            tool,
+            rendered_args if isinstance(rendered_args, dict) else {},
+            f"workflow:{execution.workflow_id}:{sid}",
+        )
+        if lock_error is not None:
+            return StepResult(
+                step_id=sid,
+                status="failed",
+                error=str(lock_error.get("content") or "resource_locked"),
+            )
+
         result: ToolResult = self.controller.registry.call(
             tool, rendered_args,
             executor=self.controller.executor,

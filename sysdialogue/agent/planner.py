@@ -35,6 +35,11 @@ class PlanStep:
     risk_match: bool = True
     rule_ids: list[str] = field(default_factory=list)
     reason: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    finding_id: str = ""
+    severity: str = ""
+    blocking: bool = False
+    source_ref: str = ""
 
 
 @dataclass
@@ -55,6 +60,11 @@ class FrozenPlan:
                     "actual_risk": s.actual_risk,
                     "risk_match": s.risk_match,
                     "rule_ids": s.rule_ids,
+                    "depends_on": s.depends_on,
+                    "finding_id": s.finding_id,
+                    "severity": s.severity,
+                    "blocking": s.blocking,
+                    "source_ref": s.source_ref,
                 } for s in self.steps
             ],
             "warnings": self.warnings,
@@ -96,6 +106,11 @@ class PlanningEngine:
                 purpose=raw.get("purpose", ""),
                 expected_risk=raw.get("expected_risk", "UNKNOWN"),
                 confirm_required=raw.get("confirm_required", False),
+                depends_on=list(raw.get("depends_on") or []),
+                finding_id=str(raw.get("finding_id") or ""),
+                severity=str(raw.get("severity") or ""),
+                blocking=bool(raw.get("blocking", False)),
+                source_ref=str(raw.get("source_ref") or ""),
             )
 
             if not step.tool:

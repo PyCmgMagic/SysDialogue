@@ -37,7 +37,7 @@ def create_web_app(config) -> FastAPI:
         if not message:
             raise HTTPException(status_code=400, detail="message 不能为空")
         try:
-            if session.pending_input is not None:
+            if session.needs_input_response():
                 session.submit_turn_input(message)
             else:
                 session.start_turn(message)
@@ -57,6 +57,14 @@ def create_web_app(config) -> FastAPI:
     @app.post("/api/session/{session_id}/cancel")
     async def cancel(session_id: str):
         store.get(session_id).cancel()
+        return {"ok": True}
+
+    @app.post("/api/session/{session_id}/resume")
+    async def resume(session_id: str):
+        try:
+            store.get(session_id).resume()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}
 
     return app

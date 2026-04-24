@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from sysdialogue.agent.controller import AgentController, LLMResponse
+from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
 from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
@@ -269,7 +269,10 @@ def test_session_store_persists_user_and_assistant_turn(tmp_path: Path) -> None:
     assert record.user_messages[-1] == "你好"
 
 
-def test_direct_mutating_tool_respects_existing_lock_lease(tmp_path: Path) -> None:
+def test_direct_mutating_tool_respects_existing_lock_lease(tmp_path: Path, monkeypatch) -> None:
+    import sysdialogue.agent.controller as controller_module
+
+    monkeypatch.setattr(controller_module, "_DIRECT_LOCK_TIMEOUT", 0.1)
     llm = FakeLLM([
         [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
         [
@@ -295,6 +298,14 @@ def test_direct_mutating_tool_respects_existing_lock_lease(tmp_path: Path) -> No
     tool_result = llm.calls[1]["messages"][-1]["content"][0]
     assert tool_result["is_error"] is True
     assert "resource_locked: tool:mutate_marker" in tool_result["content"]
+
+
+def test_system_config_empty_value_is_treated_as_mutation_for_direct_locking() -> None:
+    assert _direct_lock_scopes("get_set_system_config", {"key": "hostname"}) == []
+    assert _direct_lock_scopes("get_set_system_config", {"key": "hostname", "value": None}) == []
+    assert _direct_lock_scopes("get_set_system_config", {"key": "hostname", "value": ""}) == [
+        "system-config:hostname"
+    ]
 
 
 def test_plain_text_responses_trigger_react_correction_then_failure(tmp_path: Path) -> None:
@@ -369,6 +380,62 @@ def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> N
     assert "verification tool/workflow after the mutation" in rejected_result["content"]
     stages = [event.stage for event in events]
     assert stages.count("correction") == 1
+
+
+def test_frozen_plan_allows_only_dependency_ready_steps(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "observe",
+                            "tool": "get_system_info",
+                            "args": {},
+                            "purpose": "observe host",
+                        },
+                        {
+                            "step_id": "verify",
+                            "tool": "validate_config",
+                            "args": {"path": "/tmp/example.conf"},
+                            "purpose": "verify config",
+                            "depends_on": ["observe"],
+                            "finding_id": "finding-1",
+                            "severity": "P2",
+                            "blocking": True,
+                        },
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="verify_too_early")],
+        [_tool_use("get_system_info", {}, tool_id="observe_1")],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="verify_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Plan completed.",
+                "evidence": ["observed host", "validated config"],
+                "verification": "validate_config completed after observe.",
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("run a frozen plan")
+
+    assert "Plan completed" in reply
+    rejected = llm.calls[2]["messages"][-1]["content"][0]
+    assert rejected["is_error"] is True
+    assert "Frozen plan deviation rejected" in rejected["content"]
+    record = next(controller.task_store.storage_dir.glob("*.json"))
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    verify_step = [step for step in payload["steps"] if step["step_id"] == "verify"][0]
+    assert verify_step["depends_on"] == ["observe"]
+    assert verify_step["finding_id"] == "finding-1"
 
 
 def test_failed_mutation_does_not_satisfy_completion_gate(tmp_path: Path) -> None:
