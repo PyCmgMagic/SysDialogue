@@ -1,0 +1,762 @@
+[
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_194a0f2204",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:03:54.193475+00:00",
+    "ended_at": "2026-04-24T11:04:08.491063+00:00",
+    "duration_ms": 14297,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 1
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_cfc0735e05",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:08.550085+00:00",
+    "ended_at": "2026-04-24T11:04:10.453458+00:00",
+    "duration_ms": 1903,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 2
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_c19b2afee7",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:10.499040+00:00",
+    "ended_at": "2026-04-24T11:04:10.499052+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "manage_service",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_71baa23d15",
+    "span_type": "tool_call",
+    "name": "manage_service",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:04:10.537474+00:00",
+    "ended_at": "2026-04-24T11:04:10.537486+00:00",
+    "duration_ms": 0,
+    "summary": "Unit sdft_20260424_185731_java.service could not be found.",
+    "data": {
+      "tool": "manage_service",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_8c1c7c01cb",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:10.561515+00:00",
+    "ended_at": "2026-04-24T11:04:12.819956+00:00",
+    "duration_ms": 2258,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 3
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_350b072ade",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:12.843430+00:00",
+    "ended_at": "2026-04-24T11:04:16.879352+00:00",
+    "duration_ms": 4035,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 4
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_ca706fc4f3",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:16.919709+00:00",
+    "ended_at": "2026-04-24T11:04:16.919721+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "manage_service",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_8eeb521209",
+    "span_type": "tool_call",
+    "name": "manage_service",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:04:16.955880+00:00",
+    "ended_at": "2026-04-24T11:04:16.955891+00:00",
+    "duration_ms": 0,
+    "summary": "Unit sdft_20260424_185731_java.service could not be found.",
+    "data": {
+      "tool": "manage_service",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_80ca67d2ad",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:16.981702+00:00",
+    "ended_at": "2026-04-24T11:04:21.475066+00:00",
+    "duration_ms": 4493,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 5
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_64ac2010b3",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:21.502762+00:00",
+    "ended_at": "2026-04-24T11:04:26.060509+00:00",
+    "duration_ms": 4557,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 6
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_32679c8718",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:26.084421+00:00",
+    "ended_at": "2026-04-24T11:04:28.392354+00:00",
+    "duration_ms": 2307,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 7
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_813ef29596",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:28.429451+00:00",
+    "ended_at": "2026-04-24T11:04:28.429462+00:00",
+    "duration_ms": 0,
+    "summary": "WARN-LOW tool without a stricter policy rule.",
+    "data": {
+      "tool": "read_file",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "WARN-LOW"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_548abf77c5",
+    "span_type": "tool_call",
+    "name": "read_file",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:04:28.457336+00:00",
+    "ended_at": "2026-04-24T11:04:28.457346+00:00",
+    "duration_ms": 0,
+    "summary": "文件不存在：/etc/default/sdft_20260424_185731_java",
+    "data": {
+      "tool": "read_file",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_d66b476cde",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:28.483073+00:00",
+    "ended_at": "2026-04-24T11:04:30.331080+00:00",
+    "duration_ms": 1848,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 8
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_566735d513",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:30.355594+00:00",
+    "ended_at": "2026-04-24T11:04:32.511724+00:00",
+    "duration_ms": 2156,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 9
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_135e6d61dd",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:32.537500+00:00",
+    "ended_at": "2026-04-24T11:04:35.786605+00:00",
+    "duration_ms": 3249,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 10
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_22420e51d6",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:35.824133+00:00",
+    "ended_at": "2026-04-24T11:04:35.824144+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "backup_path",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_ae3aeaaa83",
+    "span_type": "tool_call",
+    "name": "backup_path",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:04:35.884589+00:00",
+    "ended_at": "2026-04-24T11:04:35.884601+00:00",
+    "duration_ms": 0,
+    "summary": "路径不存在：/etc/default/sdft_20260424_185731_java",
+    "data": {
+      "tool": "backup_path",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_0326a67b94",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:35.912496+00:00",
+    "ended_at": "2026-04-24T11:04:39.720917+00:00",
+    "duration_ms": 3808,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 11
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_5a7e5efe29",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:39.747324+00:00",
+    "ended_at": "2026-04-24T11:04:43.082257+00:00",
+    "duration_ms": 3334,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 12
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_93233b0e5c",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:43.112844+00:00",
+    "ended_at": "2026-04-24T11:04:45.967238+00:00",
+    "duration_ms": 2854,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 13
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_4e96edebee",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:46.002803+00:00",
+    "ended_at": "2026-04-24T11:04:46.002814+00:00",
+    "duration_ms": 0,
+    "summary": "WARN-HIGH tool without a stricter policy rule.",
+    "data": {
+      "tool": "replace_in_file",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "WARN-HIGH"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_f01528e274",
+    "span_type": "tool_call",
+    "name": "replace_in_file",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:04:46.043168+00:00",
+    "ended_at": "2026-04-24T11:04:46.043181+00:00",
+    "duration_ms": 0,
+    "summary": "文件不存在：/etc/default/sdft_20260424_185731_java",
+    "data": {
+      "tool": "replace_in_file",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_b9db3c6e28",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:46.068030+00:00",
+    "ended_at": "2026-04-24T11:04:49.879588+00:00",
+    "duration_ms": 3811,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 14
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_8b9f54ac2b",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:49.905611+00:00",
+    "ended_at": "2026-04-24T11:04:53.849107+00:00",
+    "duration_ms": 3943,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 15
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_8515352e84",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:53.876049+00:00",
+    "ended_at": "2026-04-24T11:04:57.258283+00:00",
+    "duration_ms": 3382,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 16
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_69753417d9",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:04:57.282409+00:00",
+    "ended_at": "2026-04-24T11:05:01.500376+00:00",
+    "duration_ms": 4217,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 17
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_7e35c2f2c7",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:01.529979+00:00",
+    "ended_at": "2026-04-24T11:05:04.254647+00:00",
+    "duration_ms": 2724,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 18
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_7b283cad61",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:04.296649+00:00",
+    "ended_at": "2026-04-24T11:05:04.296660+00:00",
+    "duration_ms": 0,
+    "summary": "WARN-LOW tool without a stricter policy rule.",
+    "data": {
+      "tool": "manage_service",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "WARN-LOW"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_96d115c45d",
+    "span_type": "tool_call",
+    "name": "manage_service",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:05:04.336375+00:00",
+    "ended_at": "2026-04-24T11:05:04.336386+00:00",
+    "duration_ms": 0,
+    "summary": "Failed to restart sdft_20260424_185731_java.service: Unit sdft_20260424_185731_java.service not found.",
+    "data": {
+      "tool": "manage_service",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_418577905a",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:04.364302+00:00",
+    "ended_at": "2026-04-24T11:05:06.485245+00:00",
+    "duration_ms": 2120,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 19
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_9b7ce47279",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:06.511083+00:00",
+    "ended_at": "2026-04-24T11:05:08.939933+00:00",
+    "duration_ms": 2428,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 20
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_63e8026d9e",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:08.978048+00:00",
+    "ended_at": "2026-04-24T11:05:08.978059+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "read_log",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_1e2665d19f",
+    "span_type": "tool_call",
+    "name": "read_log",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:09.010355+00:00",
+    "ended_at": "2026-04-24T11:05:09.010366+00:00",
+    "duration_ms": 0,
+    "summary": "-- No entries --",
+    "data": {
+      "tool": "read_log",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_a8cdd68ee1",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:09.049677+00:00",
+    "ended_at": "2026-04-24T11:05:11.747880+00:00",
+    "duration_ms": 2698,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 21
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_72ca6f7ea1",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:11.777395+00:00",
+    "ended_at": "2026-04-24T11:05:13.765752+00:00",
+    "duration_ms": 1988,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 22
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_e7d7f6360e",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:13.804134+00:00",
+    "ended_at": "2026-04-24T11:05:13.804144+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "check_endpoint",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_3b9f4ac0a2",
+    "span_type": "tool_call",
+    "name": "check_endpoint",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:05:13.836776+00:00",
+    "ended_at": "2026-04-24T11:05:13.836787+00:00",
+    "duration_ms": 0,
+    "summary": "HTTP 状态码 0",
+    "data": {
+      "tool": "check_endpoint",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_d06f2cbf33",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:13.861668+00:00",
+    "ended_at": "2026-04-24T11:05:16.483376+00:00",
+    "duration_ms": 2621,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 23
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_0af6230176",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:16.524595+00:00",
+    "ended_at": "2026-04-24T11:05:16.524607+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "backup_path",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_f77914e26a",
+    "span_type": "tool_call",
+    "name": "backup_path",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:05:16.634794+00:00",
+    "ended_at": "2026-04-24T11:05:16.634806+00:00",
+    "duration_ms": 0,
+    "summary": "路径不存在：/etc/default/sdft_20260424_185731_java",
+    "data": {
+      "tool": "backup_path",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_542c3ea86c",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:16.663284+00:00",
+    "ended_at": "2026-04-24T11:05:19.566405+00:00",
+    "duration_ms": 2903,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 24
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_633dae6246",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:19.608928+00:00",
+    "ended_at": "2026-04-24T11:05:19.608939+00:00",
+    "duration_ms": 0,
+    "summary": "WARN-HIGH tool without a stricter policy rule.",
+    "data": {
+      "tool": "replace_in_file",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "WARN-HIGH"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_6d7133cc32",
+    "span_type": "tool_call",
+    "name": "replace_in_file",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "error",
+    "started_at": "2026-04-24T11:05:19.650616+00:00",
+    "ended_at": "2026-04-24T11:05:19.650626+00:00",
+    "duration_ms": 0,
+    "summary": "文件不存在：/etc/default/sdft_20260424_185731_java",
+    "data": {
+      "tool": "replace_in_file",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260424_185731_jm_p1_008",
+    "span_id": "span_4b9a6fcec5",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260424_185731_jm_p1_008",
+    "task_id": "task_1d210558",
+    "status": "ok",
+    "started_at": "2026-04-24T11:05:19.679615+00:00",
+    "ended_at": "2026-04-24T11:05:26.182373+00:00",
+    "duration_ms": 6502,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 25
+    }
+  }
+]
