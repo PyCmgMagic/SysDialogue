@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
@@ -777,7 +778,8 @@ class ReActRunner:
         }
         task.verification_candidates.append(candidate)
         task.verification_candidates = task.verification_candidates[-20:]
-        judgement = VerificationJudge().judge(task)
+        rule_judgement = VerificationJudge().judge(task)
+        judgement = self._verification_judgement(task, rule_judgement)
         task.verification_judgement = judgement
         if judgement.get("sufficient"):
             task.verified = True
@@ -787,6 +789,43 @@ class ReActRunner:
             "verification",
             "Verification evidence accepted." if judgement.get("sufficient") else "Verification evidence recorded.",
             judgement,
+        )
+
+    def _verification_judgement(self, task: TaskRun, rule_judgement: dict[str, Any]) -> dict[str, Any]:
+        if not rule_judgement.get("sufficient"):
+            return {**rule_judgement, "judge": "rules"}
+        if not _needs_llm_verification_judge(task):
+            return {**rule_judgement, "judge": "rules"}
+        llm_client = getattr(self.controller, "llm_client", None)
+        if llm_client is None or llm_client.__class__.__name__ in {"NullLLMClient", "FakeLLM", "NoLLM"}:
+            return {**rule_judgement, "judge": "rules", "llm_judge_skipped": "no llm client"}
+        judge = LLMVerificationJudge(llm_client)
+        try:
+            judgement = judge.judge(task, rule_judgement)
+        except Exception as exc:
+            self._trace_verification_judge(task, "error", str(exc))
+            return {**rule_judgement, "judge": "rules", "llm_judge_error": sanitize_text(str(exc), limit=300)}
+        self._trace_verification_judge(task, "ok", judgement.get("reason", ""), judgement)
+        return judgement
+
+    def _trace_verification_judge(
+        self,
+        task: TaskRun,
+        status: str,
+        summary: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        trace_store = getattr(self.controller, "trace_store", None)
+        if trace_store is None:
+            return
+        trace_store.log_span(
+            session_id=self.controller.session_id,
+            task_id=task.task_id,
+            span_type="verification_judge",
+            name="llm_evidence_judge",
+            status=status,
+            summary=sanitize_text(summary, limit=500),
+            data=sanitize_value(data or {}),
         )
 
     def _emit_tool_started(self, task: TaskRun, name: str, args: dict) -> None:
@@ -1030,19 +1069,7 @@ def _lookup_step_expr(expr: str, steps: list[TaskStepRecord]) -> Any:
 
 
 def _safe_result_data(value: Any, *, depth: int = 0) -> Any:
-    if depth > 4:
-        return "<truncated>"
-    if isinstance(value, dict):
-        safe: dict[str, Any] = {}
-        for key, item in value.items():
-            key_str = str(key)
-            safe[key_str] = "<redacted>" if _SENSITIVE_KEY_RE.search(key_str) else _safe_result_data(item, depth=depth + 1)
-        return safe
-    if isinstance(value, list):
-        return [_safe_result_data(item, depth=depth + 1) for item in value[:40]]
-    if isinstance(value, str):
-        return _truncate(value, 2000)
-    return value
+    return sanitize_value(value, limit=2000, depth=depth)
 
 
 def _result_summary(payload: dict) -> str:
@@ -1206,6 +1233,175 @@ class VerificationJudge:
             "confidence": "low",
             "recommended_next_verification": ["run a targeted read-only verification tool"],
         }
+
+
+class LLMVerificationJudge:
+    """LLM-assisted evidence sufficiency judge with rule hard-gates."""
+
+    TOOL_SCHEMA = {
+        "name": "submit_verification_judgement",
+        "description": "Return the structured verification judgement.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sufficient": {"type": "boolean"},
+                "covered_requirements": {"type": "array", "items": {"type": "string"}},
+                "missing_requirements": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                "recommended_next_verification": {"type": "array", "items": {"type": "string"}},
+                "reason": {"type": "string"},
+            },
+            "required": [
+                "sufficient",
+                "covered_requirements",
+                "missing_requirements",
+                "confidence",
+                "recommended_next_verification",
+                "reason",
+            ],
+        },
+    }
+
+    def __init__(self, llm_client: Any):
+        self.llm_client = llm_client
+
+    def judge(self, task: TaskRun, rule_judgement: dict[str, Any]) -> dict[str, Any]:
+        if not rule_judgement.get("sufficient"):
+            return {**rule_judgement, "judge": "rules"}
+        payload = sanitize_value(
+            {
+                "user_goal": task.goal,
+                "mode": task.mode,
+                "last_action_step": task.last_action_step,
+                "current_tool_step": task.tool_steps,
+                "rule_judgement": rule_judgement,
+                "plan_steps": [
+                    {
+                        "step_id": step.step_id,
+                        "status": step.status,
+                        "tool": step.tool,
+                        "purpose": step.purpose,
+                        "args": step.args,
+                    }
+                    for step in task.steps[-20:]
+                ],
+                "verification_candidates": task.verification_candidates[-8:],
+            },
+            limit=6000,
+        )
+        response = self.llm_client.messages_create(
+            system=(
+                "You are a verification evidence judge for a Linux operations agent. "
+                "Only decide whether real post-change tool evidence proves the user's requested change. "
+                "Never treat model reasoning as evidence. Return only the required structured judgement."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Assess this verification payload. If the evidence does not match every "
+                                "concrete requested object or was not produced by a targeted read-only tool, "
+                                "return sufficient=false.\n"
+                                + json.dumps(payload, ensure_ascii=False)
+                            ),
+                        }
+                    ],
+                }
+            ],
+            tools=[self.TOOL_SCHEMA],
+        )
+        parsed = _parse_llm_verification_response(response.content)
+        if parsed is None:
+            return {**rule_judgement, "judge": "rules", "llm_judge_error": "invalid llm judgement"}
+        judgement = _normalize_llm_judgement(parsed)
+        if not judgement.get("sufficient"):
+            return judgement
+        return {
+            **judgement,
+            "sufficient": True,
+            "judge": "llm",
+        }
+
+
+def _needs_llm_verification_judge(task: TaskRun) -> bool:
+    if not task.changed_state:
+        return False
+    action_count = len([event for event in task.events if event.stage == "tool_finished"])
+    text = (task.goal or "").lower()
+    complex_terms = (
+        "mysql",
+        "database",
+        "table",
+        "user",
+        "ssh key",
+        "authorized",
+        "cron",
+        "container",
+        "docker",
+        "podman",
+        "service",
+        "rollback",
+        "systemd",
+    )
+    return task.mode in {"plan", "workflow"} or action_count >= 3 or any(term in text for term in complex_terms)
+
+
+def _parse_llm_verification_response(content: Any) -> dict[str, Any] | None:
+    blocks = content if isinstance(content, list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and block.get("name") == "submit_verification_judgement":
+            payload = block.get("input")
+            return payload if isinstance(payload, dict) else None
+    text_parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text_parts.append(str(block.get("text") or ""))
+    if not text_parts and isinstance(content, str):
+        text_parts.append(content)
+    text = "\n".join(text_parts).strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_llm_judgement(value: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_value(
+        {
+            "sufficient": bool(value.get("sufficient")),
+            "covered_requirements": _string_list(value.get("covered_requirements")),
+            "missing_requirements": _string_list(value.get("missing_requirements")),
+            "confidence": str(value.get("confidence") or "low").lower()
+            if str(value.get("confidence") or "").lower() in {"low", "medium", "high"}
+            else "low",
+            "recommended_next_verification": _string_list(value.get("recommended_next_verification")),
+            "reason": str(value.get("reason") or ""),
+            "judge": "llm",
+        },
+        limit=4000,
+    )
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [sanitize_text(str(item), limit=300) for item in value[:10] if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [sanitize_text(value, limit=300)]
+    return []
 
 
 def _progress_signature(task: TaskRun) -> str:
@@ -1531,10 +1727,10 @@ def _friendly_tool_error(parsed: dict, raw_preview: str) -> str:
 
 def _preview_json(value, limit: int = 1000) -> str:
     try:
-        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        text = json.dumps(sanitize_value(value, limit=limit), ensure_ascii=False, indent=2, default=str)
     except Exception:
-        text = str(value)
-    return _truncate(text, limit)
+        text = sanitize_text(str(value), limit=limit)
+    return sanitize_text(_truncate(text, limit), limit=limit)
 
 
 def _truncate(text: str, limit: int) -> str:

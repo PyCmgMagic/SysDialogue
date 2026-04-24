@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import zipfile
 from pathlib import Path
 
 from sysdialogue.agent.command_registry import CommandRegistry
@@ -10,8 +11,10 @@ from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy, PermissionRule
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.agent.trace_store import TraceStore
+from sysdialogue.audit.serializers import export_replay_package
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
+from sysdialogue.security.output_sanitizer import sanitize_command, sanitize_text, sanitize_value
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.tools.registry import ToolDef, ToolRegistry
 from sysdialogue.web.app import create_web_app
@@ -194,6 +197,45 @@ def test_trace_store_redacts_secret_values_in_generic_fields(tmp_path: Path) -> 
     assert "pw123" not in raw
 
 
+def test_unified_output_sanitizer_redacts_nested_values_and_commands() -> None:
+    private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-body\n-----END OPENSSH PRIVATE KEY-----"
+    text = (
+        "OPENAI_API_KEY=sk-live-secret Authorization: Bearer abc.def "
+        "password=pw123\n"
+        f"{private_key}"
+    )
+    redacted = sanitize_text(text)
+    command = sanitize_command(["curl", "-H", "Authorization: Bearer abc.def", "https://example.test"])
+    value = sanitize_value({"nested": {"token": "plain-secret"}, "output": text})
+
+    assert "sk-live-secret" not in redacted
+    assert "abc.def" not in redacted
+    assert "pw123" not in redacted
+    assert "secret-body" not in redacted
+    assert "abc.def" not in command[2]
+    assert "<redacted>" in command[2]
+    assert value["nested"]["token"] == "<redacted>"
+
+
+def test_tool_result_audit_and_replay_exports_are_sanitized(tmp_path: Path) -> None:
+    result = ToolResult(
+        success=True,
+        data={"api_key": "sk-live-secret", "message": "Bearer abc.def"},
+        cmd_trace=["curl", "-H", "Authorization: Bearer abc.def"],
+    )
+    audit = AuditLog(session_id="sanitize_session", log_dir=str(tmp_path / "audit"))
+    audit.log_command("demo", result.cmd_trace, 0, json.dumps(result.to_dict(sanitize=False)))
+    replay = export_replay_package(audit, output_dir=str(tmp_path / "exports"))
+    raw_audit = audit.path.read_text(encoding="utf-8")
+
+    assert "sk-live-secret" not in json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "abc.def" not in raw_audit
+    with zipfile.ZipFile(replay) as zf:
+        combined = "\n".join(zf.read(name).decode("utf-8") for name in zf.namelist())
+    assert "sk-live-secret" not in combined
+    assert "abc.def" not in combined
+
+
 def test_slash_commands_persist_and_can_compact_memory(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
 
@@ -216,3 +258,5 @@ def test_web_app_exposes_command_trace_and_memory_routes() -> None:
     assert "/api/session/{session_id}/command" in paths
     assert "/api/session/{session_id}/traces" in paths
     assert "/api/session/{session_id}/memory" in paths
+    assert "/api/session/{session_id}/export/audit" in paths
+    assert "/api/session/{session_id}/export/replay" in paths

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
 from sysdialogue.agent.react_runner import (
+    LLMVerificationJudge,
     TaskRun,
     VerificationJudge,
     _is_mutating_tool,
@@ -58,6 +59,87 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
+
+
+class JudgeLLM:
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    def messages_create(self, *, system, messages, tools):
+        self.calls += 1
+        return LLMResponse(content=self.content, stop_reason="stop")
+
+
+def _verified_mysql_task() -> TaskRun:
+    task = TaskRun(
+        task_id="task_judge",
+        goal="create a Docker MySQL user and table",
+        requires_environment_feedback=True,
+    )
+    task.changed_state = True
+    task.last_action_step = 3
+    task.tool_steps = 4
+    task.verification_candidates.append(
+        {
+            "tool": "manage_container",
+            "action_key": "manage_container:exec",
+            "args": {"action": "exec", "command": ["mysql", "-e", "SELECT 1"]},
+            "data": {"exit_code": 0, "stdout": "1"},
+            "step": 4,
+            "after_last_action": True,
+        }
+    )
+    return task
+
+
+def test_llm_verification_judge_can_accept_rule_sufficient_evidence() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([
+        {
+            "type": "text",
+            "text": json.dumps(
+                {
+                    "sufficient": True,
+                    "covered_requirements": ["mysql SELECT confirms table is reachable"],
+                    "missing_requirements": [],
+                    "confidence": "high",
+                    "recommended_next_verification": [],
+                    "reason": "Targeted SELECT ran after the mutation.",
+                }
+            ),
+        }
+    ])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "llm"
+    assert llm.calls == 1
+
+
+def test_llm_verification_judge_cannot_override_rule_rejection() -> None:
+    task = TaskRun(task_id="task_judge", goal="create user", requires_environment_feedback=True)
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": '{"sufficient": true}'}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is False
+    assert llm.calls == 0
+
+
+def test_llm_verification_judge_parse_failure_falls_back_to_rules() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": "not json"}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "rules"
+    assert judgement["llm_judge_error"] == "invalid llm judgement"
 
 
 def test_plan_args_match_tolerates_container_defaults_and_deferred_values() -> None:

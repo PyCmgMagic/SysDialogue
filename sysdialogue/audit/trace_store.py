@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sysdialogue.security.output_sanitizer import sanitize_value
+
 
 class AuditLog:
     """线程安全的 JSONL 审计日志。
@@ -126,6 +128,7 @@ class AuditLog:
             "ts": datetime.now(timezone.utc).isoformat(),
             **data,
         }
+        record = sanitize_value(record)
         line = json.dumps(record, ensure_ascii=False)
         with self._lock:
             with open(self._path, "a", encoding="utf-8") as f:
