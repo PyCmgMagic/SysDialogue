@@ -1,15 +1,20 @@
-"""工具: manage_authorized_keys."""
+"""Tool: manage_authorized_keys."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+
 from sysdialogue.runtime.secure_runner import SafeExecutor
 from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
 
 _PUBLIC_KEY_PREFIXES = (
-    "ssh-rsa", "ssh-ed25519", "ssh-ecdsa", "ecdsa-sha2", "sk-ssh-",
+    "ssh-rsa",
+    "ssh-ed25519",
+    "ssh-ecdsa",
+    "ecdsa-sha2",
+    "sk-ssh-",
 )
 
 
@@ -49,9 +54,10 @@ def manage_authorized_keys(
     action: str,
     username: str,
     public_key: str | None = None,
+    public_key_path: str | None = None,
     fingerprint: str | None = None,
 ) -> ToolResult:
-    """SSH 授权公钥管理（list/add/remove）。"""
+    """List, add, or remove SSH authorized_keys entries."""
     if username == "root" and action in ("add", "remove"):
         return ToolResult(success=False, error="禁止通过自动化通路修改 root 公钥（B028）")
 
@@ -66,8 +72,12 @@ def manage_authorized_keys(
         return ToolResult(success=True, data=out, cmd_trace=[f"target_fs.read_text {key_path}"])
 
     if action == "add":
+        if not public_key and public_key_path:
+            public_key = _read_public_key_from_path(fs, public_key_path)
+            if not public_key:
+                return ToolResult(success=False, error=f"无法读取 public_key_path: {public_key_path}")
         if not public_key:
-            return ToolResult(success=False, error="add 需要 public_key 参数")
+            return ToolResult(success=False, error="add 需要 public_key 或 public_key_path 参数")
         if not _is_public_key(public_key):
             return ToolResult(success=False, error="输入内容不是有效公钥格式（B023）")
         fs.mkdir(key_dir, parents=True)
@@ -109,3 +119,13 @@ def manage_authorized_keys(
         return ToolResult(success=True, data="公钥已移除", cmd_trace=[f"target_fs.write_text {key_path}"])
 
     return ToolResult(success=False, error=f"未知 action: {action}")
+
+
+def _read_public_key_from_path(fs: TargetFileAccess, path: str) -> str | None:
+    try:
+        if not fs.exists(path) or not fs.is_file(path):
+            return None
+        lines = fs.read_text(path, encoding="utf-8", errors="replace").splitlines()
+        return lines[0].strip() if lines else None
+    except Exception:
+        return None

@@ -1,0 +1,70 @@
+$ D:\develop\anaconda\python.exe -m sysdialogue.app.cli --remote root@202.194.15.199:10022 --verify
+exit=0
+
+STDOUT:
+============================================================
+ SysDialogue v8 - Self-check (--verify)
+============================================================
+
+[1/5] Sanitized environment profile:
+  os: Ubuntu 24.04.4 LTS
+  distro: ubuntu
+  distro_family: debian
+  kernel: 6.17.0-22-generic
+  arch: x86_64
+  user: root
+  uid: 0
+  is_root: True
+  has_sudo: True
+  sudo_passwordless: True
+  is_container: False
+  remote_mode: True
+  init_system: systemd
+  package_manager: apt
+  firewall_backend: ufw
+  container_backend: docker
+  config_validators: ['sshd', 'sudoers', 'systemd-unit']
+  supports_journalctl: True
+  cron_writable: True
+  dns_tools: ['dig', 'nslookup', 'getent']
+  selinux_mode: unknown
+  apparmor_mode: enabled
+
+[2/5] Registered tools: 37 static + 4 meta
+  - get_system_info: 获取系统基本信息（主机名/内核/架构/运行时间/内存/负载）
+  - get_disk_usage: 查看磁盘空间使用情况
+  - find_files: 按模式查找文件，可选按最小大小过滤
+  - list_processes: 列出进程，按 cpu/mem/pid 排序，可按用户过滤
+  - kill_process: 向进程发送信号终止进程（WARN-HIGH，需确认）
+  ... total 37
+
+[3/5] Built-in workflows: 10
+  - container_rollout
+  - disk_cleanup
+  - file_edit
+  - new_user
+  - port_scan
+  - rollback_config
+  - safe_config_patch
+  - scheduled_health_check
+  - security_audit
+  - service_restart
+
+[4/5] Security rules:
+  - RiskClassifier coverage: 37 tools
+  - CommandSafetyChecker: CS001-CS009
+  - RemoteLockoutChecker: B010 / B015-B017 / WH023
+
+[5/5] Config:
+  - model: Ali-dashscope/Qwen3.5-Flash
+  - base_url: https://xplt.sdu.edu.cn:4000
+  - dynamic_tools: enabled
+  - deployment_mode: remote
+  - OPENAI_API_KEY: configured (<redacted>...)
+
+============================================================
+[OK] Self-check passed.
+============================================================
+
+
+STDERR:

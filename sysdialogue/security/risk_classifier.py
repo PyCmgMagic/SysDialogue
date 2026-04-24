@@ -489,6 +489,12 @@ def _classify_manage_container(args: dict, ep: EnvProfile) -> RiskDecision:
     action = (args.get("action") or "list").lower()
     if action in ("list", "status", "logs", "inspect"):
         return RiskDecision(level="SAFE")
+    if action == "exec":
+        command = args.get("command") or []
+        if not isinstance(command, list) or not command:
+            return RiskDecision(level="BLOCK", rule_ids=["B032"], reason="container exec 需要非空 argv 数组")
+        if any(str(part).strip() in ("sh", "bash") for part in command[:2]):
+            return RiskDecision(level="WARN-HIGH", rule_ids=["WH019"], reason="容器 exec shell 命令需确认", requires_confirmation=True)
     if action == "run":
         if args.get("privileged"):
             return RiskDecision(level="BLOCK", rule_ids=["B029"], reason="禁止以 privileged 模式运行容器")

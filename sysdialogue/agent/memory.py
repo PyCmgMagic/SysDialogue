@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -13,12 +12,7 @@ from typing import Any
 
 from filelock import FileLock
 
-
-SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s]+)"),
-    re.compile(r"(?i)bearer\s+[a-z0-9._\-]+"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
-]
+from sysdialogue.security.output_sanitizer import sanitize_text
 
 
 @dataclass
@@ -155,10 +149,7 @@ class MemoryManager:
 
 
 def redact_sensitive(value: str) -> str:
-    text = str(value or "")
-    for pattern in SECRET_PATTERNS:
-        text = pattern.sub(lambda match: f"{match.group(1) if match.groups() else 'secret'}=<redacted>", text)
-    return text
+    return sanitize_text(value)
 
 
 def _write_markdown(path: Path, records: list[MemoryRecord]) -> None:

@@ -25,6 +25,7 @@ from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
 from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
@@ -1420,11 +1421,11 @@ def _tool_result_block(tool_use_id: str, content: str, *, is_error: bool) -> dic
 
 def _preview(result: ToolResult) -> str:
     if result.success:
-        data = result.data
+        data = sanitize_value(result.data)
         if isinstance(data, (dict, list)):
             try:
-                return json.dumps(data, ensure_ascii=False)[:1024]
+                return sanitize_text(json.dumps(data, ensure_ascii=False), limit=1024)
             except Exception:
-                return str(data)[:1024]
-        return str(data or "")[:1024]
-    return (result.error or "")[:1024]
+                return sanitize_text(str(data), limit=1024)
+        return sanitize_text(str(data or ""), limit=1024)
+    return sanitize_text(result.error or "", limit=1024)

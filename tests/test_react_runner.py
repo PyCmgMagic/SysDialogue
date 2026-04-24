@@ -5,8 +5,18 @@ from copy import deepcopy
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
-from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
-from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.react_runner import (
+    LLMVerificationJudge,
+    TaskRun,
+    VerificationJudge,
+    _is_mutating_tool,
+    _is_verification_tool,
+    _iteration_budget,
+    _plan_args_match,
+    _requires_environment_feedback,
+    _resolve_runtime_args_for_tool,
+)
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStepRecord, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
@@ -49,6 +59,189 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
+
+
+class JudgeLLM:
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    def messages_create(self, *, system, messages, tools):
+        self.calls += 1
+        return LLMResponse(content=self.content, stop_reason="stop")
+
+
+def _verified_mysql_task() -> TaskRun:
+    task = TaskRun(
+        task_id="task_judge",
+        goal="create a Docker MySQL user and table",
+        requires_environment_feedback=True,
+    )
+    task.changed_state = True
+    task.last_action_step = 3
+    task.tool_steps = 4
+    task.verification_candidates.append(
+        {
+            "tool": "manage_container",
+            "action_key": "manage_container:exec",
+            "args": {"action": "exec", "command": ["mysql", "-e", "SELECT 1"]},
+            "data": {"exit_code": 0, "stdout": "1"},
+            "step": 4,
+            "after_last_action": True,
+        }
+    )
+    return task
+
+
+def test_llm_verification_judge_can_accept_rule_sufficient_evidence() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([
+        {
+            "type": "text",
+            "text": json.dumps(
+                {
+                    "sufficient": True,
+                    "covered_requirements": ["mysql SELECT confirms table is reachable"],
+                    "missing_requirements": [],
+                    "confidence": "high",
+                    "recommended_next_verification": [],
+                    "reason": "Targeted SELECT ran after the mutation.",
+                }
+            ),
+        }
+    ])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "llm"
+    assert llm.calls == 1
+
+
+def test_llm_verification_judge_cannot_override_rule_rejection() -> None:
+    task = TaskRun(task_id="task_judge", goal="create user", requires_environment_feedback=True)
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": '{"sufficient": true}'}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is False
+    assert llm.calls == 0
+
+
+def test_llm_verification_judge_parse_failure_falls_back_to_rules() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": "not json"}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "rules"
+    assert judgement["llm_judge_error"] == "invalid llm judgement"
+
+
+def test_plan_args_match_tolerates_container_defaults_and_deferred_values() -> None:
+    expected = {
+        "action": "run",
+        "backend": "docker",
+        "command": ["sh", "-c", "ignored for run"],
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306, "protocol": "tcp"}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+        "restart_policy": "no",
+    }
+    actual = {
+        "action": "run",
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+    }
+
+    assert _plan_args_match("manage_container", expected, actual)
+    assert _plan_args_match(
+        "manage_authorized_keys",
+        {"action": "add", "username": "alice", "public_key_from_file": "/tmp/key.pub"},
+        {"action": "add", "username": "alice", "public_key": "ssh-ed25519 AAAA test"},
+    )
+
+
+def test_frozen_plan_runtime_arg_binding_resolves_previous_step_data() -> None:
+    task = TaskRun(
+        task_id="task_bind",
+        goal="create and delete cron",
+        requires_environment_feedback=True,
+        mode="plan",
+        steps=[
+            TaskStepRecord(
+                step_id="create_cron",
+                tool="manage_cron",
+                args={"action": "create"},
+                status="completed",
+                result_data={"job_id": "job_1234abcd"},
+            ),
+            TaskStepRecord(
+                step_id="delete_cron",
+                tool="manage_cron",
+                args={"action": "delete", "job_id": "{{create_cron.data.job_id}}"},
+            ),
+        ],
+    )
+
+    resolved, error = _resolve_runtime_args_for_tool(
+        task,
+        "manage_cron",
+        {"action": "delete", "job_id": "{{create_cron.data.job_id}}"},
+    )
+
+    assert error is None
+    assert resolved == {"action": "delete", "job_id": "job_1234abcd"}
+
+
+def test_container_exec_verification_only_accepts_read_only_checks() -> None:
+    select_args = {
+        "action": "exec",
+        "name": "mysql",
+        "command": ["mysql", "-uroot", "-e", "SELECT COUNT(*) FROM app.users"],
+    }
+    create_args = {
+        "action": "exec",
+        "name": "mysql",
+        "command": ["mysql", "-uroot", "-e", "CREATE TABLE app.users(id int)"],
+    }
+
+    assert _is_verification_tool("manage_container", select_args)
+    assert not _is_mutating_tool("manage_container", select_args)
+    assert not _is_verification_tool("manage_container", create_args)
+    assert _is_mutating_tool("manage_container", create_args)
+
+
+def test_verification_judge_rejects_generic_observation_after_mutation() -> None:
+    task = TaskRun(
+        task_id="task_verify",
+        goal="create a user",
+        requires_environment_feedback=True,
+        changed_state=True,
+        acted=True,
+        last_action_step=2,
+        verification_candidates=[
+            {
+                "tool": "get_system_info",
+                "action_key": "get_system_info",
+                "step": 3,
+                "after_last_action": True,
+                "data": {"hostname": "testbox"},
+            }
+        ],
+    )
+
+    judgement = VerificationJudge().judge(task)
+
+    assert judgement["sufficient"] is False
+    assert "too generic" in judgement["missing_requirements"][0]
 
 
 def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
@@ -479,6 +672,167 @@ def test_frozen_plan_allows_only_dependency_ready_steps(tmp_path: Path) -> None:
     verify_step = [step for step in payload["steps"] if step["step_id"] == "verify"][0]
     assert verify_step["depends_on"] == ["observe"]
     assert verify_step["finding_id"] == "finding-1"
+
+
+def test_frozen_plan_cron_create_delete_uses_bound_job_id(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    calls = []
+
+    def manage_cron(executor, action: str, scope: str = "user", schedule=None, job_target=None, job_id=None):
+        calls.append({"action": action, "scope": scope, "job_id": job_id})
+        if action == "create":
+            return ToolResult(
+                success=True,
+                data={
+                    "job_id": "job_bound123",
+                    "scope": scope,
+                    "schedule": schedule,
+                    "job_target": job_target,
+                    "enabled": True,
+                },
+            )
+        if action == "list":
+            return ToolResult(success=True, data={"managed": {}})
+        if action == "delete":
+            return ToolResult(success=True, data={"job_id": job_id, "action": "delete"})
+        return ToolResult(success=False, error="bad action")
+
+    registry.register(
+        ToolDef(
+            name="manage_cron",
+            fn=manage_cron,
+            schema={
+                "name": "manage_cron",
+                "description": "Cron test tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "scope": {"type": "string"},
+                        "schedule": {"type": "string"},
+                        "job_id": {"type": "string"},
+                        "job_target": {"type": "object"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        )
+    )
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "create_cron",
+                            "tool": "manage_cron",
+                            "args": {
+                                "action": "create",
+                                "scope": "system",
+                                "schedule": "*/5 * * * *",
+                                "job_target": {"kind": "tool", "name": "get_system_info", "args": {}},
+                            },
+                        },
+                        {
+                            "step_id": "list_after_create",
+                            "tool": "manage_cron",
+                            "args": {"action": "list", "scope": "system"},
+                            "depends_on": ["create_cron"],
+                        },
+                        {
+                            "step_id": "delete_cron",
+                            "tool": "manage_cron",
+                            "args": {
+                                "action": "delete",
+                                "scope": "system",
+                                "job_id": "{{create_cron.data.job_id}}",
+                            },
+                            "depends_on": ["list_after_create"],
+                        },
+                        {
+                            "step_id": "list_after_delete",
+                            "tool": "manage_cron",
+                            "args": {"action": "list", "scope": "system"},
+                            "depends_on": ["delete_cron"],
+                        },
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+        [
+            _tool_use(
+                "manage_cron",
+                {
+                    "action": "create",
+                    "scope": "system",
+                    "schedule": "*/5 * * * *",
+                    "job_target": {"kind": "tool", "name": "get_system_info", "args": {}},
+                },
+                tool_id="create_1",
+            )
+        ],
+        [_tool_use("manage_cron", {"action": "list", "scope": "system"}, tool_id="list_1")],
+        [
+            _tool_use(
+                "manage_cron",
+                {"action": "delete", "scope": "system", "job_id": "{{create_cron.data.job_id}}"},
+                tool_id="delete_1",
+            )
+        ],
+        [_tool_use("manage_cron", {"action": "list", "scope": "system"}, tool_id="list_2")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Cron lifecycle completed.",
+                "evidence": ["created job_bound123", "deleted job_bound123", "list verified"],
+                "verification": "manage_cron:list ran after delete.",
+                "changed_state": True,
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, registry)
+    controller.confirm_callback = lambda req: True
+
+    reply = controller.run_turn("create then delete cron")
+
+    assert "Cron lifecycle completed" in reply
+    assert calls[2] == {"action": "delete", "scope": "system", "job_id": "job_bound123"}
+    payload = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    create_step = [step for step in payload["steps"] if step["step_id"] == "create_cron"][0]
+    assert create_step["result_data"]["job_id"] == "job_bound123"
+
+
+def test_react_runner_stops_repeated_no_progress_plan_deviations(tmp_path: Path) -> None:
+    responses = [
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "mutate",
+                            "tool": "mutate_marker",
+                            "args": {},
+                        }
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+    ]
+    responses.extend([[_tool_use("get_system_info", {}, tool_id=f"wrong_{index}")] for index in range(10)])
+    llm = FakeLLM(responses)
+    controller, events = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("run a frozen mutation plan")
+
+    assert "Task blocked after repeated no-progress" in reply
+    assert len(llm.calls) < len(responses)
+    assert [event.stage for event in events].count("correction") >= 8
 
 
 def test_failed_mutation_does_not_satisfy_completion_gate(tmp_path: Path) -> None:

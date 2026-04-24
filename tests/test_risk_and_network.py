@@ -61,6 +61,13 @@ def test_check_endpoint_blocks_redirects_into_private_network() -> None:
     assert counters["private_probe_subnets"]["10.0.0.0/24"] == 1
 
 
+def test_container_exec_requires_non_empty_argv() -> None:
+    decision = classify("manage_container", {"action": "exec", "name": "db", "command": []}, env_profile={})
+
+    assert decision.level == "BLOCK"
+    assert decision.rule_ids == ["B032"]
+
+
 def test_list_processes_uses_portable_ps_sort_keys() -> None:
     executor = RecordingExecutor(
         handler=lambda cmd, timeout: (

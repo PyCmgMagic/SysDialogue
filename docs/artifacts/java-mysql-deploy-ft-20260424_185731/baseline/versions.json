@@ -1,0 +1,9 @@
+{
+  "run_id": "20260424_185731",
+  "commit": "71a7f35128519b44e58532c1475345bce1356dac",
+  "branch": "codex/remote-verify-functional-test",
+  "server": "202.194.15.199:10022",
+  "model": "Ali-dashscope/Qwen3.5-Flash",
+  "base_url": "https://xplt.sdu.edu.cn:4000",
+  "remote_capabilities_log": "docs\\artifacts\\java-mysql-deploy-ft-20260424_185731\\baseline\\remote-capabilities.log"
+}

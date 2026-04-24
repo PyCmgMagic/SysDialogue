@@ -536,10 +536,10 @@ SCHEMA_MANAGE_MOUNT = _schema(
 
 SCHEMA_MANAGE_CONTAINER = _schema(
     "manage_container",
-    "容器管理（docker/podman）。不提供 privileged/host network/exec。敏感 bind mount BLOCK（B022）。",
+    "容器管理（docker/podman）。不提供 privileged/host network。敏感 bind mount BLOCK（B022）。exec 仅接受 argv 数组并需确认。",
     {
         "backend": {"type": "string", "enum": ["auto", "docker", "podman"], "default": "auto"},
-        "action": {"type": "string", "enum": ["list", "status", "pull", "start", "stop", "restart", "logs", "inspect", "run", "remove"]},
+        "action": {"type": "string", "enum": ["list", "status", "pull", "start", "stop", "restart", "logs", "inspect", "run", "remove", "exec"]},
         "name": {"type": "string"},
         "image": {"type": "string"},
         "ports": {
@@ -568,6 +568,11 @@ SCHEMA_MANAGE_CONTAINER = _schema(
             },
         },
         "restart_policy": {"type": "string", "enum": ["no", "always", "unless-stopped"], "default": "no"},
+        "command": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "exec 动作的容器内 argv，例如 [\"mysql\", \"-uroot\", \"-e\", \"SELECT 1\"]",
+        },
         "lines": {"type": "integer", "minimum": 10, "maximum": 1000, "default": 50},
     },
     required=["action"],
@@ -581,6 +586,7 @@ SCHEMA_MANAGE_AUTHORIZED_KEYS = _schema(
         "action": {"type": "string", "enum": ["list", "add", "remove"]},
         "username": {"type": "string", "minLength": 1},
         "public_key": {"type": "string"},
+        "public_key_path": {"type": "string", "description": "add 动作可从目标主机文件读取公钥；只读取第一行"},
         "fingerprint": {"type": "string"},
     },
     required=["action", "username"],

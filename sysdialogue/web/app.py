@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
@@ -65,6 +65,22 @@ def create_web_app(config) -> FastAPI:
     async def get_memory(session_id: str):
         session = store.get(session_id)
         return {"records": [record.__dict__ for record in session.runtime.memory_manager.list_records(limit=100)]}
+
+    @app.get("/api/session/{session_id}/export/audit")
+    async def export_audit(session_id: str):
+        session = store.get(session_id)
+        path = session.export_audit()
+        if path is None:
+            raise HTTPException(status_code=404, detail="audit session not found")
+        return FileResponse(path, filename=path.name, media_type="application/jsonl")
+
+    @app.get("/api/session/{session_id}/export/replay")
+    async def export_replay(session_id: str):
+        session = store.get(session_id)
+        path = session.export_replay()
+        if path is None:
+            raise HTTPException(status_code=404, detail="audit session not found")
+        return FileResponse(path, filename=path.name, media_type="application/zip")
 
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):

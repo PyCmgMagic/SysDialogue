@@ -1,0 +1,7 @@
+$ rm -rf '/tmp/sdft_20260424_185731_java_mysql'; mkdir -p '/tmp/sdft_20260424_185731_java_mysql/source'
+exit=0
+
+STDOUT:
+
+
+STDERR:

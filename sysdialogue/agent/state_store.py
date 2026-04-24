@@ -14,6 +14,7 @@ from typing import Any, Callable
 from filelock import FileLock
 
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 
 
 def _now_iso() -> str:
@@ -116,6 +117,8 @@ class TaskStepRecord:
     blocking: bool = False
     resolution: str = ""
     source_ref: str = ""
+    result_data: dict[str, Any] = field(default_factory=dict)
+    result_summary: str = ""
     updated_at: str = field(default_factory=_now_iso)
 
 
@@ -271,10 +274,10 @@ class SessionStore:
             record.status = status
             if user_message:
                 record.user_messages.append(_truncate(user_message, 500))
-                record.entries.append({"role": "user", "text": user_message})
+                record.entries.append({"role": "user", "text": sanitize_text(user_message, limit=2000)})
             if final_reply:
-                record.final_replies.append(_truncate(final_reply, 2000))
-                record.entries.append({"role": entry_role, "text": final_reply})
+                record.final_replies.append(_truncate(sanitize_text(final_reply, limit=2000), 2000))
+                record.entries.append({"role": entry_role, "text": sanitize_text(final_reply, limit=4000)})
             record.entries = record.entries[-200:]
             record.context = _json_safe_dict(manager.context)
             record.history = _sanitize_history(manager.history)
@@ -299,14 +302,14 @@ class SessionStore:
     ) -> SessionRecord:
         def mutate(record: SessionRecord) -> None:
             record.surface = surface or record.surface
-            record.entries.append({"role": role, "text": text})
+            record.entries.append({"role": role, "text": sanitize_text(text, limit=4000)})
             record.entries = record.entries[-200:]
             if role == "user" and text.strip():
-                record.user_messages.append(_truncate(text, 500))
+                record.user_messages.append(_truncate(sanitize_text(text, limit=500), 500))
                 if not record.title or record.title == "Untitled conversation":
                     record.title = _title_from_message(text)
             if role in {"assistant", "error"} and text.strip():
-                record.final_replies.append(_truncate(text, 2000))
+                record.final_replies.append(_truncate(sanitize_text(text, limit=2000), 2000))
             if technical_details:
                 record.technical_details = technical_details
 
@@ -328,8 +331,8 @@ class SessionStore:
             if active_task_id is not None:
                 record.active_task_id = active_task_id
             if clean:
-                record.user_messages.append(_truncate(clean, 500))
-                record.entries.append({"role": "user", "text": clean})
+                record.user_messages.append(_truncate(sanitize_text(clean, limit=500), 500))
+                record.entries.append({"role": "user", "text": sanitize_text(clean, limit=2000)})
                 record.entries = record.entries[-200:]
                 if not record.title or record.title == "Untitled conversation":
                     record.title = _title_from_message(clean)
@@ -801,7 +804,7 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
 
 
 def _message_content(role: str, text: str) -> str | list[dict[str, str]]:
-    text = _truncate(text, 1200)
+    text = _truncate(sanitize_text(text, limit=1200), 1200)
     if role == "assistant":
         return [{"type": "text", "text": text}]
     return text
@@ -828,12 +831,13 @@ def _json_safe_dict(value: dict[str, Any]) -> dict[str, Any]:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
+        return sanitize_text(value, limit=12000) if isinstance(value, str) else value
     if isinstance(value, list):
         return [_json_safe(item) for item in value[:50]]
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in list(value.items())[:50]}
-    return str(value)
+        safe = sanitize_value({str(key): item for key, item in list(value.items())[:50]})
+        return safe if isinstance(safe, dict) else {}
+    return sanitize_text(str(value), limit=12000)
 
 
 def _title_from_message(message: str) -> str:
