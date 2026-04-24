@@ -41,6 +41,17 @@ All user inputs must close through the ReAct protocol:
 finish_task requirements: status and summary are required. completed operational tasks need evidence. need_info, blocked, and failed need next_steps or no_action_reason."""
 
 
+_VERIFICATION_GUIDANCE = """[Verification Guidance]
+After any mutation, run a targeted read-only verification tool before finish_task:
+- files/config: read_file, stat_path, search_file_content, or validate_config.
+- service: manage_service(status), then read_log or check_endpoint when applicable.
+- cron: manage_cron(list) and verify the target job_id/state.
+- SSH keys: manage_authorized_keys(list) and verify the expected user/fingerprint.
+- containers: manage_container(status/inspect/logs), or manage_container(exec) only for read-only checks such as SELECT/SHOW, mysqladmin ping, redis-cli PING, or HTTP health checks.
+- packages, firewall, sysctl, hosts, mounts, archives: use the corresponding list/get/status tool.
+The verification must happen after the last mutation and must refer to the object that was changed."""
+
+
 _SAFETY_SUMMARY = """[Safety Summary]
 - BLOCK: refuse directly and do not bypass. Examples include reading /etc/shadow, deleting root, or stopping sshd in remote mode.
 - WARN-HIGH: show plan, impact, and rollback information; execute only after user confirmation.
@@ -101,6 +112,7 @@ def build_system_prompt(
         [
             _REACT_PROTOCOL,
             _EXECUTION_MODE_RULES,
+            _VERIFICATION_GUIDANCE,
             _SAFETY_SUMMARY,
             _render_tools(registry),
         ]

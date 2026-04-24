@@ -58,19 +58,39 @@ READ_ONLY_TOOLS = {
     "manage_sysctl:get",
 }
 
-VERIFICATION_TOOLS = {
+VERIFICATION_CANDIDATE_TOOLS = {
     "validate_config",
     "check_endpoint",
     "get_port_status",
     "read_log",
+    "read_file",
+    "stat_path",
+    "list_directory",
+    "search_file_content",
+    "get_disk_usage",
+    "list_processes",
+    "get_network_info",
+    "resolve_dns",
     "get_system_info",
     "get_resource_stats",
     "manage_service:status",
+    "manage_cron:list",
     "manage_container:status",
     "manage_container:logs",
     "manage_container:inspect",
-    "manage_container:exec",
+    "manage_authorized_keys:list",
+    "manage_package:list",
+    "manage_package:search",
+    "manage_firewall:list",
+    "manage_sysctl:get",
+    "manage_sysctl:list",
+    "get_set_system_config:get",
+    "manage_hosts_entries:list",
+    "manage_mount:list",
+    "backup_path:list",
+    "manage_archive:list",
 }
+VERIFICATION_TOOLS = VERIFICATION_CANDIDATE_TOOLS
 
 READ_ONLY_WORKFLOWS = {"security_audit", "disk_cleanup"}
 WORKFLOWS_WITH_INTERNAL_VERIFICATION = {
@@ -115,6 +135,8 @@ class TaskRun:
     last_action_step: int = 0
     last_verification_step: int = 0
     failed_mutations: list[str] = field(default_factory=list)
+    verification_candidates: list[dict[str, Any]] = field(default_factory=list)
+    verification_judgement: dict[str, Any] = field(default_factory=dict)
     events: list[TaskEvent] = field(default_factory=list)
     final_status: str = ""
     final_reply: str = ""
@@ -122,6 +144,8 @@ class TaskRun:
     iteration_budget: int = 0
     iteration_limit: int = 0
     technical_details: str = ""
+    no_progress_turns: int = 0
+    progress_signature: str = ""
 
 
 class ReActRunner:
@@ -324,6 +348,17 @@ class ReActRunner:
                         final_ready = not result_block.get("is_error")
                         continue
 
+                    resolved_args, resolve_error = _resolve_runtime_args_for_tool(task, name, args)
+                    if resolve_error:
+                        result_blocks.append(_tool_result(tool_use_id, resolve_error, is_error=True))
+                        self._emit_correction(
+                            task,
+                            "Planned step argument binding failed.",
+                            {"errors": [resolve_error]},
+                        )
+                        continue
+                    args = resolved_args
+
                     plan_error = self._guard_plan_step(task, name, args)
                     if plan_error:
                         result_blocks.append(_tool_result(tool_use_id, plan_error, is_error=True))
@@ -350,6 +385,23 @@ class ReActRunner:
                     return task.final_reply
 
                 if final_ready:
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                if self._detect_no_progress(task):
+                    task.final_status = "blocked"
+                    task.final_reply = _blocked_no_progress_reply(task)
+                    self._emit(
+                        task,
+                        "task_failed",
+                        "ReAct task stopped after repeated no-progress turns.",
+                        {
+                            "status": "blocked",
+                            "no_progress_turns": task.no_progress_turns,
+                            "remaining_steps": _remaining_step_ids(task.steps),
+                            "verification_judgement": task.verification_judgement,
+                        },
+                    )
                     self._commit_final(messages, task)
                     return task.final_reply
 
@@ -522,11 +574,19 @@ class ReActRunner:
             return None
         executable_steps = _executable_plan_steps(task.steps)
         if not executable_steps:
+            remaining = _remaining_step_ids(task.steps)
+            if remaining:
+                failed = [step.step_id for step in task.steps if step.status == "failed"]
+                detail = f" Failed steps: {', '.join(failed)}." if failed else ""
+                return (
+                    "No frozen plan step is currently executable. "
+                    f"Remaining steps: {', '.join(remaining)}.{detail}"
+                )
             return "All frozen plan steps are already completed. Finish with finish_task or create a new plan."
         matching = [
             step
             for step in executable_steps
-            if step.tool == name and _plan_args_match(step.tool, step.args, args)
+            if step.tool == name and _plan_step_args_match(task.steps, step, args)
         ]
         if not matching:
             expected = ", ".join(f"{step.step_id}:{step.tool}" for step in executable_steps)
@@ -539,6 +599,15 @@ class ReActRunner:
         next_step.updated_at = datetime.now(timezone.utc).isoformat()
         self._persist_task_state(task)
         return None
+
+    def _detect_no_progress(self, task: TaskRun) -> bool:
+        signature = _progress_signature(task)
+        if signature == task.progress_signature:
+            task.no_progress_turns += 1
+        else:
+            task.progress_signature = signature
+            task.no_progress_turns = 0
+        return task.no_progress_turns >= 8
 
     def _handle_finish_task(self, task: TaskRun, args: dict, tool_use_id: str) -> dict:
         errors = _validate_finish_args(task, args)
@@ -579,6 +648,7 @@ class ReActRunner:
         task.tool_steps += 1
         success = not result_block.get("is_error")
         payload = _parse_tool_result_json(result_block)
+        task._last_tool_payload = payload
 
         if name == META_SET_EXECUTION_MODE:
             mode = args.get("mode")
@@ -597,12 +667,26 @@ class ReActRunner:
                     task.acted = True
                     task.changed_state = True
                     task.last_action_step = task.tool_steps
-                    if workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
-                        task.verified = True
-                        task.last_verification_step = task.tool_steps + 1
+                if success and workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
+                    task.verified = True
+                    task.last_verification_step = task.tool_steps + 1
+                    task.verification_judgement = {
+                        "sufficient": True,
+                        "confidence": "high",
+                        "covered_requirements": [f"{workflow_name} internal verification"],
+                        "missing_requirements": [],
+                        "recommended_next_verification": [],
+                    }
                 if success and workflow_name in READ_ONLY_WORKFLOWS:
                     task.verified = True
                     task.last_verification_step = task.tool_steps
+                    task.verification_judgement = {
+                        "sufficient": True,
+                        "confidence": "medium",
+                        "covered_requirements": [f"{workflow_name} read-only evidence"],
+                        "missing_requirements": [],
+                        "recommended_next_verification": [],
+                    }
                 if self.controller.task_store is not None:
                     record = self.controller.task_store.load(task.task_id)
                     if record is not None:
@@ -635,6 +719,7 @@ class ReActRunner:
             else:
                 task.current_phase = "observe"
             self._update_plan_step(task, name, args, success=True)
+            self._record_verification_candidate(task, name, args, payload)
             self._persist_task_state(task)
             return
 
@@ -657,9 +742,8 @@ class ReActRunner:
             task.current_phase = "observe"
 
         if _is_verification_tool(name, args):
-            task.verified = True
-            task.last_verification_step = task.tool_steps
             task.current_phase = "verify"
+            self._record_verification_candidate(task, name, args, payload)
 
         task.observed = True
         self._update_plan_step(task, name, args, success=True)
@@ -673,9 +757,37 @@ class ReActRunner:
             return
         next_step.status = "completed" if success else "failed"
         next_step.error = _truncate(str(error), 600) if error else ""
+        if success:
+            payload = getattr(task, "_last_tool_payload", None)
+            if isinstance(payload, dict):
+                next_step.result_data = _safe_result_data(payload.get("data", payload))
+                next_step.result_summary = _result_summary(payload)
         next_step.updated_at = datetime.now(timezone.utc).isoformat()
         if success:
             task.current_phase = "act"
+
+    def _record_verification_candidate(self, task: TaskRun, name: str, args: dict, payload: dict) -> None:
+        candidate = {
+            "tool": name,
+            "action_key": _tool_action_key(name, args),
+            "args": _safe_result_data(args),
+            "data": _safe_result_data(payload.get("data", payload)),
+            "step": task.tool_steps,
+            "after_last_action": task.tool_steps > task.last_action_step,
+        }
+        task.verification_candidates.append(candidate)
+        task.verification_candidates = task.verification_candidates[-20:]
+        judgement = VerificationJudge().judge(task)
+        task.verification_judgement = judgement
+        if judgement.get("sufficient"):
+            task.verified = True
+            task.last_verification_step = task.tool_steps
+        self._emit(
+            task,
+            "verification",
+            "Verification evidence accepted." if judgement.get("sufficient") else "Verification evidence recorded.",
+            judgement,
+        )
 
     def _emit_tool_started(self, task: TaskRun, name: str, args: dict) -> None:
         if name == META_SET_EXECUTION_MODE and args.get("mode") == "workflow":
@@ -829,11 +941,114 @@ def _next_step_for_tool(steps: list[TaskStepRecord], name: str, args: dict) -> T
         if step.status not in {"pending", "running"}:
             continue
         if step.tool != name:
-            return None
-        if not _plan_args_match(step.tool, step.args, args):
-            return None
-        return step
+            continue
+        if _plan_step_args_match(steps, step, args):
+            return step
     return None
+
+
+def _plan_step_args_match(steps: list[TaskStepRecord], step: TaskStepRecord, actual: dict) -> bool:
+    expected, unresolved = _resolve_value(step.args, steps)
+    if unresolved:
+        return False
+    return _plan_args_match(step.tool, expected if isinstance(expected, dict) else step.args, actual)
+
+
+def _resolve_runtime_args_for_tool(task: TaskRun, name: str, args: Any) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(args, dict):
+        return {}, f"{name} arguments must be an object."
+    if task.mode != "plan":
+        return args, None
+    resolved, unresolved = _resolve_value(args, task.steps)
+    if unresolved:
+        return {}, (
+            "Frozen plan argument binding failed. "
+            f"Unresolved placeholder(s): {', '.join(sorted(unresolved))}."
+        )
+    return resolved if isinstance(resolved, dict) else {}, None
+
+
+_PLACEHOLDER_RE = re.compile(r"^\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}$")
+_SENSITIVE_KEY_RE = re.compile(r"(password|passwd|secret|token|api[_-]?key|private[_-]?key)", re.I)
+_UNRESOLVED = object()
+
+
+def _resolve_value(value: Any, steps: list[TaskStepRecord]) -> tuple[Any, set[str]]:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        unresolved: set[str] = set()
+        for key, item in value.items():
+            resolved, missing = _resolve_value(item, steps)
+            out[key] = resolved
+            unresolved.update(missing)
+        return out, unresolved
+    if isinstance(value, list):
+        out_list: list[Any] = []
+        unresolved: set[str] = set()
+        for item in value:
+            resolved, missing = _resolve_value(item, steps)
+            out_list.append(resolved)
+            unresolved.update(missing)
+        return out_list, unresolved
+    if isinstance(value, str):
+        match = _PLACEHOLDER_RE.match(value.strip())
+        if not match:
+            return value, set()
+        expr = match.group(1)
+        resolved = _lookup_step_expr(expr, steps)
+        if resolved is _UNRESOLVED:
+            return value, {expr}
+        return resolved, set()
+    return value, set()
+
+
+def _lookup_step_expr(expr: str, steps: list[TaskStepRecord]) -> Any:
+    parts = [part for part in expr.split(".") if part]
+    if len(parts) < 2:
+        return _UNRESOLVED
+    step = next((item for item in steps if item.step_id == parts[0]), None)
+    if step is None:
+        return _UNRESOLVED
+    if parts[1] == "args":
+        current: Any = step.args
+        rest = parts[2:]
+    elif parts[1] in {"data", "result"}:
+        current = step.result_data
+        rest = parts[2:]
+        if parts[1] == "result" and rest and rest[0] == "data":
+            rest = rest[1:]
+    else:
+        return _UNRESOLVED
+    for part in rest:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            return _UNRESOLVED
+    return current
+
+
+def _safe_result_data(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return "<truncated>"
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            safe[key_str] = "<redacted>" if _SENSITIVE_KEY_RE.search(key_str) else _safe_result_data(item, depth=depth + 1)
+        return safe
+    if isinstance(value, list):
+        return [_safe_result_data(item, depth=depth + 1) for item in value[:40]]
+    if isinstance(value, str):
+        return _truncate(value, 2000)
+    return value
+
+
+def _result_summary(payload: dict) -> str:
+    if "data" in payload:
+        return _truncate(_normalized_json(_safe_result_data(payload["data"])), 600)
+    return _truncate(_normalized_json(_safe_result_data(payload)), 600)
 
 
 def _normalized_json(value: Any) -> str:
@@ -885,6 +1100,8 @@ def _has_deferred_value(value: Any) -> bool:
         return any(str(k).endswith("_from_file") or _has_deferred_value(v) for k, v in value.items())
     if isinstance(value, list):
         return any(_has_deferred_value(v) for v in value)
+    if isinstance(value, str):
+        return bool(_PLACEHOLDER_RE.match(value.strip()))
     return False
 
 
@@ -901,6 +1118,124 @@ def _dict_subset(expected: Any, actual: Any) -> bool:
             _dict_subset(e, a) for e, a in zip(expected, actual)
         )
     return expected == actual
+
+
+class VerificationJudge:
+    """Rule-backed evidence judge for post-mutation completion gates.
+
+    The judge intentionally only considers real tool evidence. It is structured
+    so an LLM sufficiency pass can be inserted later without weakening the
+    hard rule that evidence must exist after the last mutation.
+    """
+
+    STRONG_ACTION_KEYS = {
+        "validate_config",
+        "check_endpoint",
+        "get_port_status",
+        "read_log",
+        "read_file",
+        "stat_path",
+        "list_directory",
+        "search_file_content",
+        "manage_service:status",
+        "manage_cron:list",
+        "manage_container:status",
+        "manage_container:logs",
+        "manage_container:inspect",
+        "manage_authorized_keys:list",
+        "manage_package:list",
+        "manage_package:search",
+        "manage_firewall:list",
+        "manage_sysctl:get",
+        "manage_sysctl:list",
+        "get_set_system_config:get",
+        "manage_hosts_entries:list",
+        "manage_mount:list",
+        "backup_path:list",
+        "manage_archive:list",
+    }
+
+    def judge(self, task: TaskRun) -> dict[str, Any]:
+        if not task.verification_candidates:
+            return self._missing("no post-mutation tool evidence")
+        if not task.changed_state:
+            latest = task.verification_candidates[-1]
+            return {
+                "sufficient": True,
+                "covered_requirements": [f"{latest['action_key']} returned evidence"],
+                "missing_requirements": [],
+                "confidence": "medium",
+                "recommended_next_verification": [],
+            }
+
+        after_action = [
+            item for item in task.verification_candidates
+            if int(item.get("step") or 0) > int(task.last_action_step or 0)
+        ]
+        if not after_action:
+            return self._missing("verification must run after the last mutation")
+
+        strong = [
+            item for item in after_action
+            if item.get("action_key") in self.STRONG_ACTION_KEYS
+            or (
+                item.get("action_key") == "manage_container:exec"
+                and _is_read_only_container_exec_args(item.get("args") or {})
+            )
+        ]
+        if not strong:
+            return self._missing(
+                "post-mutation evidence is too generic; run a domain-specific status/list/read/query check"
+            )
+        return {
+            "sufficient": True,
+            "covered_requirements": [
+                f"{item.get('action_key')} after mutation" for item in strong[-3:]
+            ],
+            "missing_requirements": [],
+            "confidence": "high",
+            "recommended_next_verification": [],
+        }
+
+    @staticmethod
+    def _missing(reason: str) -> dict[str, Any]:
+        return {
+            "sufficient": False,
+            "covered_requirements": [],
+            "missing_requirements": [reason],
+            "confidence": "low",
+            "recommended_next_verification": ["run a targeted read-only verification tool"],
+        }
+
+
+def _progress_signature(task: TaskRun) -> str:
+    completed = sorted(step.step_id for step in task.steps if step.status in {"completed", "skipped", "rolled_back"})
+    failed = sorted(step.step_id for step in task.steps if step.status == "failed")
+    return _normalized_json(
+        {
+            "tool_steps": task.tool_steps,
+            "completed": completed,
+            "failed": failed,
+            "verified": task.verified,
+            "verification_candidates": len(task.verification_candidates),
+        }
+    )
+
+
+def _remaining_step_ids(steps: list[TaskStepRecord]) -> list[str]:
+    return [step.step_id for step in steps if step.status not in {"completed", "skipped", "rolled_back"}]
+
+
+def _blocked_no_progress_reply(task: TaskRun) -> str:
+    remaining = ", ".join(_remaining_step_ids(task.steps)) or "none"
+    missing = ", ".join(task.verification_judgement.get("missing_requirements") or [])
+    if not missing:
+        missing = "no tool or plan progress was made in repeated turns"
+    return (
+        "Task blocked after repeated no-progress ReAct turns.\n"
+        f"Remaining plan steps: {remaining}.\n"
+        f"Blocking reason: {missing}."
+    )
 
 
 def _final_task_store_status(status: str) -> str:
@@ -1209,6 +1544,8 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _is_mutating_tool(name: str, args: dict) -> bool:
+    if name == "manage_container" and _tool_action_key(name, args) == "manage_container:exec":
+        return not _is_read_only_container_exec_args(args)
     key = _tool_action_key(name, args)
     if key in READ_ONLY_TOOLS:
         return False
@@ -1219,7 +1556,33 @@ def _is_mutating_tool(name: str, args: dict) -> bool:
 
 
 def _is_verification_tool(name: str, args: dict) -> bool:
-    return name in VERIFICATION_TOOLS or _tool_action_key(name, args) in VERIFICATION_TOOLS
+    if name == "manage_container" and _tool_action_key(name, args) == "manage_container:exec":
+        return _is_read_only_container_exec_args(args)
+    return name in VERIFICATION_CANDIDATE_TOOLS or _tool_action_key(name, args) in VERIFICATION_CANDIDATE_TOOLS
+
+
+def _is_read_only_container_exec_args(args: dict) -> bool:
+    if not isinstance(args, dict):
+        return False
+    command = args.get("command") or []
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        return False
+    text = " ".join(command).strip().lower()
+    if not text:
+        return False
+    write_markers = (
+        " create ", " alter ", " drop ", " insert ", " update ", " delete ", " truncate ",
+        " grant ", " revoke ", " replace ", " set password", " flush privileges",
+    )
+    padded = f" {text} "
+    if any(marker in padded for marker in write_markers):
+        return False
+    read_markers = (
+        " select ", " show ", " describe ", " desc ", " explain ",
+        "mysqladmin ping", " pg_isready", " redis-cli ping",
+        " curl ", " wget ", " nc ", " true",
+    )
+    return any(marker in padded for marker in read_markers)
 
 
 def _tool_action_key(name: str, args: dict) -> str:

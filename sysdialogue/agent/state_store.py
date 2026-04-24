@@ -116,6 +116,8 @@ class TaskStepRecord:
     blocking: bool = False
     resolution: str = ""
     source_ref: str = ""
+    result_data: dict[str, Any] = field(default_factory=dict)
+    result_summary: str = ""
     updated_at: str = field(default_factory=_now_iso)
 
 

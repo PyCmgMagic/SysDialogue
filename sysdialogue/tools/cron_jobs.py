@@ -185,7 +185,11 @@ def _modify(executor: SafeExecutor, job_id: str | None, action: str) -> ToolResu
             index[job_id] = original
             _safe_save_and_sync(executor, index, job_id)
             return ToolResult(success=False, error=f"计划任务 {action} 失败：{e}")
-    return ToolResult(success=True, data=f"{action} 成功：{job_id}", cmd_trace=[f"cron {action} {job_id}"])
+    return ToolResult(
+        success=True,
+        data={"job_id": job_id, "action": action, "scope": scope, "status": "success"},
+        cmd_trace=[f"cron {action} {job_id}"],
+    )
 
 
 def _load_index_for_job(executor: SafeExecutor, job_id: str | None) -> tuple[str, dict] | None:

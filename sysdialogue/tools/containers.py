@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from sysdialogue.runtime.secure_runner import SafeExecutor
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.security import path_policies as pp
@@ -73,7 +75,17 @@ def manage_container(
 
     timeout = 120 if action in ("pull", "run") else 30
     out, code = executor.run(cmd, timeout=timeout)
-    return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", cmd_trace=[" ".join(cmd)])
+    data = out
+    if action == "exec":
+        data = {
+            "container": name,
+            "command": list(command or []),
+            "exit_code": code,
+            "stdout": out,
+            "stderr": "",
+            "verification_candidate": _is_read_only_exec_command(command or []),
+        }
+    return ToolResult(success=(code == 0), data=data, error=out if code != 0 else "", exit_code=code, cmd_trace=[" ".join(cmd)])
 
 
 def _resolve_backend(backend: str, env_profile: dict | None) -> str | None:
@@ -116,3 +128,18 @@ def _build_run_cmd(be, name, image, ports, env_vars, volumes, restart_policy) ->
             cmd += ["-v", str(vol)]
     cmd.append(image)
     return cmd
+
+
+def _is_read_only_exec_command(command: list[str]) -> bool:
+    text = " ".join(command).strip().lower()
+    if not text:
+        return False
+    if re.search(r"\b(create|alter|drop|insert|update|delete|truncate|grant|revoke|replace)\b", text):
+        return False
+    return bool(
+        re.search(r"\b(select|show|describe|desc|explain)\b", text)
+        or "mysqladmin ping" in text
+        or "pg_isready" in text
+        or "redis-cli ping" in text
+        or text.startswith(("curl ", "wget ", "nc "))
+    )
