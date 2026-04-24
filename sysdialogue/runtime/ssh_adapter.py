@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import socket
 from dataclasses import dataclass
 
 try:
@@ -81,15 +82,23 @@ class RemoteExecutor(SafeExecutor):
             self.connect()
         # 构造单条命令字符串（list→shell-quoted 字符串）
         cmd_str = " ".join(shlex.quote(c) for c in cmd)
-        _, stdout_f, stderr_f = self._client.exec_command(  # type: ignore[union-attr]
-            cmd_str, timeout=timeout, get_pty=False
-        )
-        stdout_bytes = stdout_f.read(MAX_OUTPUT_BYTES + 1)
-        stderr_bytes = stderr_f.read(MAX_OUTPUT_BYTES)
-        exit_code = stdout_f.channel.recv_exit_status()
-        truncated = len(stdout_bytes) > MAX_OUTPUT_BYTES
+        try:
+            _, stdout_f, stderr_f = self._client.exec_command(  # type: ignore[union-attr]
+                cmd_str, timeout=timeout, get_pty=False
+            )
+            stdout_bytes = stdout_f.read(MAX_OUTPUT_BYTES + 1)
+            stderr_bytes = stderr_f.read(MAX_OUTPUT_BYTES + 1)
+            exit_code = stdout_f.channel.recv_exit_status()
+        except socket.timeout:
+            return RunResult(
+                stdout="",
+                stderr="Command timed out",
+                exit_code=124,
+                timed_out=True,
+            )
+        truncated = len(stdout_bytes) > MAX_OUTPUT_BYTES or len(stderr_bytes) > MAX_OUTPUT_BYTES
         stdout = stdout_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip()
-        stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+        stderr = stderr_bytes[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace").strip()
         return RunResult(
             stdout=stdout,
             stderr=stderr,

@@ -60,6 +60,20 @@ def test_load_config_clamps_max_iterations(monkeypatch, tmp_path) -> None:
     assert load_config().max_iterations == 160
 
 
+def test_load_config_reads_ssh_password_from_environment(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SYSDIALOGUE_SSH_PASSWORD", "secret")
+
+    config = load_config(
+        remote=True,
+        ssh={"host": "example.test", "port": 2222, "user": "alice", "key_file": ""},
+    )
+
+    assert config.remote_mode is True
+    assert config.ssh_host == "example.test"
+    assert config.ssh_password == "secret"
+
+
 def test_cli_help_no_longer_exposes_dev_mode() -> None:
     result = CliRunner().invoke(main, ["--help"])
     removed_option = "-" + "-dev"

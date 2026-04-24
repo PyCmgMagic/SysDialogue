@@ -13,7 +13,7 @@ def list_processes(
     filter_user: str | None = None,
 ) -> ToolResult:
     """列出进程，按 cpu/mem/pid 排序。"""
-    sort_flag = {"cpu": "-C", "mem": "-M", "pid": "-p"}.get(sort_by, "-C")
+    sort_flag = {"cpu": "-%cpu", "mem": "-%mem", "pid": "pid"}.get(sort_by, "-%cpu")
     cmd = ["ps", "aux", "--sort", sort_flag]
     out, code = executor.run(cmd, timeout=10)
     lines = out.splitlines()

@@ -69,6 +69,7 @@ def create_runtime(
             host=config.ssh_host,
             port=config.ssh_port,
             username=config.ssh_user,
+            password=config.ssh_password or None,
             key_filename=config.ssh_key_file or None,
         )
         executor = RemoteExecutor(ssh_cfg)

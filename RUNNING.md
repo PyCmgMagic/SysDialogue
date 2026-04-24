@@ -157,6 +157,13 @@ Run the control plane locally, but execute tools against a remote Linux host:
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519
 ```
 
+Password authentication is also supported through an environment variable:
+
+```powershell
+$env:SYSDIALOGUE_SSH_PASSWORD="your_ssh_password"
+python -m sysdialogue.app.cli --remote user@example.com:22
+```
+
 Web example:
 
 ```powershell
