@@ -2,8 +2,8 @@
 
 ## Baseline
 
-- Active design baseline: `framework/claudeplan7.md`
-- Historical reference only: `framework/claudeplan6.md`
+- Active design baseline: `framework/claudeplan8.md`
+- Historical reference only: `framework/claudeplan6.md` and `framework/claudeplan7.md`
 
 This guide explains how to install, configure, run, and verify the current SysDialogue runtime.
 
@@ -186,7 +186,11 @@ SysDialogue now persists shared state under `~/.sysdialogue/`:
 - `sessions/`
 - `tasks/`
 - `locks/`
-- `conversations/`
+- `policy.json`
+- `memory/`
+- `traces/`
+- `commands/`
+- `targets/`
 
 What this means:
 
@@ -194,8 +198,33 @@ What this means:
 - stale active tasks become `interrupted`
 - cross-process resource locks are durable leases
 - pending confirmations / input are not replayed after restart
+- permission policy, memory, and trace spans are shared across TUI / Web / Simple CLI
 
-## 9. ReAct Runtime Rules
+## 9. Slash Commands
+
+The interactive entrypoints support shared control-plane commands:
+
+```text
+/status
+/resume
+/locks
+/plan
+/audit
+/memory
+/tools
+/permissions
+/compact
+```
+
+Examples:
+
+```text
+/status
+/memory Prefer nginx changes during maintenance windows
+/compact nginx service is the current troubleshooting target
+```
+
+## 10. ReAct Runtime Rules
 
 Every task now runs through task-level ReAct.
 
@@ -207,7 +236,15 @@ Key rules:
 - mutation tasks must verify after change before `completed`
 - failed mutations do not count as successful changes
 
-## 10. DynTool
+## 11. Permission / Memory / Trace
+
+- `PermissionPolicy` supports `allow / ask / deny` rules in `~/.sysdialogue/policy.json`.
+- Static tools keep the existing RiskClassifier behavior unless a stricter policy rule matches.
+- DynTool commands still ask by default and cannot bypass `BLOCK`.
+- `MemoryManager` stores layered reusable facts under `~/.sysdialogue/memory/` and redacts obvious secrets.
+- `TraceStore` writes JSONL spans under `~/.sysdialogue/traces/` for observability and replay support.
+
+## 12. DynTool
 
 DynTool is always enabled, but still last-resort.
 
@@ -226,7 +263,7 @@ DynTool execution still passes through:
 - audit
 - ReAct completion gates
 
-## 11. Web / TUI / Simple CLI Differences
+## 13. Web / TUI / Simple CLI Differences
 
 ### TUI
 
@@ -239,6 +276,7 @@ DynTool execution still passes through:
 - browser console
 - persisted session/task state
 - friendly error summaries instead of raw tracebacks in the visible transcript
+- trace and memory endpoints for inspection
 
 ### Simple CLI
 
@@ -246,7 +284,7 @@ DynTool execution still passes through:
 - same safety/runtime semantics
 - writes to the same shared stores
 
-## 12. Validation Commands
+## 14. Validation Commands
 
 Recommended regression commands:
 
@@ -256,7 +294,7 @@ python -m compileall -q sysdialogue tests
 python -m sysdialogue.app.cli --verify
 ```
 
-## 13. Known Real-Host Validation Gaps
+## 15. Known Real-Host Validation Gaps
 
 Still worth validating on a real Linux machine:
 
@@ -266,7 +304,7 @@ Still worth validating on a real Linux machine:
 - system cron execution
 - lock contention between TUI / Web / scheduled jobs
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 ### Missing API config
 

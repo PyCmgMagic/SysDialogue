@@ -19,6 +19,10 @@ def test_web_template_understands_durable_task_statuses() -> None:
         assert status in template
 
     assert 'api("/resume", "POST"' in template
+    assert 'api("/command", "POST"' in template
+    assert "memory-summary" in template
+    assert "policy-summary" in template
+    assert "trace-summary" in template
     assert "!response.ok" in template
 
 

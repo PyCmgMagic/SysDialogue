@@ -83,6 +83,9 @@ class WebSession:
                 "active_task": _task_payload(task),
                 "resume_available": bool(task and task.status == "interrupted"),
                 "technical_details": record.technical_details,
+                "traces": [span.__dict__ for span in self.runtime.trace_store.list_spans(self.session_id, limit=50)],
+                "memory": [record.__dict__ for record in self.runtime.memory_manager.list_records(limit=20)],
+                "permission_policy": self.runtime.permission_policy.render_summary(),
             }
 
     def start_turn(self, text: str) -> None:
@@ -92,6 +95,15 @@ class WebSession:
             self.runtime.session_store.set_status(self.session_id, "running", surface="web")
             self._worker = threading.Thread(target=self._run_turn, args=(text,), daemon=True)
             self._worker.start()
+
+    def run_command(self, text: str) -> str:
+        with self._lock:
+            if self._worker and self._worker.is_alive():
+                raise RuntimeError("当前会话仍在执行中")
+            if not (text or "").strip().startswith("/"):
+                raise RuntimeError("command must start with /")
+            reply = self.runtime.controller.run_turn(text)
+            return reply
 
     def submit_turn_input(self, text: str) -> None:
         with self._lock:

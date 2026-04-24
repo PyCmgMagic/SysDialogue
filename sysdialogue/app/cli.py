@@ -44,7 +44,7 @@ def main(verify: bool, demo: bool, remote: str | None,
          model: str | None, env_file: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
          simple: bool, web_mode: bool, web_host: str, web_port: int) -> None:
-    """SysDialogue v6 — Linux 服务器运维智能代理。"""
+    """SysDialogue v8 — Linux 服务器运维智能代理。"""
 
     ssh_conf: dict = {}
     remote_mode = False

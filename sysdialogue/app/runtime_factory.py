@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from sysdialogue.agent.controller import AgentController, OpenAIChatClient
+from sysdialogue.agent.command_registry import CommandRegistry
+from sysdialogue.agent.memory import MemoryManager
+from sysdialogue.agent.permission_policy import PermissionPolicy
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.runtime.secure_runner import LocalExecutor, SafeExecutor
@@ -33,6 +37,10 @@ class RuntimeBundle:
     session_store: SessionStore
     task_store: TaskStore
     lock_store: LockStore
+    permission_policy: PermissionPolicy
+    memory_manager: MemoryManager
+    trace_store: TraceStore
+    command_registry: CommandRegistry
 
     def close(self) -> None:
         try:
@@ -78,6 +86,10 @@ def create_runtime(
     session_store = SessionStore()
     task_store = TaskStore()
     lock_store = LockStore()
+    permission_policy = PermissionPolicy()
+    memory_manager = MemoryManager()
+    trace_store = TraceStore()
+    command_registry = CommandRegistry()
 
     if llm_client is None:
         if require_api:
@@ -106,6 +118,10 @@ def create_runtime(
         session_store=session_store,
         task_store=task_store,
         lock_store=lock_store,
+        permission_policy=permission_policy,
+        memory_manager=memory_manager,
+        trace_store=trace_store,
+        command_registry=command_registry,
     )
     try:
         existing = session_store.load(controller.session_id)
@@ -126,4 +142,8 @@ def create_runtime(
         session_store=session_store,
         task_store=task_store,
         lock_store=lock_store,
+        permission_policy=permission_policy,
+        memory_manager=memory_manager,
+        trace_store=trace_store,
+        command_registry=command_registry,
     )

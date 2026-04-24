@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sysdialogue"
-version = "0.6.0"
-description = "SysDialogue — Linux 服务器运维智能代理 (v6)"
+version = "0.8.0"
+description = "SysDialogue — Linux 服务器运维智能代理 (v8)"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.59.0",

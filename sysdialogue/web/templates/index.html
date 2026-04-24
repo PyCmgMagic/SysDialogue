@@ -63,6 +63,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 #session-list::-webkit-scrollbar { width: 3px; }
 #session-list::-webkit-scrollbar-thumb { background: var(--border); }
 
+#side-panels {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.side-card {
+  border: 1px solid var(--border); border-radius: 7px;
+  background: #fff; padding: 8px;
+  font-size: 11px; color: var(--text2);
+}
+.side-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.side-body {
+  max-height: 72px; overflow: auto; white-space: pre-wrap;
+  font-family: var(--mono); line-height: 1.45;
+}
+
 .session-item {
   padding: 7px 10px; border-radius: 6px; cursor: pointer;
   color: var(--text2); font-size: 12px;
@@ -225,13 +241,27 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   <nav id="sidebar">
     <div id="sidebar-header">
       <div class="proj-name">SysDialogue</div>
-      <div class="proj-path">v6 · 运维智能代理</div>
+      <div class="proj-path">v8 · 运维智能代理</div>
     </div>
     <button id="btn-new" onclick="newSession()">
       <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v5.5h5.5a.75.75 0 0 1 0 1.5h-5.5v5.5a.75.75 0 0 1-1.5 0v-5.5H1.75a.75.75 0 0 1 0-1.5h5.5V1.75A.75.75 0 0 1 8 1Z"/></svg>
       新建会话
     </button>
     <div id="session-list"></div>
+    <div id="side-panels">
+      <div class="side-card">
+        <div class="side-title">Memory</div>
+        <div class="side-body" id="memory-summary">暂无记忆</div>
+      </div>
+      <div class="side-card">
+        <div class="side-title">Policy</div>
+        <div class="side-body" id="policy-summary">默认策略</div>
+      </div>
+      <div class="side-card">
+        <div class="side-title">Trace</div>
+        <div class="side-body" id="trace-summary">暂无 trace</div>
+      </div>
+    </div>
   </nav>
 
   <!-- main -->
@@ -320,6 +350,9 @@ const tagLabel = document.getElementById("tag-label");
 const tagCancel = document.getElementById("tag-cancel");
 const tagResume = document.getElementById("tag-resume");
 const statusDot = document.getElementById("status-dot");
+const memorySummary = document.getElementById("memory-summary");
+const policySummary = document.getElementById("policy-summary");
+const traceSummary = document.getElementById("trace-summary");
 
 async function api(path, method = "GET", body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -454,6 +487,16 @@ function renderState(s) {
     inputBanner.classList.remove("visible");
     input.placeholder = '随便问点什么… "重启 nginx 服务"';
   }
+
+  const memories = s.memory || [];
+  memorySummary.textContent = memories.length
+    ? memories.slice(0, 5).map(m => `${m.scope || "memory"}:${m.key || ""}`).join("\n")
+    : "暂无记忆";
+  policySummary.textContent = s.permission_policy || "默认策略";
+  const traces = s.traces || [];
+  traceSummary.textContent = traces.length
+    ? traces.slice(-5).map(t => `${t.span_type || "span"} ${t.name || ""} ${t.status || ""}`).join("\n")
+    : "暂无 trace";
 }
 
 function syncEntries(entries) {
@@ -497,7 +540,15 @@ async function sendMessage() {
   appendMsg("user", text);
   knownEntries++;
   try {
-    await api("/turn", "POST", { message: text });
+    if (text.startsWith("/")) {
+      const result = await api("/command", "POST", { command: text });
+      if (result.reply) {
+        appendMsg("assistant", result.reply);
+        knownEntries++;
+      }
+    } else {
+      await api("/turn", "POST", { message: text });
+    }
   } catch (e) {
     appendMsg("error", "发送失败：" + e.message);
   }

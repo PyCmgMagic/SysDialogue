@@ -1,6 +1,6 @@
 # SysDialogue — v6 历史设计文档
 
-> 历史状态：本文仅作归档参考。当前唯一实现基线为 `framework/claudeplan7.md`。  
+> 历史状态：本文仅作归档参考。当前唯一实现基线为 `framework/claudeplan8.md`。  
 > 版本定位：在 v5.4 基础上经过三轮安全审计修复，综合 v4.1 → v5.3 → v5.4 → v6 的完整独立设计文档，无需参考历史版本  
 > 核心原则：**Static-first / Workflow-first / Preview-Backup-Validate / EnvProfile-driven / DynTool-last**  
 > 目标：将尽量多的高频运维场景固化为静态语义工具，让系统更强、更稳、更可控，满足"自主与可控、可解释、可验证"要求

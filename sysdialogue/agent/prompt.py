@@ -74,6 +74,9 @@ def build_system_prompt(
     registry: "ToolRegistry",
     context_summary: str | None = None,
     dynamic_tools_summary: str | None = None,
+    memory_summary: str | None = None,
+    permission_summary: str | None = None,
+    role_profiles_summary: str | None = None,
 ) -> str:
     """Build the system prompt injected into the LLM."""
     sections = [
@@ -86,6 +89,12 @@ def build_system_prompt(
     ]
     if context_summary:
         sections.append("[Reusable Cross-Turn Context]\n" + context_summary)
+    if memory_summary:
+        sections.append(memory_summary)
+    if permission_summary:
+        sections.append("[Permission Policy]\n" + permission_summary)
+    if role_profiles_summary:
+        sections.append(role_profiles_summary)
     if dynamic_tools_summary:
         sections.append(dynamic_tools_summary)
     sections.extend(

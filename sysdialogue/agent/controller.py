@@ -1,6 +1,6 @@
 """AgentController — agentic loop 主控，串联安全门 / 工具执行 / 审计。
 
-设计参考 claudeplan7.md。单 controller 只拥有一个当前执行任务。
+设计参考 claudeplan8.md。单 controller 只拥有一个当前执行任务。
 """
 
 from __future__ import annotations
@@ -12,8 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.memory import MemoryManager
+from sysdialogue.agent.permission_policy import PermissionPolicy
+from sysdialogue.agent.role_agents import render_role_profiles
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskEventRecord, TaskStore
+from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.agent.prompt import build_system_prompt
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
@@ -160,6 +165,10 @@ class AgentController:
     session_store: SessionStore | None = None
     task_store: TaskStore | None = None
     lock_store: LockStore | None = None
+    permission_policy: PermissionPolicy | None = None
+    memory_manager: MemoryManager | None = None
+    trace_store: TraceStore | None = None
+    command_registry: CommandRegistry | None = None
 
     # 运行时状态
     _session_counters: dict = field(default_factory=dict)
@@ -183,6 +192,14 @@ class AgentController:
             self.task_store = TaskStore()
         if self.lock_store is None:
             self.lock_store = LockStore()
+        if self.permission_policy is None:
+            self.permission_policy = PermissionPolicy()
+        if self.memory_manager is None:
+            self.memory_manager = MemoryManager()
+        if self.trace_store is None:
+            self.trace_store = TraceStore()
+        if self.command_registry is None:
+            self.command_registry = CommandRegistry()
         self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
             self._env_sanitized,
@@ -217,6 +234,22 @@ class AgentController:
     def run_turn(self, user_message: str) -> str:
         """Run one user turn through the task-level ReAct runtime."""
         from sysdialogue.agent.react_runner import ReActRunner
+
+        if (user_message or "").strip().startswith("/") and self.command_registry is not None:
+            result = self.command_registry.execute(self, user_message)
+            if result.resume_task_id:
+                self.force_resume_task(result.resume_task_id)
+                return ReActRunner(self).run(f"continue task: {result.resume_goal}")
+            if self.session_store is not None:
+                self.session_store.save_turn(
+                    session_id=self.session_id,
+                    manager=self.conversation_manager,
+                    user_message=user_message,
+                    final_reply=result.output,
+                    status="completed",
+                    surface=self.surface,
+                )
+            return result.output
 
         return ReActRunner(self).run(user_message)
 
@@ -269,20 +302,67 @@ class AgentController:
                 is_error=True,
             )
 
-        if decision.requires_confirmation:
+        policy_decision = None
+        if self.permission_policy is not None:
+            policy_decision = self.permission_policy.evaluate_tool(
+                tool=name,
+                args=args,
+                risk_level=decision.level,
+                target=str(self.env_profile.get("host") or self.env_profile.get("hostname") or ""),
+            )
+            self._trace(
+                "guardrail",
+                "permission_policy",
+                status="denied" if policy_decision.is_denied else "ok",
+                summary=policy_decision.reason,
+                data={
+                    "tool": name,
+                    "action": policy_decision.action,
+                    "rule_id": policy_decision.rule_id,
+                    "risk_level": decision.level,
+                },
+            )
+            if policy_decision.is_denied:
+                self.audit_log.log_decision(
+                    tool=name,
+                    args=args,
+                    risk_level=decision.level,
+                    rule_ids=[policy_decision.rule_id],
+                    reason=policy_decision.reason,
+                    decision="permission_denied",
+                    env_profile_id=self._env_profile_id,
+                )
+                return _tool_result_block(
+                    tool_use_id,
+                    f"PermissionPolicy denied {name}: {policy_decision.reason}",
+                    is_error=True,
+                )
+
+        policy_asks = bool(policy_decision and policy_decision.requires_confirmation and not decision.requires_confirmation)
+        confirm_decision = decision
+        if policy_asks and policy_decision is not None:
+            confirm_decision = RiskDecision(
+                level="WARN-HIGH" if decision.level == "SAFE" else decision.level,
+                rule_ids=[policy_decision.rule_id],
+                reason=f"PermissionPolicy asks before {name}: {policy_decision.reason}",
+                requires_confirmation=True,
+                rollback_hint=decision.rollback_hint,
+            )
+
+        if decision.requires_confirmation or policy_asks:
             self._emit_task_event(
                 "confirmation_requested",
-                f"{name} requires confirmation ({decision.level})",
+                f"{name} requires confirmation ({confirm_decision.level})",
                 {
                     "tool": name,
-                    "risk_level": decision.level,
-                    "rule_ids": decision.rule_ids,
-                    "reason": decision.reason,
+                    "risk_level": confirm_decision.level,
+                    "rule_ids": confirm_decision.rule_ids,
+                    "reason": confirm_decision.reason,
                 },
             )
             req = ConfirmationRequest(
-                tool=name, args=args, risk=decision,
-                rollback_hint=decision.rollback_hint,
+                tool=name, args=args, risk=confirm_decision,
+                rollback_hint=confirm_decision.rollback_hint,
             )
             try:
                 ok = self.confirm_callback(req)
@@ -324,6 +404,13 @@ class AgentController:
             cmd=result.cmd_trace,
             exit_code=result.exit_code,
             output_preview=_preview(result),
+        )
+        self._trace(
+            "tool_call",
+            name,
+            status="ok" if result.success else "error",
+            summary=_preview(result),
+            data={"tool": name, "exit_code": result.exit_code},
         )
         return _tool_result_block(
             tool_use_id,
@@ -629,12 +716,51 @@ class AgentController:
         except Exception:
             pass
 
+    def _trace(
+        self,
+        span_type: str,
+        name: str,
+        *,
+        status: str = "ok",
+        summary: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if self.trace_store is None:
+            return
+        try:
+            self.trace_store.log_span(
+                session_id=self.session_id,
+                task_id=self.current_task_id or "",
+                span_type=span_type,
+                name=name,
+                status=status,
+                summary=summary,
+                data=data or {},
+            )
+        except Exception:
+            pass
+
     def _current_system_prompt(self) -> str:
+        memory_summary = None
+        if self.memory_manager is not None:
+            try:
+                memory_summary = self.memory_manager.render_prompt_summary()
+            except Exception:
+                memory_summary = None
+        permission_summary = None
+        if self.permission_policy is not None:
+            try:
+                permission_summary = self.permission_policy.render_summary()
+            except Exception:
+                permission_summary = None
         return build_system_prompt(
             self._env_sanitized,
             self.registry,
             context_summary=self.conversation_manager.render_context(),
             dynamic_tools_summary=self._dynamic_tools_prompt_summary(),
+            memory_summary=memory_summary,
+            permission_summary=permission_summary,
+            role_profiles_summary=render_role_profiles(),
         )
 
     def _dynamic_tools_prompt_summary(self) -> str | None:
@@ -777,6 +903,34 @@ class AgentController:
             return lock_error
 
         def confirm_dynamic(payload: dict) -> bool:
+            if self.permission_policy is not None:
+                policy_decision = self.permission_policy.evaluate_command(
+                    argv=list(payload.get("cmd") or []),
+                    risk_level=str(payload.get("final_risk") or "UNKNOWN"),
+                    target=str(self.env_profile.get("host") or self.env_profile.get("hostname") or ""),
+                )
+                self._trace(
+                    "guardrail",
+                    "permission_policy_dyntool",
+                    status="denied" if policy_decision.is_denied else "ok",
+                    summary=policy_decision.reason,
+                    data={
+                        "action": policy_decision.action,
+                        "rule_id": policy_decision.rule_id,
+                        "cmd": payload.get("cmd"),
+                    },
+                )
+                if policy_decision.is_denied:
+                    self.audit_log.log_decision(
+                        tool=META_EXECUTE_DYNAMIC_TOOL,
+                        args=payload,
+                        risk_level=str(payload.get("final_risk") or "UNKNOWN"),
+                        rule_ids=[policy_decision.rule_id],
+                        reason=policy_decision.reason,
+                        decision="permission_denied",
+                        env_profile_id=self._env_profile_id,
+                    )
+                    return False
             reason = (
                 f"DynTool 将执行：{payload.get('tool_name')}；"
                 f"命令 argv={payload.get('cmd')}；"
@@ -901,6 +1055,18 @@ class AgentController:
             cmd=result.cmd,
             exit_code=result.exit_code,
             output_preview=(result.output or result.reason)[:1024],
+        )
+        self._trace(
+            "tool_call",
+            META_EXECUTE_DYNAMIC_TOOL,
+            status="ok" if result.success else "error",
+            summary=(result.output or result.reason)[:500],
+            data={
+                "dynamic_mode": "registered" if has_tool_id else "inline",
+                "tool_id": raw_tool_id.strip() if has_tool_id else "",
+                "exit_code": result.exit_code,
+                "changes_state": result.changes_state,
+            },
         )
         return _tool_result_block(
             tool_use_id,

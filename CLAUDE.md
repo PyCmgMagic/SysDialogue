@@ -1,7 +1,7 @@
 # SysDialogue Current Handoff
 
-> Active design baseline: `framework/claudeplan7.md`
-> Historical archive only: `framework/claudeplan6.md`
+> Active design baseline: `framework/claudeplan8.md`
+> Historical archive only: `framework/claudeplan6.md` and `framework/claudeplan7.md`
 
 ## What This Project Is
 
@@ -13,6 +13,9 @@ SysDialogue is a Linux operations agent with:
 - built-in workflows
 - TUI / Simple CLI / Web / scheduled-job entrypoints
 - risk gates, confirmation, rollback hints, and audit logs
+- OpenCode-style permission policy
+- layered memory and local trace spans
+- shared slash commands
 - local and SSH remote execution
 
 The current runtime always enables DynTool; there is no gated development-only mode.
@@ -20,9 +23,9 @@ DynTool is always enabled, but still gated by safety checks, confirmation, audit
 
 ## Current Source Of Truth
 
-Use `framework/claudeplan7.md` for current architecture and behavior.
+Use `framework/claudeplan8.md` for current architecture and behavior.
 
-Do not treat `framework/claudeplan6.md` as normative anymore. It is kept only so we can trace earlier design decisions and audit the migration path.
+Do not treat `framework/claudeplan6.md` or `framework/claudeplan7.md` as normative anymore. They are kept only so we can trace earlier design decisions and audit the migration path.
 
 ## Git-First Rules
 
@@ -51,6 +54,9 @@ Persistent state now lives under:
 - `~/.sysdialogue/sessions/`
 - `~/.sysdialogue/tasks/`
 - `~/.sysdialogue/locks/`
+- `~/.sysdialogue/policy.json`
+- `~/.sysdialogue/memory/`
+- `~/.sysdialogue/traces/`
 
 Shared stores are implemented in `sysdialogue/agent/state_store.py`:
 
@@ -59,6 +65,26 @@ Shared stores are implemented in `sysdialogue/agent/state_store.py`:
 - `LockStore`
 
 Locking is cross-process lease-based, not in-memory-only anymore.
+
+### Policy / Memory / Trace
+
+- `PermissionPolicy` is additive: it can deny or ask for extra confirmation, but cannot downgrade `BLOCK`.
+- `MemoryManager` stores layered reusable context and redacts obvious secrets before long-term storage.
+- `TraceStore` writes local JSONL spans for LLM calls, tools, guardrails, confirmations, and verification.
+
+### Slash Commands
+
+Shared commands are available in TUI, Web, and Simple CLI:
+
+- `/status`
+- `/resume`
+- `/locks`
+- `/plan`
+- `/audit`
+- `/memory`
+- `/tools`
+- `/permissions`
+- `/compact`
 
 ### Entry Surfaces
 
@@ -99,13 +125,17 @@ DynTool is always available, but still last-resort:
 - `sysdialogue/agent/error_presentation.py`
 - `sysdialogue/agent/planner.py`
 - `sysdialogue/agent/workflow_engine.py`
+- `sysdialogue/agent/permission_policy.py`
+- `sysdialogue/agent/memory.py`
+- `sysdialogue/agent/trace_store.py`
+- `sysdialogue/agent/command_registry.py`
 - `sysdialogue/app/runtime_factory.py`
 - `sysdialogue/app/jobs.py`
 - `sysdialogue/app/simple_cli.py`
 - `sysdialogue/web/service.py`
 - `sysdialogue/ui/tui_app.py`
 - `sysdialogue/ui/task_timeline.py`
-- `framework/claudeplan7.md`
+- `framework/claudeplan8.md`
 
 ## Current Behavior Guarantees
 
@@ -115,6 +145,8 @@ DynTool is always available, but still last-resort:
 - workflow resource locks use cross-process leases
 - plan mode now creates durable task steps instead of advisory text only
 - friendly error presentation is shared across TUI / Web / Simple CLI
+- slash commands are shared across TUI / Web / Simple CLI
+- PermissionPolicy, MemoryManager, and TraceStore are injected into every runtime
 
 ## Remaining Real-World Validation Gaps
 

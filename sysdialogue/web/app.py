@@ -35,7 +35,7 @@ def create_web_app(config) -> FastAPI:
         session = store.get(session_id)
         message = (payload.get("message") or "").strip()
         if not message:
-            raise HTTPException(status_code=400, detail="message 不能为空")
+            raise HTTPException(status_code=400, detail="message cannot be empty")
         try:
             if session.needs_input_response():
                 session.submit_turn_input(message)
@@ -44,6 +44,27 @@ def create_web_app(config) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}
+
+    @app.post("/api/session/{session_id}/command")
+    async def submit_command(session_id: str, payload: dict):
+        command = (payload.get("command") or payload.get("message") or "").strip()
+        if not command:
+            raise HTTPException(status_code=400, detail="command cannot be empty")
+        try:
+            reply = store.get(session_id).run_command(command)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "reply": reply}
+
+    @app.get("/api/session/{session_id}/traces")
+    async def get_traces(session_id: str):
+        session = store.get(session_id)
+        return {"spans": [span.__dict__ for span in session.runtime.trace_store.list_spans(session_id, limit=200)]}
+
+    @app.get("/api/session/{session_id}/memory")
+    async def get_memory(session_id: str):
+        session = store.get(session_id)
+        return {"records": [record.__dict__ for record in session.runtime.memory_manager.list_records(limit=100)]}
 
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):

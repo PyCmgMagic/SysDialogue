@@ -4,9 +4,10 @@
 
 SysDialogue is a Linux operations agent that accepts natural-language goals and executes only through controlled tools, workflows, safety gates, and audit logs.
 
-This document is the current design baseline.
+This document is now a historical baseline. The current design baseline is `claudeplan8.md`.
 
-- Active baseline: `claudeplan7.md`
+- Active baseline: `claudeplan8.md`
+- Historical reference: `claudeplan7.md`
 - Historical reference only: `claudeplan6.md`
 
 ## 2. Design Principles

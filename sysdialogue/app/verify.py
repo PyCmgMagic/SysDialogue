@@ -31,7 +31,7 @@ def _safe_print(text: str = "") -> None:
 def run_verify(config: "AppConfig") -> int:
     """Run a no-API readiness check for the local or remote runtime."""
     _safe_print("=" * 60)
-    _safe_print(" SysDialogue v6 - Self-check (--verify)")
+    _safe_print(" SysDialogue v8 - Self-check (--verify)")
     _safe_print("=" * 60)
 
     issues: list[str] = []
@@ -133,7 +133,7 @@ def run_verify(config: "AppConfig") -> int:
 def run_demo(config: "AppConfig") -> int:
     """Run the built-in security_audit workflow without calling the LLM API."""
     _safe_print("=" * 60)
-    _safe_print(" SysDialogue v6 - Demo mode (--demo)")
+    _safe_print(" SysDialogue v8 - Demo mode (--demo)")
     _safe_print(" Scenario: security_audit workflow (read-only inspection)")
     _safe_print("=" * 60)
 

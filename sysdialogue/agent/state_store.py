@@ -730,6 +730,21 @@ class LockStore:
         for scope in list(scopes):
             self.release(scope, task_id=task_id)
 
+    def list_leases(self) -> list[LockLease]:
+        leases: list[LockLease] = []
+        for path in self.storage_dir.glob("*.json"):
+            data = _read_json(path)
+            if not data:
+                continue
+            scope = str(data.get("scope") or "")
+            if not scope:
+                continue
+            lease = self.load(scope)
+            if lease is not None:
+                leases.append(lease)
+        leases.sort(key=lambda item: item.acquired_at)
+        return leases
+
     def is_stale(self, lease: LockLease, *, stale_after: int | None = None) -> bool:
         return _iso_age_seconds(lease.heartbeat_ts) > float(stale_after or self.stale_after)
 

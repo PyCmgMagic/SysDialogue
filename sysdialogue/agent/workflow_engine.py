@@ -1,6 +1,6 @@
 """WorkflowEngine — YAML 工作流加载 / Jinja2 插值 / 5 种 step 类型 / 资源锁 / rollback。
 
-参考 claudeplan7.md 的 workflow schema 与跨进程资源 lease 语义。
+参考 claudeplan8.md 的 workflow schema 与跨进程资源 lease 语义。
 """
 
 from __future__ import annotations

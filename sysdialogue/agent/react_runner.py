@@ -184,12 +184,36 @@ class ReActRunner:
                     return task.final_reply
 
                 try:
+                    llm_span = (
+                        self.controller.trace_store.start_span(
+                            session_id=self.controller.session_id,
+                            task_id=task.task_id,
+                            span_type="llm_call",
+                            name="chat.completions",
+                            data={"iteration": iteration + 1},
+                        )
+                        if self.controller.trace_store is not None
+                        else None
+                    )
                     response = self.controller.llm_client.messages_create(
                         system=self.controller._current_system_prompt(),
                         messages=messages,
                         tools=all_tools,
                     )
+                    if llm_span is not None:
+                        self.controller.trace_store.end_span(
+                            llm_span,
+                            status="ok",
+                            summary="LLM response received.",
+                        )
                 except Exception as exc:
+                    if "llm_span" in locals() and llm_span is not None and self.controller.trace_store is not None:
+                        self.controller.trace_store.end_span(
+                            llm_span,
+                            status="error",
+                            summary=str(exc)[:500],
+                            data={"error_type": type(exc).__name__},
+                        )
                     task.final_status = "failed"
                     task.technical_details = str(exc)
                     task.final_reply = (
