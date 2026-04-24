@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from sysdialogue.agent.controller import AgentController, OpenAIChatClient
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
 from sysdialogue.runtime.secure_runner import LocalExecutor, SafeExecutor
@@ -29,8 +30,15 @@ class RuntimeBundle:
     env_profile: dict
     audit_log: AuditLog
     controller: AgentController
+    session_store: SessionStore
+    task_store: TaskStore
+    lock_store: LockStore
 
     def close(self) -> None:
+        try:
+            self.controller.unbind_task()
+        except Exception:
+            pass
         if hasattr(self.executor, "disconnect"):
             try:
                 self.executor.disconnect()  # type: ignore[attr-defined]
@@ -46,6 +54,7 @@ def create_runtime(
     llm_client: Any | None = None,
     confirm_callback=None,
     input_callback=None,
+    surface: str = "unknown",
 ) -> RuntimeBundle:
     if config.remote_mode:
         ssh_cfg = SSHConfig(
@@ -66,6 +75,9 @@ def create_runtime(
     )
     env_profile = probe.probe()
     audit = AuditLog(session_id=session_id)
+    session_store = SessionStore()
+    task_store = TaskStore()
+    lock_store = LockStore()
 
     if llm_client is None:
         if require_api:
@@ -90,7 +102,17 @@ def create_runtime(
         dynamic_registry=DynamicToolRegistry(),
         max_iterations=config.max_iterations,
         workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,
+        surface=surface,
+        session_store=session_store,
+        task_store=task_store,
+        lock_store=lock_store,
     )
+    try:
+        existing = session_store.load(controller.session_id)
+        if existing is not None and (existing.history or existing.context):
+            session_store.restore_to_manager(controller.session_id, controller.conversation_manager)
+    except Exception:
+        pass
     if confirm_callback is not None:
         controller.confirm_callback = confirm_callback
     if input_callback is not None:
@@ -101,4 +123,7 @@ def create_runtime(
         env_profile=env_profile,
         audit_log=audit,
         controller=controller,
+        session_store=session_store,
+        task_store=task_store,
+        lock_store=lock_store,
     )

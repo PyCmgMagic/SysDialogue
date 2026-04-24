@@ -1,6 +1,6 @@
 """AgentController — agentic loop 主控，串联安全门 / 工具执行 / 审计。
 
-设计参考 claudeplan6.md §3.2。单会话单实例，非线程安全。
+设计参考 claudeplan7.md。单 controller 只拥有一个当前执行任务。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskEventRecord, TaskStore
 from sysdialogue.agent.prompt import build_system_prompt
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
@@ -35,6 +36,43 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_WORKFLOWS_DIR = Path(__file__).parent.parent / "workflows"
+_DIRECT_LOCK_TIMEOUT = 2.0
+
+_READ_ONLY_DIRECT_TOOLS = {
+    "get_system_info",
+    "get_disk_usage",
+    "find_files",
+    "list_processes",
+    "get_port_status",
+    "get_network_info",
+    "read_log",
+    "read_file",
+    "get_resource_stats",
+    "list_directory",
+    "stat_path",
+    "search_file_content",
+    "validate_config",
+    "resolve_dns",
+    "check_endpoint",
+}
+
+_READ_ONLY_DIRECT_ACTIONS = {
+    ("manage_package", "list"),
+    ("manage_package", "search"),
+    ("backup_path", "list"),
+    ("manage_archive", "list"),
+    ("manage_mount", "list"),
+    ("manage_container", "list"),
+    ("manage_container", "status"),
+    ("manage_container", "logs"),
+    ("manage_container", "inspect"),
+    ("manage_authorized_keys", "list"),
+    ("manage_hosts_entries", "list"),
+    ("manage_service", "status"),
+    ("manage_cron", "list"),
+    ("manage_sysctl", "list"),
+    ("manage_sysctl", "get"),
+}
 
 
 # --------------------------------------------------------------------------
@@ -118,6 +156,10 @@ class AgentController:
     dynamic_registry: Any = None  # DynamicToolRegistry instance.
     max_iterations: int = 160
     conversation_manager: ConversationManager | None = None
+    surface: str = "unknown"
+    session_store: SessionStore | None = None
+    task_store: TaskStore | None = None
+    lock_store: LockStore | None = None
 
     # 运行时状态
     _session_counters: dict = field(default_factory=dict)
@@ -127,8 +169,19 @@ class AgentController:
     _planning_engine: "PlanningEngine | None" = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
     _env_sanitized: dict = field(default_factory=dict)
+    _current_task_id: str | None = None
+    _current_lock_scopes: set[str] = field(default_factory=set)
+    _task_state_lock: threading.Lock = field(default_factory=threading.Lock)
+    _task_heartbeat_thread: threading.Thread | None = None
+    _task_heartbeat_stop: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
+        if self.session_store is None:
+            self.session_store = SessionStore()
+        if self.task_store is None:
+            self.task_store = TaskStore()
+        if self.lock_store is None:
+            self.lock_store = LockStore()
         self._env_sanitized = EnvProfileSanitizer.sanitize(self.env_profile)
         self._system_prompt = build_system_prompt(
             self._env_sanitized,
@@ -138,6 +191,7 @@ class AgentController:
         self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
         if self.conversation_manager is None:
             self.conversation_manager = ConversationManager()
+        self.session_store.ensure(self.audit_log.session_id, surface=self.surface)
 
     def _get_workflow_engine(self) -> "WorkflowEngine":
         if self._workflow_engine is None:
@@ -251,6 +305,10 @@ class AgentController:
                     tool_use_id, "用户已取消该操作", is_error=True,
                 )
 
+        lock_error = self._acquire_direct_tool_locks(name, args, tool_use_id)
+        if lock_error is not None:
+            return lock_error
+
         # 执行
         result: ToolResult = self.registry.call(
             name, args,
@@ -298,6 +356,13 @@ class AgentController:
             self.conversation_manager.observe_workflow(wf_name, wf_params, execution)
             summary = execution.summary()
             summary["message"] = execution.final_message
+            if self.current_task_id and self.task_store is not None:
+                self.task_store.update(
+                    self.current_task_id,
+                    mode="workflow",
+                    workflow_name=wf_name,
+                    current_phase="finish" if execution.final_status in ("completed", "rolled_back") else "act",
+                )
             return _tool_result_block(
                 tool_use_id,
                 json.dumps(summary, ensure_ascii=False),
@@ -308,6 +373,32 @@ class AgentController:
             plan_steps = args.get("plan_steps") or []
             planner = self._get_planning_engine()
             frozen = planner.freeze(plan_steps)
+            if self.current_task_id and self.task_store is not None:
+                from sysdialogue.agent.state_store import TaskStepRecord
+
+                self.task_store.update(
+                    self.current_task_id,
+                    mode="plan",
+                    plan_id=frozen.plan_id,
+                    current_phase="plan",
+                )
+                self.task_store.set_steps(
+                    self.current_task_id,
+                    [
+                        TaskStepRecord(
+                            step_id=s.step_id or f"step_{index+1}",
+                            status="pending",
+                            kind="plan_step",
+                            tool=s.tool,
+                            purpose=s.purpose,
+                            args=s.args,
+                            expected_risk=s.expected_risk,
+                            actual_risk=s.actual_risk,
+                            rule_ids=list(s.rule_ids),
+                        )
+                        for index, s in enumerate(frozen.steps)
+                    ],
+                )
             self.audit_log.log_decision(
                 tool=META_SET_EXECUTION_MODE, args=args,
                 risk_level="SAFE", rule_ids=[],
@@ -317,7 +408,13 @@ class AgentController:
             )
             return _tool_result_block(
                 tool_use_id,
-                json.dumps(frozen.summary(), ensure_ascii=False) + "\n\n" + frozen.display_text(),
+                json.dumps(
+                    {
+                        **frozen.summary(),
+                        "display_text": frozen.display_text(),
+                    },
+                    ensure_ascii=False,
+                ),
                 is_error=False,
             )
 
@@ -334,8 +431,56 @@ class AgentController:
             is_error=False,
         )
 
+    def _acquire_direct_tool_locks(
+        self,
+        name: str,
+        args: dict,
+        tool_use_id: str,
+        *,
+        forced_scopes: list[str] | None = None,
+    ) -> dict | None:
+        if self.lock_store is None or not self.current_task_id:
+            return None
+        scopes = forced_scopes if forced_scopes is not None else _direct_lock_scopes(name, args)
+        if not scopes:
+            return None
+        acquired: list[str] = []
+        for scope in _dedupe_scopes(scopes):
+            lease = self.lock_store.acquire(
+                scope,
+                task_id=self.current_task_id,
+                session_id=self.session_id,
+                surface=self.surface,
+                timeout=_DIRECT_LOCK_TIMEOUT,
+                on_stale_reclaim=lambda previous, lock_scope=scope: self.mark_stale_task_interrupted(
+                    previous.task_id,
+                    detail=f"Resource lock {lock_scope} was reclaimed after stale heartbeat.",
+                ),
+            )
+            if lease is None:
+                self.lock_store.release_all(set(acquired), task_id=self.current_task_id)
+                for acquired_scope in acquired:
+                    self.unregister_lock_scope(acquired_scope)
+                return _tool_result_block(
+                    tool_use_id,
+                    f"resource_locked: {scope}",
+                    is_error=True,
+                )
+            acquired.append(scope)
+            self.register_lock_scope(scope)
+        return None
+
     def request_cancel(self) -> None:
         self._cancel_event.set()
+        if self._current_task_id and self.task_store is not None:
+            try:
+                self.task_store.update(
+                    self._current_task_id,
+                    status="cancelling",
+                    current_phase="finish",
+                )
+            except Exception:
+                pass
 
     def clear_cancel(self) -> None:
         self._cancel_event.clear()
@@ -343,12 +488,120 @@ class AgentController:
     def is_cancel_requested(self) -> bool:
         return self._cancel_event.is_set()
 
+    @property
+    def session_id(self) -> str:
+        return self.audit_log.session_id
+
+    @property
+    def current_task_id(self) -> str | None:
+        return self._current_task_id
+
+    def bind_task(self, task_id: str) -> None:
+        with self._task_state_lock:
+            self._current_task_id = task_id
+            self._current_lock_scopes.clear()
+        self._start_task_heartbeat()
+
+    def unbind_task(self) -> None:
+        self._stop_task_heartbeat()
+        with self._task_state_lock:
+            task_id = self._current_task_id
+            scopes = set(self._current_lock_scopes)
+            self._current_task_id = None
+            self._current_lock_scopes.clear()
+        if task_id and self.lock_store is not None:
+            self.lock_store.release_all(scopes, task_id=task_id)
+
+    def register_lock_scope(self, scope: str) -> None:
+        with self._task_state_lock:
+            self._current_lock_scopes.add(scope)
+
+    def unregister_lock_scope(self, scope: str) -> None:
+        with self._task_state_lock:
+            self._current_lock_scopes.discard(scope)
+
+    def mark_stale_task_interrupted(self, task_id: str, *, detail: str) -> None:
+        if self.task_store is None or self.session_store is None:
+            return
+        try:
+            task = self.task_store.mark_interrupted(task_id, technical_details=detail)
+        except FileNotFoundError:
+            return
+        if task.session_id:
+            self.session_store.mark_interrupted(
+                task.session_id,
+                technical_details=detail,
+                keep_active_task=True,
+                surface=task.surface or self.surface,
+            )
+
+    def _start_task_heartbeat(self) -> None:
+        if self.task_store is None or self.lock_store is None:
+            return
+        if self._task_heartbeat_thread is not None and self._task_heartbeat_thread.is_alive():
+            return
+        self._task_heartbeat_stop.clear()
+
+        def worker() -> None:
+            while not self._task_heartbeat_stop.wait(5.0):
+                with self._task_state_lock:
+                    task_id = self._current_task_id
+                    scopes = set(self._current_lock_scopes)
+                if not task_id:
+                    continue
+                try:
+                    self.task_store.heartbeat(task_id)
+                except Exception:
+                    pass
+                try:
+                    self.lock_store.heartbeat_all(scopes, task_id=task_id)
+                except Exception:
+                    pass
+
+        self._task_heartbeat_thread = threading.Thread(target=worker, daemon=True)
+        self._task_heartbeat_thread.start()
+
+    def _stop_task_heartbeat(self) -> None:
+        self._task_heartbeat_stop.set()
+        thread = self._task_heartbeat_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
+        self._task_heartbeat_thread = None
+
     def _emit_task_event(self, stage: str, message: str, data: dict | None = None) -> None:
         from sysdialogue.agent.react_runner import TaskEvent
 
         self._emit_task_event_obj(TaskEvent(stage=stage, message=message, data=data or {}))
 
     def _emit_task_event_obj(self, event: Any) -> None:
+        item = event.to_dict() if hasattr(event, "to_dict") else {
+            "ts": None,
+            "stage": getattr(event, "stage", "event"),
+            "message": getattr(event, "message", ""),
+            "data": getattr(event, "data", {}) or {},
+        }
+        if self.current_task_id and self.task_store is not None:
+            try:
+                self.task_store.append_event(
+                    self.current_task_id,
+                    TaskEventRecord(
+                        ts=str(item.get("ts") or ""),
+                        stage=str(item.get("stage") or "event"),
+                        message=str(item.get("message") or ""),
+                        data=dict(item.get("data") or {}),
+                    ),
+                )
+            except Exception:
+                pass
+        if self.session_store is not None:
+            try:
+                self.session_store.append_task_event(
+                    self.session_id,
+                    item,
+                    surface=self.surface,
+                )
+            except Exception:
+                pass
         try:
             self.event_callback(event)
         except Exception:
@@ -492,6 +745,15 @@ class AgentController:
                 is_error=True,
             )
 
+        lock_error = self._acquire_direct_tool_locks(
+            META_EXECUTE_DYNAMIC_TOOL,
+            args,
+            tool_use_id,
+            forced_scopes=["dyntool:global"],
+        )
+        if lock_error is not None:
+            return lock_error
+
         def confirm_dynamic(payload: dict) -> bool:
             reason = (
                 f"DynTool 将执行：{payload.get('tool_name')}；"
@@ -623,6 +885,96 @@ class AgentController:
             json.dumps(content, ensure_ascii=False),
             is_error=(not result.success),
         )
+
+
+# --------------------------------------------------------------------------
+# Direct-mode resource locking helpers
+# --------------------------------------------------------------------------
+
+def _direct_lock_scopes(name: str, args: dict) -> list[str]:
+    if _is_direct_read_only_tool(name, args):
+        return []
+    args = args or {}
+
+    if name == "write_file":
+        return _path_scopes(args.get("path"))
+    if name == "delete_path":
+        return _path_scopes(args.get("path"))
+    if name == "create_directory":
+        return _path_scopes(args.get("path"))
+    if name == "copy_move_path":
+        return _path_scopes(args.get("src")) + _path_scopes(args.get("dst"))
+    if name == "replace_in_file":
+        return _path_scopes(args.get("path"))
+    if name == "backup_path":
+        return ["backup:global"] + _path_scopes(args.get("path"))
+    if name == "manage_hosts_entries":
+        return ["file:/etc/hosts"]
+    if name == "manage_authorized_keys":
+        return [f"user-auth:{args.get('username') or '*'}"]
+    if name in {"create_user", "delete_user", "modify_user_groups"}:
+        return [f"user:{args.get('username') or '*'}"]
+    if name == "manage_service":
+        return [f"service:{args.get('name') or '*'}"]
+    if name == "kill_process":
+        return [f"process:{args.get('pid') or '*'}"]
+    if name == "manage_package":
+        names = args.get("names") or ([args.get("name")] if args.get("name") else [])
+        target = ",".join(str(item) for item in names if item) or "*"
+        return [f"package:{target}"]
+    if name == "manage_firewall":
+        return ["firewall:global"]
+    if name == "get_set_system_config":
+        return [f"system-config:{args.get('key') or '*'}"]
+    if name == "manage_cron":
+        return [f"cron:{args.get('job_id') or '*'}"]
+    if name == "manage_sysctl":
+        return [f"sysctl:{args.get('key') or args.get('file') or '*'}"]
+    if name == "manage_archive":
+        return _path_scopes(args.get("archive_path")) + _path_scopes(args.get("target_path")) + _path_scopes(args.get("source_path"))
+    if name == "manage_mount":
+        return [f"mount:{args.get('target') or '*'}"]
+    if name == "manage_container":
+        return [f"container:{args.get('name') or args.get('image') or '*'}"]
+    if name == "manage_power":
+        return ["power:host"]
+
+    return [f"tool:{name}"]
+
+
+def _is_direct_read_only_tool(name: str, args: dict) -> bool:
+    if name in _READ_ONLY_DIRECT_TOOLS:
+        return True
+    action = str((args or {}).get("action") or "").lower()
+    if (name, action) in _READ_ONLY_DIRECT_ACTIONS:
+        return True
+    if name == "get_set_system_config" and not (args or {}).get("value"):
+        return True
+    return False
+
+
+def _path_scopes(value: Any) -> list[str]:
+    if not value:
+        return []
+    return [f"file:{_normalize_scope_path(str(value))}"]
+
+
+def _normalize_scope_path(value: str) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text or "*"
+
+
+def _dedupe_scopes(scopes: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for scope in scopes:
+        if not scope or scope in seen:
+            continue
+        seen.add(scope)
+        result.append(scope)
+    return result
 
 
 # --------------------------------------------------------------------------

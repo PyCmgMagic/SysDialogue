@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse
 from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
@@ -43,6 +44,9 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         registry=registry or ToolRegistry(),
         llm_client=llm,
         event_callback=events.append,
+        session_store=SessionStore(str(tmp_path / "sessions")),
+        task_store=TaskStore(str(tmp_path / "tasks")),
+        lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
 
@@ -60,6 +64,9 @@ def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
         dynamic_registry=DynamicToolRegistry(
             storage_path=str(tmp_path / "dynamic_tools.json"),
         ),
+        session_store=SessionStore(str(tmp_path / "sessions")),
+        task_store=TaskStore(str(tmp_path / "tasks")),
+        lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
 
@@ -240,6 +247,54 @@ def test_tool_success_then_finish_completes_operational_task(tmp_path: Path) -> 
     assert "tool_finished" in stages
     assert "verification" in stages
     assert stages[-1] == "task_finished"
+
+
+def test_session_store_persists_user_and_assistant_turn(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _finish({
+                "status": "completed",
+                "summary": "你好，我在。",
+                "no_action_reason": "这是普通问候，不需要访问系统环境。",
+            })
+        ]
+    ])
+    controller, _ = _controller(tmp_path, llm)
+
+    controller.run_turn("你好")
+
+    record = controller.session_store.load(controller.session_id)
+    assert record is not None
+    assert [entry["role"] for entry in record.entries] == ["user", "assistant"]
+    assert record.user_messages[-1] == "你好"
+
+
+def test_direct_mutating_tool_respects_existing_lock_lease(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
+        [
+            _finish({
+                "status": "failed",
+                "summary": "资源锁冲突，未执行变更。",
+                "next_steps": ["等待当前任务结束后重试"],
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+    controller.lock_store.acquire(
+        "tool:mutate_marker",
+        task_id="other_task",
+        session_id="other_session",
+        surface="web",
+        timeout=0.1,
+    )
+
+    reply = controller.run_turn("修改配置")
+
+    assert "资源锁冲突" in reply
+    tool_result = llm.calls[1]["messages"][-1]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "resource_locked: tool:mutate_marker" in tool_result["content"]
 
 
 def test_plain_text_responses_trigger_react_correction_then_failure(tmp_path: Path) -> None:

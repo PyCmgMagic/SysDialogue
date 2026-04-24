@@ -119,7 +119,11 @@ def _require_api_config(config, entrypoint: str) -> None:
 def _run_tui(config) -> None:
     from sysdialogue.ui.tui_app import run_tui
 
-    runtime = create_runtime(config, require_api=True)
+    runtime = create_runtime(
+        config,
+        require_api=True,
+        surface="tui",
+    )
     try:
         run_tui(runtime.controller)
     finally:

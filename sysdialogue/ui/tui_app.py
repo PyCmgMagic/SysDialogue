@@ -15,12 +15,13 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from sysdialogue.agent.conversation_store import ConversationStore
+from sysdialogue.agent.error_presentation import format_error_markdown
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
 from sysdialogue.ui.history_modal import HistoryModal
 from sysdialogue.ui.input_modal import InputModal
-from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
+from sysdialogue.ui.task_timeline import TaskTimelineCard
 
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
@@ -147,7 +148,6 @@ class SysDialogueTUI(App):
         self._current_card: TaskTimelineCard | None = None
         self._current_goal = ""
         self._history_store = ConversationStore()
-        self._history_session_id = controller.audit_log.session_id
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -315,13 +315,11 @@ class SysDialogueTUI(App):
             return
         try:
             snapshot = self._current_card.snapshot() if self._current_card else {}
-            self._history_store.save_turn(
-                session_id=self._history_session_id,
-                manager=self.controller.conversation_manager,
-                user_message=self._current_goal,
-                final_reply=reply,
-                status=status,
-                events_summary=snapshot,
+            self.controller.session_store.sync_manager(
+                self.controller.session_id,
+                self.controller.conversation_manager,
+                surface=self.controller.surface,
+                events_summary={**snapshot, "status": status},
             )
         except Exception:
             pass
@@ -340,7 +338,7 @@ class SysDialogueTUI(App):
     def _write_error(self, reply: str) -> None:
         self._write_log(
             Panel(
-                Markdown(_format_error_markdown(reply)),
+                Markdown(format_error_markdown(reply)),
                 title="✕ 执行遇到问题",
                 title_align="left",
                 border_style="red",
@@ -428,6 +426,20 @@ class SysDialogueTUI(App):
             "request": req,
         }
         self._confirm_state = state
+        try:
+            self.controller.session_store.set_status(
+                self.controller.session_id,
+                "waiting_confirm",
+                surface=self.controller.surface,
+                pending_confirmation={
+                    "tool": req.tool,
+                    "reason": req.risk.reason,
+                    "risk_level": req.risk.level,
+                    "rollback_hint": req.rollback_hint or req.risk.rollback_hint,
+                },
+            )
+        except Exception:
+            pass
 
         def show() -> None:
             if state["resolved"]:
@@ -459,6 +471,15 @@ class SysDialogueTUI(App):
             "screen": None,
         }
         self._input_state = state
+        try:
+            self.controller.session_store.set_status(
+                self.controller.session_id,
+                "waiting_input",
+                surface=self.controller.surface,
+                pending_input={"prompt": prompt, "multiline": multiline},
+            )
+        except Exception:
+            pass
 
         def show() -> None:
             if state["resolved"]:
@@ -503,6 +524,15 @@ class SysDialogueTUI(App):
         current["event"].set()
         if self._confirm_state is current:
             self._confirm_state = None
+        try:
+            self.controller.session_store.set_status(
+                self.controller.session_id,
+                "running",
+                surface=self.controller.surface,
+                pending_confirmation=None,
+            )
+        except Exception:
+            pass
         if req is not None:
             result_text = _format_confirmation_result(req, approved)
             if self._current_card is not None:
@@ -531,6 +561,15 @@ class SysDialogueTUI(App):
         current["event"].set()
         if self._input_state is current:
             self._input_state = None
+        try:
+            self.controller.session_store.set_status(
+                self.controller.session_id,
+                "running",
+                surface=self.controller.surface,
+                pending_input=None,
+            )
+        except Exception:
+            pass
         self._refresh_runtime_status()
 
     def action_toggle_audit(self) -> None:
@@ -565,7 +604,14 @@ class SysDialogueTUI(App):
         except Exception as exc:
             self._write_log(Panel(f"恢复历史失败：{exc}", border_style="red", title="历史"))
             return
-        self._history_session_id = record.session_id
+        try:
+            self.controller.session_store.sync_manager(
+                self.controller.session_id,
+                self.controller.conversation_manager,
+                surface=self.controller.surface,
+            )
+        except Exception:
+            pass
         self._write_log(
             Panel(
                 Markdown(
@@ -741,32 +787,7 @@ def _looks_like_failure_reply(reply: str) -> bool:
 
 
 def _format_error_markdown(reply: str) -> str:
-    text = (reply or "").strip() or "未知错误。"
-    presentation = present_error(text)
-    suggestions = "\n".join(f"- {item}" for item in presentation.suggestions)
-    if "Traceback (most recent call last)" in text:
-        return (
-            "### 执行异常\n\n"
-            f"{presentation.summary}\n\n"
-            f"{suggestions}\n\n"
-            "<details>\n"
-            "<summary>技术详情</summary>\n\n"
-            "```text\n"
-            f"{presentation.detail}\n"
-            "```\n\n"
-            "</details>"
-        )
-    return (
-        "### 任务未完成\n\n"
-        f"{presentation.summary}\n\n"
-        f"{suggestions}\n\n"
-        "<details>\n"
-        "<summary>技术详情</summary>\n\n"
-        "```text\n"
-        f"{presentation.detail}\n"
-        "```\n\n"
-        "</details>"
-    )
+    return format_error_markdown(reply)
 
 
 def run_tui(controller: "AgentController") -> None:

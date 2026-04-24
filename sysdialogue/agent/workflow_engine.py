@@ -1,6 +1,6 @@
 """WorkflowEngine — YAML 工作流加载 / Jinja2 插值 / 5 种 step 类型 / 资源锁 / rollback。
 
-参考 claudeplan6.md §9.1 Schema、§9.5 资源锁语义。
+参考 claudeplan7.md 的 workflow schema 与跨进程资源 lease 语义。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import jinja2
 import yaml
 
+from sysdialogue.agent.state_store import TaskStepRecord
 from sysdialogue.tools.base import ToolResult
 
 if TYPE_CHECKING:
@@ -77,7 +78,8 @@ class WorkflowExecution:
 class ResourceLockManager:
     """进程内资源锁。scope 格式：file:<path> / service:<name> / user:<name> / cron:<id>。"""
 
-    def __init__(self) -> None:
+    def __init__(self, controller: "AgentController" | None = None) -> None:
+        self.controller = controller
         self._locks: dict[str, threading.Lock] = {}
         self._mu = threading.Lock()
 
@@ -91,6 +93,22 @@ class ResourceLockManager:
 
     def acquire(self, scope: str, timeout: float = 30.0) -> bool:
         """非阻塞轮询 + 超时。成功返回 True，超时返回 False。"""
+        if self.controller is not None and self.controller.lock_store is not None and self.controller.current_task_id:
+            lease = self.controller.lock_store.acquire(
+                scope,
+                task_id=self.controller.current_task_id,
+                session_id=self.controller.session_id,
+                surface=self.controller.surface,
+                timeout=timeout,
+                on_stale_reclaim=lambda previous: self.controller.mark_stale_task_interrupted(
+                    previous.task_id,
+                    detail=f"Resource lock {scope} was reclaimed after stale heartbeat.",
+                ),
+            )
+            if lease is not None:
+                self.controller.register_lock_scope(scope)
+                return True
+            return False
         lk = self._lock_for(scope)
         deadline = time.monotonic() + timeout
         while True:
@@ -101,6 +119,10 @@ class ResourceLockManager:
             time.sleep(0.1)
 
     def release(self, scope: str) -> None:
+        if self.controller is not None and self.controller.lock_store is not None and self.controller.current_task_id:
+            self.controller.lock_store.release(scope, task_id=self.controller.current_task_id)
+            self.controller.unregister_lock_scope(scope)
+            return
         lk = self._locks.get(scope)
         if lk is not None:
             try:
@@ -128,7 +150,7 @@ class WorkflowEngine:
         self.workflows_dir = Path(workflows_dir)
         self.input_callback = input_callback or (lambda prompt, multiline: "")
         self.lock_timeout = lock_timeout
-        self.locks = ResourceLockManager()
+        self.locks = ResourceLockManager(controller=controller)
         self._jinja = jinja2.Environment(
             undefined=jinja2.StrictUndefined,
             autoescape=False,
@@ -226,6 +248,7 @@ class WorkflowEngine:
         steps = wf.get("steps") or []
         rollback_steps = wf.get("rollback") or []
         final_section = wf.get("final") or {}
+        self._sync_workflow_task(name, steps, rollback_steps)
 
         triggered_rollback = False
         acquired_locks: list[str] = []
@@ -685,6 +708,40 @@ class WorkflowEngine:
             workflow_id=wf_id, step_id=sid, step_type=stype,
             status=status, detail=detail,
         )
+        task_id = self.controller.current_task_id
+        if task_id and self.controller.task_store is not None:
+            changes = {
+                "status": status,
+                "workflow_step_type": stype,
+            }
+            if isinstance(detail, dict) and detail.get("error"):
+                changes["error"] = str(detail["error"])
+            self.controller.task_store.update_step(task_id, sid, **changes)
+
+    def _sync_workflow_task(self, workflow_name: str, steps: list[dict], rollback_steps: list[dict]) -> None:
+        task_id = self.controller.current_task_id
+        if not task_id or self.controller.task_store is None:
+            return
+        step_records: list[TaskStepRecord] = []
+        for step in [*steps, *rollback_steps]:
+            step_records.append(
+                TaskStepRecord(
+                    step_id=step.get("id", ""),
+                    kind="workflow_step",
+                    tool=step.get("tool", ""),
+                    purpose=str(step.get("message") or step.get("template") or step.get("tool") or step.get("type", "")),
+                    args=step.get("args") or {},
+                    workflow_step_type=str(step.get("type", "tool_call")),
+                    lock_scope=str(step.get("lock_scope") or ""),
+                )
+            )
+        self.controller.task_store.update(
+            task_id,
+            mode="workflow",
+            workflow_name=workflow_name,
+            current_phase="act",
+        )
+        self.controller.task_store.set_steps(task_id, step_records)
 
 
 def _coerce_scalar(rendered: str, original_template: str) -> Any:

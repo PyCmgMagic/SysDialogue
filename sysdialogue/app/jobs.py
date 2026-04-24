@@ -12,8 +12,14 @@ from sysdialogue.tools.cron_jobs import get_cron_job
 
 def run_scheduled_job(config, job_id: str) -> int:
     session_id = f"cron_{job_id}_{uuid.uuid4().hex[:6]}"
-    runtime = create_runtime(config, session_id=session_id, require_api=False)
+    runtime = create_runtime(
+        config,
+        session_id=session_id,
+        require_api=False,
+        surface="cron",
+    )
     controller = runtime.controller
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
     try:
         job = get_cron_job(runtime.executor, job_id)
         if job is None:
@@ -25,11 +31,34 @@ def run_scheduled_job(config, job_id: str) -> int:
         kind = target.get("kind")
         name = target.get("name", "")
         args = target.get("args") or {}
+        goal = f"scheduled {kind or 'unknown'}: {name}"
+
+        runtime.task_store.create(
+            task_id=task_id,
+            session_id=session_id,
+            surface="cron",
+            goal=goal,
+            mode="workflow" if kind == "workflow" else "direct",
+            status="running",
+            current_phase="act",
+            iteration_budget=1,
+            iteration_limit=1,
+        )
+        runtime.session_store.ensure(session_id, surface="cron", title=goal)
+        runtime.session_store.set_status(
+            session_id,
+            "running",
+            surface="cron",
+            active_task_id=task_id,
+        )
+        controller.bind_task(task_id)
 
         if kind == "tool":
             decision = _scheduled_tool_rejection(controller, name, args)
             if decision is not None:
                 _log_scheduled_rejection(runtime, controller, name, args, decision)
+                runtime.task_store.update(task_id, status="failed", technical_details=decision.reason)
+                runtime.session_store.set_status(session_id, "failed", surface="cron", active_task_id="")
                 return 2
             block = controller._dispatch_tool(name, args, f"scheduled:{job_id}")
         elif kind == "workflow":
@@ -43,6 +72,8 @@ def run_scheduled_job(config, job_id: str) -> int:
                     decision,
                     workflow_id=f"scheduled_preflight:{job_id}",
                 )
+                runtime.task_store.update(task_id, status="failed", technical_details=decision.reason)
+                runtime.session_store.set_status(session_id, "failed", surface="cron", active_task_id="")
                 return 2
             block = controller._handle_set_execution_mode(
                 {
@@ -55,14 +86,36 @@ def run_scheduled_job(config, job_id: str) -> int:
         else:
             print(f"不支持的计划任务类型：{kind}")
             runtime.audit_log.log_final(final_status="failed", detail=f"unsupported scheduled job kind: {kind}")
+            runtime.task_store.update(task_id, status="failed", technical_details=f"unsupported scheduled job kind: {kind}")
+            runtime.session_store.set_status(session_id, "failed", surface="cron", active_task_id="")
             return 1
 
         print(block["content"])
+        succeeded = not block.get("is_error")
         runtime.audit_log.log_final(
-            final_status="completed" if not block.get("is_error") else "failed",
+            final_status="completed" if succeeded else "failed",
             detail=f"scheduled job {job_id} completed",
         )
-        return 0 if not block.get("is_error") else 1
+        runtime.task_store.update(
+            task_id,
+            status="completed" if succeeded else "failed",
+            current_phase="finish",
+            technical_details="" if succeeded else str(block.get("content") or ""),
+        )
+        runtime.session_store.append_entry(
+            session_id,
+            "assistant" if succeeded else "error",
+            str(block.get("content") or ""),
+            surface="cron",
+            technical_details="" if succeeded else str(block.get("content") or ""),
+        )
+        runtime.session_store.set_status(
+            session_id,
+            "completed" if succeeded else "failed",
+            surface="cron",
+            active_task_id="",
+        )
+        return 0 if succeeded else 1
     finally:
         runtime.close()
 

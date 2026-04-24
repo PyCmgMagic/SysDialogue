@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
 from sysdialogue.tools.meta_tools import (
     META_EXECUTE_DYNAMIC_TOOL,
     META_FINISH_TASK,
@@ -78,6 +79,7 @@ WORKFLOWS_WITH_INTERNAL_VERIFICATION = {
     "safe_config_patch",
     "service_restart",
 }
+RESUME_KEYWORDS = ("continue", "resume", "继续", "接着", "继续上次", "继续任务", "重试上次")
 
 
 @dataclass
@@ -101,6 +103,12 @@ class TaskRun:
     task_id: str
     goal: str
     requires_environment_feedback: bool
+    mode: str = "direct"
+    plan_id: str = ""
+    steps: list[TaskStepRecord] = field(default_factory=list)
+    current_phase: str = "analysis"
+    resumed: bool = False
+    resume_message: str = ""
     observed: bool = False
     acted: bool = False
     verified: bool = False
@@ -115,6 +123,7 @@ class TaskRun:
     correction_count: int = 0
     iteration_budget: int = 0
     iteration_limit: int = 0
+    technical_details: str = ""
 
 
 class ReActRunner:
@@ -127,184 +136,380 @@ class ReActRunner:
         from sysdialogue.agent.controller import _content_as_list, _extract_text
 
         self.controller.clear_cancel()
-        task = TaskRun(
-            task_id=f"task_{uuid.uuid4().hex[:8]}",
-            goal=user_message,
-            requires_environment_feedback=_requires_environment_feedback(user_message),
-        )
-        task.iteration_limit = _clamp_iteration_limit(self.controller.max_iterations)
-        task.iteration_budget = _iteration_budget(
-            user_message,
-            hard_limit=task.iteration_limit,
-            requires_environment_feedback=task.requires_environment_feedback,
-        )
-        self._emit(task, "task_started", "ReAct task started", {
-            "task_id": task.task_id,
-            "requires_environment_feedback": task.requires_environment_feedback,
-            "iteration_budget": task.iteration_budget,
-            "iteration_limit": task.iteration_limit,
-        })
-        messages = self.controller.conversation_manager.prepare_turn(user_message)
-        all_tools = self.controller.registry.all_schemas() + META_TOOL_SCHEMAS
-        empty_action_turns = 0
+        session_store = self.controller.session_store
+        task_store = self.controller.task_store
+        if session_store is not None and task_store is not None:
+            session_store.recover_interrupted(
+                self.controller.session_id,
+                task_store,
+                surface=self.controller.surface,
+            )
 
-        for iteration in range(task.iteration_budget):
-            if self.controller.is_cancel_requested():
-                task.final_status = "cancelled"
-                task.final_reply = "当前执行已取消。"
-                self._commit_final(messages, task)
-                return task.final_reply
+        task = self._load_or_create_task(user_message)
+        self.controller.bind_task(task.task_id)
+        self._persist_task_state(task, status="running", current_phase=task.current_phase)
 
-            try:
-                response = self.controller.llm_client.messages_create(
-                    system=self.controller._current_system_prompt(),
-                    messages=messages,
-                    tools=all_tools,
-                )
-            except Exception as exc:
-                task.final_status = "failed"
-                task.final_reply = (
-                    f"LLM 调用失败：{exc}\n"
-                    "请检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL 是否正确，"
-                    "以及该 OpenAI-compatible 服务是否支持 Chat Completions / tool_calls。"
-                )
-                self._emit(task, "task_failed", "LLM call failed", {
-                    "status": "failed",
-                    "error_type": type(exc).__name__,
-                    "error_summary": "模型服务调用失败，任务已停止。",
-                    "error_detail": str(exc),
-                    "next_steps": [
-                        "检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL",
-                        "确认 OpenAI-compatible 服务支持 Chat Completions tool_calls",
-                    ],
-                })
-                self._commit_final(messages, task)
-                return task.final_reply
+        if session_store is not None:
+            session_store.append_user_turn(
+                self.controller.session_id,
+                user_message,
+                surface=self.controller.surface,
+                active_task_id=task.task_id,
+            )
 
-            content = _content_as_list(response.content)
-            messages.append({"role": "assistant", "content": content})
-            tool_blocks = [b for b in content if _block_type(b) == "tool_use"]
-            self._emit(task, "model_response", _model_response_summary(content), {
-                "iteration": iteration + 1,
-                "tool_count": len(tool_blocks),
-                "tool_names": [str(_block_attr(block, "name") or "") for block in tool_blocks],
-                "analysis_summary": _analysis_summary(content),
-                "visible_text_preview": _visible_text_preview(content),
-            })
-
-            if not tool_blocks:
-                empty_action_turns += 1
-                if empty_action_turns <= 2:
-                    correction = _react_correction_message(user_message, _extract_text(content))
-                    messages.append({
-                        "role": "user",
-                        "content": correction,
-                        "sysdialogue_internal": True,
-                    })
-                    self._emit_correction(
-                        task,
-                        "Model did not use ReAct tools; correction injected.",
-                        {"attempt": empty_action_turns},
-                    )
-                    continue
-                task.final_status = "failed"
-                task.final_reply = (
-                    "模型连续返回普通文本，未按 ReAct 协议调用工具或 finish_task。"
-                    "请确认当前模型支持 Chat Completions tool_calls。"
-                )
-                self._emit(task, "task_failed", "ReAct protocol was not followed.", {
-                    "status": "failed",
-                    "error_summary": "模型未按工具协议完成任务收口。",
-                    "error_detail": task.final_reply,
-                    "next_steps": ["确认当前模型支持 tool_calls", "将任务拆小后重试"],
-                    "correction_count": task.correction_count,
-                })
-                self._commit_final(messages, task)
-                return task.final_reply
-
+        try:
+            self._emit(
+                task,
+                "task_started",
+                "ReAct task started",
+                {
+                    "task_id": task.task_id,
+                    "requires_environment_feedback": task.requires_environment_feedback,
+                    "iteration_budget": task.iteration_budget,
+                    "iteration_limit": task.iteration_limit,
+                    "resumed": task.resumed,
+                    "resume_message": task.resume_message,
+                },
+            )
+            messages = self._prepare_messages(task, user_message)
+            all_tools = self.controller.registry.all_schemas() + META_TOOL_SCHEMAS
             empty_action_turns = 0
-            result_blocks: list[dict] = []
-            final_ready = False
 
-            if any(_block_attr(block, "name") == META_FINISH_TASK for block in tool_blocks) and len(tool_blocks) > 1:
-                for block in tool_blocks:
-                    result_blocks.append(_tool_result(
-                        _block_attr(block, "id"),
-                        "finish_task must be the only tool call in the final ReAct turn.",
-                        is_error=True,
-                    ))
-                messages.append({"role": "user", "content": result_blocks})
-                self._emit_correction(task, "finish_task was mixed with other tool calls.")
-                continue
-
-            for block in tool_blocks:
-                name = _block_attr(block, "name")
-                args = _block_attr(block, "input") or {}
-                tool_use_id = _block_attr(block, "id")
+            for iteration in range(task.iteration_budget):
                 if self.controller.is_cancel_requested():
-                    result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block, include_current=True))
-                    break
-                if name == META_FINISH_TASK:
-                    result_block = self._handle_finish_task(task, args, tool_use_id)
-                    result_blocks.append(result_block)
-                    final_ready = not result_block.get("is_error")
+                    task.final_status = "cancelled"
+                    task.final_reply = "当前执行已取消。"
+                    self._emit(task, "task_failed", "ReAct task cancelled.", {"status": "cancelled"})
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                try:
+                    response = self.controller.llm_client.messages_create(
+                        system=self.controller._current_system_prompt(),
+                        messages=messages,
+                        tools=all_tools,
+                    )
+                except Exception as exc:
+                    task.final_status = "failed"
+                    task.technical_details = str(exc)
+                    task.final_reply = (
+                        f"LLM 调用失败：{exc}\n"
+                        "请检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL，"
+                        "以及当前 OpenAI-compatible 服务是否支持 Chat Completions / tool_calls。"
+                    )
+                    self._emit(
+                        task,
+                        "task_failed",
+                        "LLM call failed",
+                        {
+                            "status": "failed",
+                            "error_type": type(exc).__name__,
+                            "error_summary": "模型服务调用失败，任务已停止。",
+                            "error_detail": str(exc),
+                            "next_steps": [
+                                "检查 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL",
+                                "确认当前模型支持 Chat Completions tool_calls",
+                            ],
+                            "technical_details": str(exc),
+                        },
+                    )
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                content = _content_as_list(response.content)
+                messages.append({"role": "assistant", "content": content})
+                tool_blocks = [block for block in content if _block_type(block) == "tool_use"]
+                self._emit(
+                    task,
+                    "model_response",
+                    _model_response_summary(content),
+                    {
+                        "iteration": iteration + 1,
+                        "tool_count": len(tool_blocks),
+                        "tool_names": [str(_block_attr(block, "name") or "") for block in tool_blocks],
+                        "analysis_summary": _analysis_summary(content),
+                        "visible_text_preview": _visible_text_preview(content),
+                    },
+                )
+
+                if not tool_blocks:
+                    empty_action_turns += 1
+                    if empty_action_turns <= 2:
+                        correction = _react_correction_message(user_message, _extract_text(content))
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": correction,
+                                "sysdialogue_internal": True,
+                            }
+                        )
+                        self._emit_correction(
+                            task,
+                            "Model did not use ReAct tools; correction injected.",
+                            {"attempt": empty_action_turns},
+                        )
+                        continue
+
+                    task.final_status = "failed"
+                    task.final_reply = (
+                        "模型连续返回普通文本，未按 ReAct 协议调用工具或 finish_task。\n"
+                        "请确认当前模型支持 Chat Completions tool_calls。"
+                    )
+                    self._emit(
+                        task,
+                        "task_failed",
+                        "ReAct protocol was not followed.",
+                        {
+                            "status": "failed",
+                            "error_summary": "模型未按工具协议完成任务收口。",
+                            "error_detail": task.final_reply,
+                            "next_steps": ["确认当前模型支持 tool_calls", "将任务拆小后重试"],
+                            "correction_count": task.correction_count,
+                        },
+                    )
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                empty_action_turns = 0
+                result_blocks: list[dict[str, Any]] = []
+                final_ready = False
+
+                if any(_block_attr(block, "name") == META_FINISH_TASK for block in tool_blocks) and len(tool_blocks) > 1:
+                    for block in tool_blocks:
+                        result_blocks.append(
+                            _tool_result(
+                                _block_attr(block, "id"),
+                                "finish_task must be the only tool call in the final ReAct turn.",
+                                is_error=True,
+                            )
+                        )
+                    messages.append({"role": "user", "content": result_blocks})
+                    self._emit_correction(task, "finish_task was mixed with other tool calls.")
                     continue
 
-                self._emit_tool_started(task, name, args)
-                result_block = self.controller._dispatch_tool(name, args, tool_use_id)
-                result_blocks.append(result_block)
-                self._observe_tool_result(task, name, args, result_block)
-                self._emit_tool_finished(task, name, args, result_block)
+                for block in tool_blocks:
+                    if self.controller.is_cancel_requested():
+                        result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block, include_current=True))
+                        break
+
+                    name = _block_attr(block, "name")
+                    args = _block_attr(block, "input") or {}
+                    tool_use_id = _block_attr(block, "id")
+
+                    if name == META_FINISH_TASK:
+                        result_block = self._handle_finish_task(task, args, tool_use_id)
+                        result_blocks.append(result_block)
+                        final_ready = not result_block.get("is_error")
+                        continue
+
+                    plan_error = self._guard_plan_step(task, name, args)
+                    if plan_error:
+                        result_blocks.append(_tool_result(tool_use_id, plan_error, is_error=True))
+                        self._emit_correction(task, "Planned step deviation rejected.", {"errors": [plan_error]})
+                        continue
+
+                    self._emit_tool_started(task, name, args)
+                    result_block = self.controller._dispatch_tool(name, args, tool_use_id)
+                    result_blocks.append(result_block)
+                    self._observe_tool_result(task, name, args, result_block)
+                    self._emit_tool_finished(task, name, args, result_block)
+
+                    if self.controller.is_cancel_requested():
+                        result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block))
+                        break
+
+                messages.append({"role": "user", "content": result_blocks})
 
                 if self.controller.is_cancel_requested():
-                    result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block))
-                    break
+                    task.final_status = "cancelled"
+                    task.final_reply = "当前执行已取消。"
+                    self._emit(task, "task_failed", "ReAct task cancelled.", {"status": "cancelled"})
+                    self._commit_final(messages, task)
+                    return task.final_reply
 
-            messages.append({"role": "user", "content": result_blocks})
-            if self.controller.is_cancel_requested():
-                task.final_status = "cancelled"
-                task.final_reply = "当前执行已取消。"
-                self._emit(task, "task_failed", "ReAct task cancelled.", {"status": "cancelled"})
-                self._commit_final(messages, task)
-                return task.final_reply
-            if final_ready:
-                self._commit_final(messages, task)
-                return task.final_reply
+                if final_ready:
+                    self._commit_final(messages, task)
+                    return task.final_reply
 
-        task.final_status = "failed"
-        task.final_reply = (
-            f"已达到本任务动态 ReAct 预算（{task.iteration_budget} 轮），"
-            "请缩小任务范围或分步重试。"
+            task.final_status = "failed"
+            task.final_reply = (
+                f"已达到本任务动态 ReAct 预算（{task.iteration_budget} 轮），任务仍未完成。\n"
+                "请缩小任务范围或分步骤重试。"
+            )
+            self._emit(
+                task,
+                "task_failed",
+                "Maximum ReAct iterations reached.",
+                {
+                    "status": "failed",
+                    "error_summary": "已达到本任务动态 ReAct 预算，任务未完成。",
+                    "error_detail": task.final_reply,
+                    "iteration_budget": task.iteration_budget,
+                    "iteration_limit": task.iteration_limit,
+                    "next_steps": ["缩小任务范围", "把目标拆成更明确的单步请求"],
+                },
+            )
+            self._commit_final(messages, task)
+            return task.final_reply
+        finally:
+            self.controller.unbind_task()
+
+    def _load_or_create_task(self, user_message: str) -> TaskRun:
+        session_store = self.controller.session_store
+        task_store = self.controller.task_store
+        session_id = self.controller.session_id
+        hard_limit = _clamp_iteration_limit(self.controller.max_iterations)
+        requires_environment_feedback = _requires_environment_feedback(user_message)
+
+        session_record = (
+            session_store.ensure(session_id, surface=self.controller.surface)
+            if session_store is not None
+            else None
         )
-        self._emit(task, "task_failed", "Maximum ReAct iterations reached.", {
-            "status": "failed",
-            "error_summary": "已达到本任务动态 ReAct 预算，任务未完成。",
-            "error_detail": task.final_reply,
-            "iteration_budget": task.iteration_budget,
-            "iteration_limit": task.iteration_limit,
-            "next_steps": ["缩小任务范围", "把目标拆成更明确的单步请求"],
-        })
-        self._commit_final(messages, task)
-        return task.final_reply
+        active_task_id = session_record.active_task_id if session_record is not None else ""
+        if task_store is not None and active_task_id:
+            existing = task_store.load(active_task_id)
+            if existing is not None and existing.status == "interrupted" and _looks_like_resume(user_message, existing.goal):
+                task_store.update(
+                    existing.task_id,
+                    status="running",
+                    current_phase=existing.current_phase or "resume",
+                    resume_message=existing.resume_message or "Previous task was interrupted. Continue from the last durable step.",
+                    heartbeat_ts=datetime.now(timezone.utc).isoformat(),
+                )
+                existing = task_store.load(existing.task_id) or existing
+                return _task_run_from_record(existing, resumed=True)
+
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        budget = _iteration_budget(
+            user_message,
+            hard_limit=hard_limit,
+            requires_environment_feedback=requires_environment_feedback,
+        )
+        if task_store is not None:
+            record = task_store.create(
+                task_id=task_id,
+                session_id=session_id,
+                surface=self.controller.surface,
+                goal=user_message,
+                mode="direct",
+                status="running",
+                current_phase="analysis",
+                iteration_budget=budget,
+                iteration_limit=hard_limit,
+            )
+            return _task_run_from_record(record)
+        return TaskRun(
+            task_id=task_id,
+            goal=user_message,
+            requires_environment_feedback=requires_environment_feedback,
+            iteration_budget=budget,
+            iteration_limit=hard_limit,
+        )
+
+    def _prepare_messages(self, task: TaskRun, user_message: str) -> list[dict[str, Any]]:
+        messages = self.controller.conversation_manager.prepare_turn(user_message)
+        if task.resumed and task.resume_message:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Resume context: continue the previous interrupted task if still applicable. "
+                        f"Task goal: {task.goal}. Resume note: {task.resume_message}"
+                    ),
+                    "sysdialogue_internal": True,
+                }
+            )
+        if task.mode == "plan" and task.steps:
+            next_step = _next_pending_step(task.steps)
+            if next_step is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Frozen plan is active. You must follow the next executable plan step exactly. "
+                            f"plan_id={task.plan_id or '<unknown>'}; "
+                            f"next_step={next_step.step_id}; tool={next_step.tool}; "
+                            f"args={json.dumps(next_step.args, ensure_ascii=False)}"
+                        ),
+                        "sysdialogue_internal": True,
+                    }
+                )
+        return messages
+
+    def _persist_task_state(
+        self,
+        task: TaskRun,
+        *,
+        status: str | None = None,
+        current_phase: str | None = None,
+        technical_details: str | None = None,
+    ) -> None:
+        if self.controller.task_store is None:
+            return
+        changes: dict[str, Any] = {
+            "mode": task.mode,
+            "plan_id": task.plan_id,
+            "current_phase": current_phase or task.current_phase,
+            "observed": task.observed,
+            "acted": task.acted,
+            "verified": task.verified,
+            "changed_state": task.changed_state,
+            "tool_steps": task.tool_steps,
+            "last_action_step": task.last_action_step,
+            "last_verification_step": task.last_verification_step,
+            "failed_mutations": list(task.failed_mutations),
+            "resume_message": task.resume_message,
+        }
+        if status is not None:
+            changes["status"] = status
+        if technical_details is not None:
+            changes["technical_details"] = technical_details
+        try:
+            self.controller.task_store.update(task.task_id, **changes)
+            self.controller.task_store.set_steps(task.task_id, list(task.steps))
+        except FileNotFoundError:
+            pass
+
+    def _guard_plan_step(self, task: TaskRun, name: str, args: dict[str, Any]) -> str | None:
+        if task.mode != "plan":
+            return None
+        next_step = _next_pending_step(task.steps)
+        if next_step is None:
+            return "All frozen plan steps are already completed. Finish with finish_task or create a new plan."
+        if name != next_step.tool:
+            return (
+                "Frozen plan deviation rejected. "
+                f"Next required step is {next_step.step_id} using {next_step.tool}, "
+                f"but the model tried to call {name}."
+            )
+        if _normalized_json(next_step.args) != _normalized_json(args):
+            return (
+                "Frozen plan deviation rejected. "
+                f"Step {next_step.step_id} args must match the frozen plan exactly."
+            )
+        next_step.status = "running"
+        next_step.updated_at = datetime.now(timezone.utc).isoformat()
+        self._persist_task_state(task)
+        return None
 
     def _handle_finish_task(self, task: TaskRun, args: dict, tool_use_id: str) -> dict:
         errors = _validate_finish_args(task, args)
         if errors:
-            self._emit_correction(task, "finish_task rejected by completion gate.", {
-                "errors": errors,
-            })
+            self._emit_correction(task, "finish_task rejected by completion gate.", {"errors": errors})
             return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
 
         status = args["status"]
         task.final_status = status
         task.changed_state = task.changed_state or bool(args.get("changed_state"))
+        task.current_phase = "finish"
         if args.get("verification"):
             task.verified = True
             self._emit(task, "verification", args.get("verification", "Verification recorded."))
         task.final_reply = _format_final_reply(args)
         self._emit(
             task,
-            "task_finished" if status in ("completed", "partial", "need_info", "blocked") else "task_failed",
+            "task_finished" if status in {"completed", "partial", "need_info", "blocked"} else "task_failed",
             args.get("summary", ""),
             {
                 "status": status,
@@ -326,101 +531,192 @@ class ReActRunner:
     def _observe_tool_result(self, task: TaskRun, name: str, args: dict, result_block: dict) -> None:
         task.tool_steps += 1
         success = not result_block.get("is_error")
+        payload = _parse_tool_result_json(result_block)
 
         if name == META_SET_EXECUTION_MODE:
             mode = args.get("mode")
-            if mode == "workflow":
+            task.observed = True
+            if mode == "plan" and success and self.controller.task_store is not None:
+                record = self.controller.task_store.load(task.task_id)
+                if record is not None:
+                    task.mode = record.mode
+                    task.plan_id = record.plan_id
+                    task.steps = list(record.steps)
+                    task.current_phase = "plan"
+            elif mode == "workflow":
+                task.mode = "workflow"
                 workflow_name = args.get("workflow_name", "")
-                task.observed = True
                 if success and workflow_name not in READ_ONLY_WORKFLOWS:
                     task.acted = True
                     task.changed_state = True
                     task.last_action_step = task.tool_steps
                     if workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
                         task.verified = True
-                        # Synthetic sub-step: the workflow already ran its own post-change checks.
                         task.last_verification_step = task.tool_steps + 1
                 if success and workflow_name in READ_ONLY_WORKFLOWS:
                     task.verified = True
                     task.last_verification_step = task.tool_steps
+                if self.controller.task_store is not None:
+                    record = self.controller.task_store.load(task.task_id)
+                    if record is not None:
+                        task.steps = list(record.steps)
+            else:
+                task.mode = "direct"
+            self._persist_task_state(task)
             return
 
         if name == META_PROPOSE_DYNAMIC_TOOL:
             task.observed = True
+            task.current_phase = "observe"
+            self._persist_task_state(task)
             return
 
         if name == META_EXECUTE_DYNAMIC_TOOL:
-            payload = _parse_tool_result_json(result_block)
             changes_state = bool(payload.get("changes_state", True))
             task.observed = True
             if not success:
                 if changes_state:
                     task.failed_mutations.append(_tool_action_key(name, args))
+                self._update_plan_step(task, name, args, success=False, error=result_block.get("content", ""))
+                self._persist_task_state(task)
                 return
             if changes_state:
                 task.acted = True
                 task.changed_state = True
                 task.last_action_step = task.tool_steps
+                task.current_phase = "act"
+            else:
+                task.current_phase = "observe"
+            self._update_plan_step(task, name, args, success=True)
+            self._persist_task_state(task)
             return
 
         if not success:
             task.observed = True
+            task.current_phase = "observe"
             if _is_mutating_tool(name, args):
                 task.failed_mutations.append(_tool_action_key(name, args))
+            self._update_plan_step(task, name, args, success=False, error=result_block.get("content", ""))
+            self._persist_task_state(task)
             return
 
         if _is_mutating_tool(name, args):
             task.acted = True
             task.changed_state = True
             task.last_action_step = task.tool_steps
+            task.current_phase = "act"
         else:
             task.observed = True
+            task.current_phase = "observe"
 
         if _is_verification_tool(name, args):
             task.verified = True
             task.last_verification_step = task.tool_steps
+            task.current_phase = "verify"
 
-        if not result_block.get("is_error"):
-            task.observed = True
+        task.observed = True
+        self._update_plan_step(task, name, args, success=True)
+        self._persist_task_state(task)
+
+    def _update_plan_step(self, task: TaskRun, name: str, args: dict, *, success: bool, error: str = "") -> None:
+        if task.mode != "plan":
+            return
+        next_step = _next_step_for_tool(task.steps, name, args)
+        if next_step is None:
+            return
+        next_step.status = "completed" if success else "failed"
+        next_step.error = _truncate(str(error), 600) if error else ""
+        next_step.updated_at = datetime.now(timezone.utc).isoformat()
+        if success:
+            task.current_phase = "act"
 
     def _emit_tool_started(self, task: TaskRun, name: str, args: dict) -> None:
         if name == META_SET_EXECUTION_MODE and args.get("mode") == "workflow":
-            self._emit(task, "workflow_started", f"Workflow started: {args.get('workflow_name', '')}", {
-                "workflow_name": args.get("workflow_name", ""),
-                "args_preview": _preview_json(args),
-            })
+            self._emit(
+                task,
+                "workflow_started",
+                f"Workflow started: {args.get('workflow_name', '')}",
+                {
+                    "workflow_name": args.get("workflow_name", ""),
+                    "args_preview": _preview_json(args),
+                },
+            )
             return
-        self._emit(task, "tool_started", f"Tool started: {name}", {
-            "tool": name,
-            "args_preview": _preview_json(args),
-        })
+        self._emit(
+            task,
+            "tool_started",
+            f"Tool started: {name}",
+            {
+                "tool": name,
+                "args_preview": _preview_json(args),
+            },
+        )
 
     def _emit_tool_finished(self, task: TaskRun, name: str, args: dict, result_block: dict) -> None:
         success = not result_block.get("is_error")
         if name == META_SET_EXECUTION_MODE and args.get("mode") == "workflow":
-            self._emit(task, "workflow_finished", f"Workflow finished: {args.get('workflow_name', '')}", {
-                "workflow_name": args.get("workflow_name", ""),
+            self._emit(
+                task,
+                "workflow_finished",
+                f"Workflow finished: {args.get('workflow_name', '')}",
+                {
+                    "workflow_name": args.get("workflow_name", ""),
+                    "success": success,
+                    **_tool_result_display_data(result_block),
+                },
+            )
+            return
+        self._emit(
+            task,
+            "tool_finished",
+            f"Tool finished: {name}",
+            {
+                "tool": name,
                 "success": success,
                 **_tool_result_display_data(result_block),
-            })
-            return
-        self._emit(task, "tool_finished", f"Tool finished: {name}", {
-            "tool": name,
-            "success": success,
-            **_tool_result_display_data(result_block),
-        })
+            },
+        )
 
     def _commit_final(self, messages: list[dict], task: TaskRun) -> None:
         if task.final_reply:
             messages.append({"role": "assistant", "content": [{"type": "text", "text": task.final_reply}]})
-        persisted_messages = [
-            message for message in messages
-            if not message.get("sysdialogue_internal")
-        ]
+        persisted_messages = [message for message in messages if not message.get("sysdialogue_internal")]
         self.controller.conversation_manager.commit_turn(persisted_messages)
 
+        if self.controller.session_store is not None:
+            self.controller.session_store.sync_manager(
+                self.controller.session_id,
+                self.controller.conversation_manager,
+                surface=self.controller.surface,
+            )
+            entry_role = "assistant" if task.final_status != "failed" else "error"
+            if task.final_reply:
+                self.controller.session_store.append_entry(
+                    self.controller.session_id,
+                    entry_role,
+                    task.final_reply,
+                    surface=self.controller.surface,
+                    technical_details=task.technical_details,
+                )
+            self.controller.session_store.set_status(
+                self.controller.session_id,
+                task.final_status or "completed",
+                surface=self.controller.surface,
+                active_task_id="",
+                technical_details=task.technical_details,
+            )
+
+        final_status = _final_task_store_status(task.final_status)
+        self._persist_task_state(
+            task,
+            status=final_status,
+            current_phase="finish",
+            technical_details=task.technical_details,
+        )
+
     def _emit(self, task: TaskRun, stage: str, message: str, data: dict[str, Any] | None = None) -> None:
-        event = TaskEvent(stage=stage, message=message, data=data or {})
+        payload = data or {}
+        event = TaskEvent(stage=stage, message=message, data=payload)
         task.events.append(event)
         self.controller._emit_task_event_obj(event)
 
@@ -434,6 +730,78 @@ class ReActRunner:
         self._emit(task, "correction", message, payload)
 
 
+def _task_run_from_record(record: TaskRecord, *, resumed: bool = False) -> TaskRun:
+    return TaskRun(
+        task_id=record.task_id,
+        goal=record.goal,
+        requires_environment_feedback=_requires_environment_feedback(record.goal),
+        mode=record.mode or "direct",
+        plan_id=record.plan_id or "",
+        steps=list(record.steps),
+        current_phase=record.current_phase or "analysis",
+        resumed=resumed,
+        resume_message=record.resume_message or "",
+        observed=bool(record.observed),
+        acted=bool(record.acted),
+        verified=bool(record.verified),
+        changed_state=bool(record.changed_state),
+        tool_steps=int(record.tool_steps or 0),
+        last_action_step=int(record.last_action_step or 0),
+        last_verification_step=int(record.last_verification_step or 0),
+        failed_mutations=list(record.failed_mutations or []),
+        iteration_budget=int(record.iteration_budget or 0),
+        iteration_limit=int(record.iteration_limit or 0),
+        technical_details=record.technical_details or "",
+    )
+
+
+def _next_pending_step(steps: list[TaskStepRecord]) -> TaskStepRecord | None:
+    for step in steps:
+        if step.status in {"pending", "running"}:
+            return step
+    return None
+
+
+def _next_step_for_tool(steps: list[TaskStepRecord], name: str, args: dict) -> TaskStepRecord | None:
+    for step in steps:
+        if step.status not in {"pending", "running"}:
+            continue
+        if step.tool != name:
+            return None
+        if _normalized_json(step.args) != _normalized_json(args):
+            return None
+        return step
+    return None
+
+
+def _normalized_json(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return str(value)
+
+
+def _looks_like_resume(user_message: str, goal: str) -> bool:
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+    if any(keyword in text for keyword in RESUME_KEYWORDS):
+        return True
+    goal_text = (goal or "").strip().lower()
+    return bool(goal_text and text == goal_text)
+
+
+def _final_task_store_status(status: str) -> str:
+    return {
+        "completed": "completed",
+        "partial": "completed",
+        "failed": "failed",
+        "blocked": "blocked",
+        "need_info": "blocked",
+        "cancelled": "cancelled",
+    }.get(status, status or "completed")
+
+
 def _requires_environment_feedback(user_message: str) -> bool:
     text = (user_message or "").strip().lower()
     if not text:
@@ -444,20 +812,68 @@ def _requires_environment_feedback(user_message: str) -> bool:
         return False
 
     non_ops_keywords = (
-        "怎么运行", "如何运行", "文档", "设计", "解释", "说明", "框架", "react",
-        "codex", "claude", "openai", "api", "提示词", "计划", "review",
+        "怎么运行",
+        "如何运行",
+        "文档",
+        "设计",
+        "解释",
+        "说明",
+        "框架",
+        "react",
+        "codex",
+        "claude",
+        "openai",
+        "提示词",
+        "计划",
+        "review",
     )
     ops_keywords = (
-        "检查", "查看", "状态", "启动", "停止", "重启", "reload", "restart",
-        "安装", "删除", "修改", "写入", "备份", "恢复", "回滚", "验证",
-        "服务", "端口", "日志", "磁盘", "内存", "cpu", "防火墙", "cron",
-        "nginx", "docker", "podman", "ssh", "服务器", "/etc", "远程",
-        "配置", "密钥", "安全", "审计", "权限", "环境变量", "连接",
-        "key", "token", "secret", ".env",
+        "检查",
+        "查看",
+        "状态",
+        "启动",
+        "停止",
+        "重启",
+        "reload",
+        "restart",
+        "安装",
+        "删除",
+        "修改",
+        "写入",
+        "备份",
+        "恢复",
+        "回滚",
+        "验证",
+        "服务",
+        "端口",
+        "日志",
+        "磁盘",
+        "内存",
+        "cpu",
+        "防火墙",
+        "cron",
+        "nginx",
+        "docker",
+        "podman",
+        "ssh",
+        "服务器",
+        "/etc",
+        "远程",
+        "配置",
+        "密钥",
+        "安全",
+        "审计",
+        "权限",
+        "环境变量",
+        "连接",
+        "key",
+        "token",
+        "secret",
+        ".env",
     )
-    if any(k in text for k in ops_keywords):
+    if any(keyword in text for keyword in ops_keywords):
         return True
-    if any(k in text for k in non_ops_keywords):
+    if any(keyword in text for keyword in non_ops_keywords):
         return False
     return True
 
@@ -483,9 +899,26 @@ def _iteration_budget(
     if not requires_environment_feedback:
         return min(20, limit)
     complex_markers = (
-        "修改", "写入", "备份", "恢复", "回滚", "发布", "部署", "rollout",
-        "workflow", "工作流", "动态工具", "dyntool", "container", "docker",
-        "podman", "迁移", "升级", "多步", "验证", "修复",
+        "修改",
+        "写入",
+        "备份",
+        "恢复",
+        "回滚",
+        "发布",
+        "部署",
+        "rollout",
+        "workflow",
+        "工作流",
+        "动态工具",
+        "dyntool",
+        "container",
+        "docker",
+        "podman",
+        "迁移",
+        "升级",
+        "多步",
+        "验证",
+        "修复",
     )
     if any(marker in text for marker in complex_markers):
         return min(140, limit)
@@ -512,6 +945,13 @@ def _validate_finish_args(task: TaskRun, args: dict) -> list[str]:
             )
         if task.requires_environment_feedback and not evidence:
             errors.append("finish_task.evidence is required for completed operational tasks.")
+        if task.mode == "plan":
+            incomplete = [step.step_id for step in task.steps if step.status not in {"completed", "skipped", "rolled_back"}]
+            if incomplete:
+                errors.append(
+                    "Frozen plan tasks cannot be completed before all planned steps finish. "
+                    f"Remaining steps: {', '.join(incomplete)}."
+                )
         if task.changed_state or args.get("changed_state"):
             if not task.acted:
                 errors.append("Changed-state completions require an executed mutation before completed.")
@@ -535,16 +975,16 @@ def _format_final_reply(args: dict) -> str:
     if args.get("verification"):
         parts.append(f"验证：{args['verification']}")
     if args.get("evidence"):
-        parts.append("证据：" + "；".join(str(x) for x in args["evidence"]))
+        parts.append("证据：" + "；".join(str(item) for item in args["evidence"]))
     if args.get("changed_state"):
         parts.append("状态变更：已发生受控变更。")
     if args.get("remaining_risks"):
-        parts.append("剩余风险：" + "；".join(str(x) for x in args["remaining_risks"]))
+        parts.append("剩余风险：" + "；".join(str(item) for item in args["remaining_risks"]))
     if args.get("next_steps"):
-        parts.append("下一步：" + "；".join(str(x) for x in args["next_steps"]))
+        parts.append("下一步：" + "；".join(str(item) for item in args["next_steps"]))
     if args.get("no_action_reason"):
         parts.append(f"未执行系统操作：{args['no_action_reason']}")
-    return "\n".join(p for p in parts if p)
+    return "\n".join(part for part in parts if part)
 
 
 def _react_correction_message(user_message: str, assistant_text: str) -> str:
@@ -581,7 +1021,7 @@ def _model_response_summary(content: list) -> str:
     if tool_names:
         return "Model requested tools: " + ", ".join(str(name) for name in tool_names)
     text = " ".join(str(_block_attr(block, "text") or "") for block in content if _block_type(block) == "text")
-    return (text[:160] if text else "Model returned no tool calls.")
+    return text[:160] if text else "Model returned no tool calls."
 
 
 def _analysis_summary(content: list) -> str:
@@ -653,7 +1093,7 @@ def _preview_json(value, limit: int = 1000) -> str:
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 1)] + "…"
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _is_mutating_tool(name: str, args: dict) -> bool:

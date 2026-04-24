@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from sysdialogue.agent.error_presentation import present_error
 from sysdialogue.app.runtime_factory import create_runtime
 
 
 def run_simple_cli(config) -> int:
     runtime = create_runtime(
         config,
+        session_id="simple_cli",
         require_api=True,
         confirm_callback=_confirm_callback,
         input_callback=_input_callback,
+        surface="simple",
     )
     runtime.controller.event_callback = _event_callback
     try:
@@ -30,7 +33,15 @@ def run_simple_cli(config) -> int:
                 runtime.controller.request_cancel()
                 print("system> 已请求取消当前执行。")
                 continue
-            reply = runtime.controller.run_turn(text)
+            try:
+                reply = runtime.controller.run_turn(text)
+            except Exception as exc:
+                presentation = present_error(exc)
+                reply = (
+                    f"{presentation.user_summary}\n"
+                    f"影响：{presentation.impact}\n"
+                    f"建议：{presentation.suggested_next_action}"
+                )
             print(f"sysdialogue> {reply}")
         return 0
     finally:

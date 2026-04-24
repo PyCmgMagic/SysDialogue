@@ -6,6 +6,8 @@ from click.testing import CliRunner
 from sysdialogue.app.cli import _require_api_config, main
 from sysdialogue.app.config import AppConfig, load_config
 from sysdialogue.app.runtime_factory import create_runtime
+from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.state_store import SessionStore
 from sysdialogue.tools.dynamic_registry import DynamicToolRegistry
 
 
@@ -74,5 +76,26 @@ def test_default_runtime_injects_executable_dynamic_registry() -> None:
         assert isinstance(runtime.controller.dynamic_registry, DynamicToolRegistry)
         removed_attr = "competition" + "_mode"
         assert not hasattr(runtime.controller.dynamic_registry, removed_attr)
+    finally:
+        runtime.close()
+
+
+def test_create_runtime_hydrates_persisted_conversation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    manager = ConversationManager()
+    manager.context["service_name"] = "nginx"
+    manager.history = [
+        {"role": "user", "content": "检查 nginx"},
+        {"role": "assistant", "content": [{"type": "text", "text": "检查完成。"}]},
+    ]
+    SessionStore().sync_manager("session_a", manager, surface="web")
+
+    runtime = create_runtime(AppConfig(), session_id="session_a", require_api=False)
+    try:
+        assert runtime.controller.conversation_manager.context == {"service_name": "nginx"}
+        assert runtime.controller.conversation_manager.history[-1]["content"] == [
+            {"type": "text", "text": "检查完成。"}
+        ]
     finally:
         runtime.close()

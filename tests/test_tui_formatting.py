@@ -150,17 +150,21 @@ def test_task_timeline_corrections_are_debug_details_not_main_thinking() -> None
     assert sum("ReAct 纠偏记录" in item for item in state["details"]) == 1
 
 
-def test_tui_persists_restored_history_to_restored_session(tmp_path) -> None:
+def test_tui_persists_history_to_shared_runtime_session(tmp_path) -> None:
+    from sysdialogue.agent.state_store import SessionStore
+
     controller = SimpleNamespace(
         audit_log=SimpleNamespace(session_id="current_session"),
+        session_id="current_session",
+        surface="tui",
+        session_store=SessionStore(str(tmp_path)),
         conversation_manager=ConversationManager(),
     )
     app = SysDialogueTUI(controller)
     app._history_store = ConversationStore(storage_dir=str(tmp_path))
-    app._history_session_id = "restored_session"
     app._current_goal = "继续检查"
 
     app._persist_history("完成", "completed")
 
-    assert (tmp_path / "restored_session.json").exists()
-    assert not (tmp_path / "current_session.json").exists()
+    assert (tmp_path / "current_session.json").exists()
+    assert not (tmp_path / "restored_session.json").exists()

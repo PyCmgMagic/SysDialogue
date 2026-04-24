@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import re
 import time
-from dataclasses import dataclass
 from typing import Any
 
 from rich.markdown import Markdown
@@ -13,12 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Collapsible, Static
 
-
-@dataclass
-class ErrorPresentation:
-    summary: str
-    detail: str
-    suggestions: list[str]
+from sysdialogue.agent.error_presentation import ErrorPresentation, present_error
 
 
 class TaskTimelineCard(Vertical):
@@ -235,6 +228,8 @@ class TaskTimelineCard(Vertical):
         status = data.get("status") or "completed"
         self.status = _status_label(status)
         result_lines: list[str] = []
+        if data.get("summary"):
+            result_lines.append(str(data["summary"]))
         if data.get("verification"):
             result_lines.append(f"验证：{data['verification']}")
         evidence = data.get("evidence") or []
@@ -318,43 +313,6 @@ class TaskTimelineCard(Vertical):
             items.append(value)
 
 
-def present_error(raw: str) -> ErrorPresentation:
-    text = (raw or "").strip()
-    if not text:
-        return ErrorPresentation(
-            summary="任务未完成，但没有收到详细错误。",
-            detail="",
-            suggestions=["查看审计面板", "缩小任务范围后重试"],
-        )
-    if "Traceback (most recent call last)" in text:
-        exc_line = _last_exception_line(text)
-        return ErrorPresentation(
-            summary=f"系统捕获到未处理异常，任务已停止：{exc_line}",
-            detail=text,
-            suggestions=["查看技术详情", "检查最近一次工具调用和右侧审计记录"],
-        )
-    if "LLM 调用失败" in text or "OpenAI-compatible API" in text:
-        return ErrorPresentation(
-            summary="模型服务调用失败，任务已停止。",
-            detail=text,
-            suggestions=[
-                "检查 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL",
-                "确认模型服务支持 Chat Completions tool_calls",
-            ],
-        )
-    if "未按 ReAct 协议" in text or "tool_calls" in text:
-        return ErrorPresentation(
-            summary="模型未按工具协议完成任务收口。",
-            detail=text,
-            suggestions=["确认当前模型支持 tool_calls", "将任务拆小后重试"],
-        )
-    return ErrorPresentation(
-        summary=_shorten(text.splitlines()[0], 180),
-        detail=text,
-        suggestions=["根据错误摘要补充信息", "必要时查看技术详情后重试"],
-    )
-
-
 def _fallback_model_summary(data: dict[str, Any]) -> str:
     count = data.get("tool_count", 0)
     if count:
@@ -374,23 +332,6 @@ def _detail_block(title: str, body: str) -> str:
 
 def _escape_newlines(text: str) -> str:
     return str(text).replace("\n", "\n  ")
-
-
-def _shorten(text: str, limit: int) -> str:
-    text = " ".join(str(text).split())
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 1)] + "…"
-
-
-def _last_exception_line(traceback_text: str) -> str:
-    lines = [line.strip() for line in traceback_text.splitlines() if line.strip()]
-    if not lines:
-        return "未知异常"
-    for line in reversed(lines):
-        if re.match(r"^[A-Za-z_][\w.]*Error:|^[A-Za-z_][\w.]*Exception:", line):
-            return _shorten(line, 160)
-    return _shorten(lines[-1], 160)
 
 
 def _status_symbol(status: str) -> tuple[str, str]:
