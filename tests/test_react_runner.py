@@ -179,6 +179,49 @@ def test_iteration_budget_scales_by_task_complexity() -> None:
     assert _iteration_budget("检查系统", hard_limit=10, requires_environment_feedback=True) == 20
 
 
+def test_resume_command_persists_original_user_command(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            [
+                _finish(
+                    {
+                        "status": "completed",
+                        "summary": "Resumed task completed.",
+                        "evidence": ["explicit resume"],
+                        "verification": "",
+                        "changed_state": False,
+                        "remaining_risks": [],
+                        "next_steps": [],
+                        "no_action_reason": "No system action was required.",
+                    }
+                )
+            ]
+        ]
+    )
+    controller, _ = _controller(tmp_path, llm)
+    task = controller.task_store.create(
+        task_id="task_resume",
+        session_id=controller.session_id,
+        surface="tui",
+        goal="hello",
+        status="interrupted",
+    )
+    controller.session_store.ensure(controller.session_id, surface="tui")
+    controller.session_store.set_status(
+        controller.session_id,
+        "interrupted",
+        surface="tui",
+        active_task_id=task.task_id,
+    )
+
+    controller.run_turn("/resume")
+    record = controller.session_store.load(controller.session_id)
+
+    assert record is not None
+    assert record.entries[0] == {"role": "user", "text": "/resume"}
+    assert all("continue task:" not in str(entry.get("text", "")) for entry in record.entries)
+
+
 def test_greeting_can_finish_without_system_action(tmp_path: Path) -> None:
     llm = FakeLLM([
         [

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s]+)"),
@@ -55,31 +57,32 @@ class MemoryManager:
         source: str = "manual",
         target_id: str = "",
     ) -> MemoryRecord:
-        records = self._load()
         sanitized_value = redact_sensitive(value)
-        existing = next(
-            (
-                record
-                for record in records
-                if record.scope == scope and record.key == key and record.target_id == target_id
-            ),
-            None,
-        )
-        if existing is None:
-            existing = MemoryRecord(
-                memory_id=f"mem_{uuid.uuid4().hex[:8]}",
-                scope=scope,
-                key=key,
-                value=sanitized_value,
-                source=source,
-                target_id=target_id,
+        with self._lock():
+            records = self._load_unlocked()
+            existing = next(
+                (
+                    record
+                    for record in records
+                    if record.scope == scope and record.key == key and record.target_id == target_id
+                ),
+                None,
             )
-            records.append(existing)
-        else:
-            existing.value = sanitized_value
-            existing.source = source
-            existing.updated_at = datetime.now(timezone.utc).isoformat()
-        self._save(records)
+            if existing is None:
+                existing = MemoryRecord(
+                    memory_id=f"mem_{uuid.uuid4().hex[:8]}",
+                    scope=scope,
+                    key=key,
+                    value=sanitized_value,
+                    source=source,
+                    target_id=target_id,
+                )
+                records.append(existing)
+            else:
+                existing.value = sanitized_value
+                existing.source = source
+                existing.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save_unlocked(records)
         return existing
 
     def list_records(self, *, scope: str | None = None, target_id: str = "", limit: int = 50) -> list[MemoryRecord]:
@@ -111,7 +114,14 @@ class MemoryManager:
             source="compact",
         )
 
+    def _lock(self) -> FileLock:
+        return FileLock(str(self.index_path) + ".lock", timeout=10)
+
     def _load(self) -> list[MemoryRecord]:
+        with self._lock():
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> list[MemoryRecord]:
         if not self.index_path.exists():
             return []
         try:
@@ -136,7 +146,7 @@ class MemoryManager:
             )
         return records
 
-    def _save(self, records: list[MemoryRecord]) -> None:
+    def _save_unlocked(self, records: list[MemoryRecord]) -> None:
         payload = {"records": [asdict(record) for record in records]}
         tmp = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

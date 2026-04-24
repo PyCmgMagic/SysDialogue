@@ -43,8 +43,10 @@ class PermissionRule:
 class PermissionPolicy:
     """Small JSON-backed allow/ask/deny policy.
 
-    Rules are evaluated in file order. The default policy preserves existing
-    tool behavior; dynamic command families still ask by default.
+    The most specific matching rule wins. Equal-specificity rules use the later
+    file entry, which lets operators place broad defaults first and local
+    overrides later. The default policy preserves existing tool behavior;
+    dynamic command families still ask by default.
     """
 
     def __init__(self, path: str | None = None):
@@ -68,13 +70,12 @@ class PermissionPolicy:
         if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
             return PolicyDecision("allow", "Allowed by this-session grant.", "session-grant")
 
-        rule = self._first_match(kind="tool", value=tool)
-        if rule is None and target:
-            rule = self._first_match(kind="target", value=target)
-        if rule is None:
-            rule = self._first_path_match(args or {})
-        if rule is None:
-            rule = self._first_match(kind="risk", value=risk_level)
+        rule = self._best_tool_rule(
+            tool=tool,
+            args=args or {},
+            risk_level=risk_level,
+            target=target,
+        )
 
         if rule is not None:
             return PolicyDecision(_normalize_action(rule.action), rule.description or f"Matched {rule.kind}:{rule.pattern}", rule.rule_id)
@@ -94,7 +95,7 @@ class PermissionPolicy:
         key = self._grant_key("command", command, target)
         if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
             return PolicyDecision("allow", "Allowed by this-session grant.", "session-grant")
-        rule = self._first_match(kind="command", value=command)
+        rule = self._best_match(kind="command", value=command)
         if rule is not None:
             return PolicyDecision(_normalize_action(rule.action), rule.description or f"Matched command:{rule.pattern}", rule.rule_id)
         return PolicyDecision("ask", "Dynamic commands require explicit confirmation by default.", "default:command")
@@ -145,25 +146,48 @@ class PermissionPolicy:
                 continue
         self.rules = rules
 
-    def _first_match(self, *, kind: str, value: str) -> PermissionRule | None:
-        for rule in self.rules:
+    def _best_match(self, *, kind: str, value: str) -> PermissionRule | None:
+        best: tuple[int, int, PermissionRule] | None = None
+        for index, rule in enumerate(self.rules):
             if rule.kind != kind:
                 continue
             if fnmatch.fnmatchcase(value, rule.pattern):
-                return rule
-        return None
+                candidate = (_rule_specificity(rule), index, rule)
+                if best is None or candidate[:2] >= best[:2]:
+                    best = candidate
+        return best[2] if best is not None else None
 
-    def _first_path_match(self, args: dict[str, Any]) -> PermissionRule | None:
+    def _best_tool_rule(
+        self,
+        *,
+        tool: str,
+        args: dict[str, Any],
+        risk_level: str,
+        target: str = "",
+    ) -> PermissionRule | None:
+        matches: list[tuple[int, int, PermissionRule]] = []
+        path_values = self._path_values(args)
+        for index, rule in enumerate(self.rules):
+            if rule.kind == "tool" and fnmatch.fnmatchcase(tool, rule.pattern):
+                matches.append((_rule_specificity(rule), index, rule))
+            elif rule.kind == "target" and target and fnmatch.fnmatchcase(target, rule.pattern):
+                matches.append((_rule_specificity(rule), index, rule))
+            elif rule.kind == "risk" and fnmatch.fnmatchcase(risk_level, rule.pattern):
+                matches.append((_rule_specificity(rule), index, rule))
+            elif rule.kind == "path" and any(fnmatch.fnmatchcase(path, rule.pattern) for path in path_values):
+                matches.append((_rule_specificity(rule), index, rule))
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item[0], item[1]))
+        return matches[-1][2]
+
+    def _path_values(self, args: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
         for key in ("path", "file_path", "src", "dst", "target_path", "source_path", "archive_path"):
             value = args.get(key)
             if isinstance(value, str) and value:
                 candidates.append(value.replace("\\", "/"))
-        for path in candidates:
-            rule = self._first_match(kind="path", value=path)
-            if rule is not None:
-                return rule
-        return None
+        return candidates
 
     @staticmethod
     def _grant_key(kind: str, value: str, target: str = "") -> str:
@@ -177,3 +201,23 @@ def _normalize_action(action: str) -> str:
 
 def _basename(command: str) -> str:
     return str(command or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _rule_specificity(rule: PermissionRule) -> int:
+    return _kind_weight(rule.kind) + _pattern_specificity(rule.pattern)
+
+
+def _kind_weight(kind: str) -> int:
+    return {
+        "path": 400,
+        "target": 300,
+        "tool": 200,
+        "command": 200,
+        "risk": 100,
+    }.get(str(kind or ""), 0)
+
+
+def _pattern_specificity(pattern: str) -> int:
+    text = str(pattern or "")
+    wildcards = sum(text.count(token) for token in ("*", "?", "["))
+    return max(0, len(text) - wildcards * 4)

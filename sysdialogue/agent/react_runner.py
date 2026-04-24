@@ -79,9 +79,6 @@ WORKFLOWS_WITH_INTERNAL_VERIFICATION = {
     "safe_config_patch",
     "service_restart",
 }
-RESUME_KEYWORDS = ("continue", "resume", "继续", "接着", "继续上次", "继续任务", "重试上次")
-
-
 @dataclass
 class TaskEvent:
     stage: str
@@ -132,7 +129,7 @@ class ReActRunner:
     def __init__(self, controller: "AgentController"):
         self.controller = controller
 
-    def run(self, user_message: str) -> str:
+    def run(self, user_message: str, *, persisted_user_message: str | None = None) -> str:
         from sysdialogue.agent.controller import _content_as_list, _extract_text
 
         self.controller.clear_cancel()
@@ -152,7 +149,7 @@ class ReActRunner:
         if session_store is not None:
             session_store.append_user_turn(
                 self.controller.session_id,
-                user_message,
+                user_message if persisted_user_message is None else persisted_user_message,
                 surface=self.controller.surface,
                 active_task_id=task.task_id,
             )
@@ -414,19 +411,9 @@ class ReActRunner:
                 existing = task_store.load(existing.task_id) or existing
                 return _task_run_from_record(existing, resumed=True)
 
-        active_task_id = session_record.active_task_id if session_record is not None else ""
-        if task_store is not None and active_task_id:
-            existing = task_store.load(active_task_id)
-            if existing is not None and existing.status == "interrupted" and _looks_like_resume(user_message, existing.goal):
-                task_store.update(
-                    existing.task_id,
-                    status="running",
-                    current_phase=existing.current_phase or "resume",
-                    resume_message=existing.resume_message or "Previous task was interrupted. Continue from the last durable step.",
-                    heartbeat_ts=datetime.now(timezone.utc).isoformat(),
-                )
-                existing = task_store.load(existing.task_id) or existing
-                return _task_run_from_record(existing, resumed=True)
+        # Resuming a durable interrupted task is intentionally explicit.  The UI,
+        # Web API, and /resume command set forced_resume_task_id; ordinary text
+        # should start a fresh task instead of guessing from "continue" wording.
 
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         budget = _iteration_budget(
@@ -853,16 +840,6 @@ def _normalized_json(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
         return str(value)
-
-
-def _looks_like_resume(user_message: str, goal: str) -> bool:
-    text = (user_message or "").strip().lower()
-    if not text:
-        return False
-    if any(keyword in text for keyword in RESUME_KEYWORDS):
-        return True
-    goal_text = (goal or "").strip().lower()
-    return bool(goal_text and text == goal_text)
 
 
 def _final_task_store_status(status: str) -> str:

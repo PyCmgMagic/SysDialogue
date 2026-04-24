@@ -239,7 +239,10 @@ class AgentController:
             result = self.command_registry.execute(self, user_message)
             if result.resume_task_id:
                 self.force_resume_task(result.resume_task_id)
-                return ReActRunner(self).run(f"continue task: {result.resume_goal}")
+                return ReActRunner(self).run(
+                    result.resume_goal,
+                    persisted_user_message=user_message,
+                )
             if self.session_store is not None:
                 self.session_store.save_turn(
                     session_id=self.session_id,

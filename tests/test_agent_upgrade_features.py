@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from sysdialogue.agent.command_registry import CommandRegistry
@@ -75,6 +76,23 @@ def test_permission_policy_can_deny_tool_without_lowering_block(tmp_path: Path) 
     assert block_decision.rule_id == "risk:block"
 
 
+def test_permission_policy_specific_path_rule_overrides_broad_tool_allow(tmp_path: Path) -> None:
+    policy = PermissionPolicy(str(tmp_path / "policy.json"))
+    policy.rules = [
+        PermissionRule(rule_id="allow-delete", action="allow", kind="tool", pattern="delete_path"),
+        PermissionRule(rule_id="deny-etc", action="deny", kind="path", pattern="/etc/*"),
+    ]
+
+    decision = policy.evaluate_tool(
+        tool="delete_path",
+        args={"path": "/etc/hosts"},
+        risk_level="SAFE",
+    )
+
+    assert decision.action == "deny"
+    assert decision.rule_id == "deny-etc"
+
+
 def test_permission_policy_denial_is_returned_as_tool_error(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.permission_policy.rules = [
@@ -114,6 +132,27 @@ def test_memory_manager_redacts_secret_and_renders_summary(tmp_path: Path) -> No
     assert (tmp_path / "memory" / "MEMORY.md").exists()
 
 
+def test_memory_manager_preserves_concurrent_writes(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+
+    def worker(index: int) -> None:
+        MemoryManager(str(memory_dir)).remember(
+            scope="global",
+            key=f"key_{index}",
+            value=f"value_{index}",
+            source="test",
+        )
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    keys = {record.key for record in MemoryManager(str(memory_dir)).list_records(limit=20)}
+    assert {f"key_{index}" for index in range(12)} <= keys
+
+
 def test_trace_store_writes_jsonl_spans(tmp_path: Path) -> None:
     store = TraceStore(str(tmp_path / "traces"))
     span = store.start_span(
@@ -131,6 +170,28 @@ def test_trace_store_writes_jsonl_spans(tmp_path: Path) -> None:
     assert loaded[-1].span_type == "tool_call"
     assert loaded[-1].data["api_key"] == "<redacted>"
     assert "secret" not in raw
+
+
+def test_trace_store_redacts_secret_values_in_generic_fields(tmp_path: Path) -> None:
+    store = TraceStore(str(tmp_path / "traces"))
+    span = store.start_span(
+        session_id="session_secret",
+        task_id="task_secret",
+        span_type="tool_call",
+        name="bad_tool",
+        data={
+            "output_preview": "OPENAI_API_KEY=sk-live Bearer abc.def",
+            "nested": {"message": "token=plain-secret"},
+        },
+    )
+    store.end_span(span, summary="stderr leaked password=pw123")
+
+    raw = (tmp_path / "traces" / "session_secret.jsonl").read_text(encoding="utf-8")
+
+    assert "sk-live" not in raw
+    assert "abc.def" not in raw
+    assert "plain-secret" not in raw
+    assert "pw123" not in raw
 
 
 def test_slash_commands_persist_and_can_compact_memory(tmp_path: Path) -> None:

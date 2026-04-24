@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
+from sysdialogue.agent.memory import redact_sensitive
+
 
 @dataclass
 class TraceSpan:
@@ -99,15 +103,34 @@ class TraceStore:
 
     def append(self, span: TraceSpan) -> None:
         path = self._path(span.session_id)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(span), ensure_ascii=False) + "\n")
+        safe_span = TraceSpan(
+            trace_id=span.trace_id,
+            span_id=span.span_id,
+            span_type=span.span_type,
+            name=span.name,
+            session_id=span.session_id,
+            task_id=span.task_id,
+            status=span.status,
+            started_at=span.started_at,
+            ended_at=span.ended_at,
+            duration_ms=span.duration_ms,
+            summary=_safe_text(span.summary, limit=1000),
+            data=_safe_data(span.data),
+        )
+        lock = FileLock(str(path) + ".lock", timeout=10)
+        with lock:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(asdict(safe_span), ensure_ascii=False) + "\n")
 
     def list_spans(self, session_id: str, limit: int = 100) -> list[TraceSpan]:
         path = self._path(session_id)
         if not path.exists():
             return []
         spans: list[TraceSpan] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        lock = FileLock(str(path) + ".lock", timeout=10)
+        with lock:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        for line in lines:
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
@@ -141,10 +164,31 @@ def _safe_data(data: dict[str, Any] | None) -> dict[str, Any]:
         if any(token in str(key).lower() for token in ("secret", "token", "password", "api_key")):
             safe[str(key)] = "<redacted>"
         elif isinstance(value, (str, int, float, bool)) or value is None:
-            safe[str(key)] = value if not (isinstance(value, str) and len(value) > 2000) else value[:2000]
+            safe[str(key)] = _safe_text(value) if isinstance(value, str) else value
         elif isinstance(value, (list, dict)):
-            rendered = json.dumps(value, ensure_ascii=False, default=str)
+            rendered = json.dumps(_redact_nested(value), ensure_ascii=False, default=str)
             safe[str(key)] = rendered[:2000]
         else:
-            safe[str(key)] = str(value)[:2000]
+            safe[str(key)] = _safe_text(str(value))
     return safe
+
+
+def _safe_text(value: str, *, limit: int = 2000) -> str:
+    text = redact_sensitive(str(value or ""))
+    return text if len(text) <= limit else text[:limit]
+
+
+def _redact_nested(value: Any) -> Any:
+    if isinstance(value, str):
+        return _safe_text(value)
+    if isinstance(value, list):
+        return [_redact_nested(item) for item in value[:50]]
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in list(value.items())[:50]:
+            if any(token in str(key).lower() for token in ("secret", "token", "password", "api_key")):
+                redacted[str(key)] = "<redacted>"
+            else:
+                redacted[str(key)] = _redact_nested(item)
+        return redacted
+    return value
