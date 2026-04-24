@@ -461,7 +461,7 @@ class SysDialogueTUI(App):
         event.wait()
         return result["ok"]
 
-    def _input_callback(self, prompt: str, multiline: bool) -> str:
+    def _input_callback(self, prompt: str, multiline: bool, sensitive: bool = False) -> str:
         event = threading.Event()
         result: dict[str, str] = {"value": ""}
         state: dict[str, Any] = {
@@ -476,7 +476,11 @@ class SysDialogueTUI(App):
                 self.controller.session_id,
                 "waiting_input",
                 surface=self.controller.surface,
-                pending_input={"prompt": prompt, "multiline": multiline},
+                pending_input={
+                    "prompt": prompt,
+                    "multiline": multiline,
+                    "sensitive": sensitive,
+                },
             )
         except Exception:
             pass
@@ -484,13 +488,17 @@ class SysDialogueTUI(App):
         def show() -> None:
             if state["resolved"]:
                 return
-            mode = "多行" if multiline else "单行"
-            if self._current_card is not None:
-                self._current_card.add_notice(f"需要补充输入：{prompt}（{mode}）")
+            if sensitive:
+                mode_label = "密码（不回显）"
             else:
-                self._write_log(f"[yellow]需要输入:[/yellow] {prompt} ({mode})")
+                mode_label = "多行" if multiline else "单行"
+            display_prompt = prompt if not sensitive else "需要 sudo 密码"
+            if self._current_card is not None:
+                self._current_card.add_notice(f"需要补充输入：{display_prompt}（{mode_label}）")
+            else:
+                self._write_log(f"[yellow]需要输入:[/yellow] {display_prompt} ({mode_label})")
             self._refresh_runtime_status()
-            modal = InputModal(prompt=prompt, multiline=multiline)
+            modal = InputModal(prompt=prompt, multiline=multiline, sensitive=sensitive)
             state["screen"] = modal
 
             def on_close(value: str | None) -> None:

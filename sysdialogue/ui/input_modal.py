@@ -66,11 +66,14 @@ class InputModal(ModalScreen[str | None]):
         Binding("escape", "cancel", "取消"),
     ]
 
-    def __init__(self, prompt: str, multiline: bool):
+    def __init__(self, prompt: str, multiline: bool, sensitive: bool = False):
         super().__init__()
         self.prompt = prompt
         self.multiline = multiline
-        self._use_textarea = bool(multiline and TextArea is not None)
+        self.sensitive = bool(sensitive)
+        # Sensitive inputs (passwords) always collapse to single-line masked Input,
+        # regardless of multiline, so the value never renders in a TextArea.
+        self._use_textarea = bool(multiline and TextArea is not None and not self.sensitive)
 
     def compose(self) -> ComposeResult:
         hint = "按 F2 或 Ctrl+Enter 提交，Esc 取消。"
@@ -97,9 +100,15 @@ class InputModal(ModalScreen[str | None]):
             yield TextArea(id="modal_textarea")  # type: ignore[misc]
         else:
             placeholder = "请输入内容"
-            if self.multiline:
+            if self.sensitive:
+                placeholder = "请输入密码（不回显）"
+            elif self.multiline:
                 placeholder = "请输入内容（当前环境将按单行模式采集）"
-            yield Input(placeholder=placeholder, id="modal_input")
+            yield Input(
+                placeholder=placeholder,
+                id="modal_input",
+                password=self.sensitive,
+            )
 
     def on_mount(self) -> None:
         if self._use_textarea:

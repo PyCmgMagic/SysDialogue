@@ -527,8 +527,13 @@ class DynamicToolRegistry:
                 changes_state=effective_changes_state,
             )
 
-        # 实际执行
-        output, exit_code = executor.run(cmd, timeout=timeout)
+        # 实际执行：若命令以 sudo 开头，剥掉 sudo 前缀并走 run_privileged，
+        # 由 executor 处理一次性的交互式密码提示；否则直接 run。
+        stripped = _strip_sudo_prefix(cmd)
+        if stripped is not None and hasattr(executor, "run_privileged"):
+            output, exit_code = executor.run_privileged(stripped, timeout=timeout)
+        else:
+            output, exit_code = executor.run(cmd, timeout=timeout)
 
         # 更新用量统计
         if persist_usage:
@@ -571,6 +576,40 @@ class DynamicToolRegistry:
 
 def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
+
+
+_SUDO_PASSTHROUGH_FLAGS = {"-n", "-S", "-H", "-E", "-k", "-K"}
+
+
+def _strip_sudo_prefix(cmd: list[str]) -> list[str] | None:
+    """Return the inner command if ``cmd`` is a plain ``sudo ...`` invocation.
+
+    Handles the common argv shapes produced by the model, e.g.
+    ``["sudo", "usermod", ...]``, ``["sudo", "-n", "--", "systemctl", "restart", "x"]``.
+    Returns ``None`` if ``cmd`` uses sudo features we do not want to transparently
+    rewrite (``-u user``, ``-i``, ``-s``, etc.) — those stay on the normal
+    ``run`` path so the model-visible behavior does not silently change.
+    """
+    if not cmd or cmd[0] != "sudo":
+        return None
+    i = 1
+    while i < len(cmd):
+        tok = cmd[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in _SUDO_PASSTHROUGH_FLAGS:
+            i += 1
+            continue
+        # First non-flag token is the inner program — stop scanning.
+        if not tok.startswith("-"):
+            break
+        # Anything else (-u, -i, -s, -p, -g, ...) is not safely rewritable.
+        return None
+    inner = cmd[i:]
+    if not inner:
+        return None
+    return inner
 
 
 def _validate_tool_spec(*, name: str, cmd_template: list[str], params: dict) -> None:

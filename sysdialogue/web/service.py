@@ -30,6 +30,7 @@ class _PendingInput:
     request_id: str
     prompt: str
     multiline: bool
+    sensitive: bool = False
     event: threading.Event = field(default_factory=threading.Event)
     value: str = ""
 
@@ -272,11 +273,12 @@ class WebSession:
             self.runtime.session_store.clear_pending(self.session_id, surface="web", status=status)
         return pending.approved
 
-    def _input_callback(self, prompt: str, multiline: bool) -> str:
+    def _input_callback(self, prompt: str, multiline: bool, sensitive: bool = False) -> str:
         pending = _PendingInput(
             request_id=f"input_{uuid.uuid4().hex[:8]}",
             prompt=prompt,
             multiline=multiline,
+            sensitive=bool(sensitive),
         )
         with self._lock:
             self.pending_input = pending
@@ -287,6 +289,7 @@ class WebSession:
                 pending_input={
                     "prompt": prompt,
                     "multiline": multiline,
+                    "sensitive": bool(sensitive),
                     "owner_pid": os.getpid(),
                     "request_id": pending.request_id,
                     "resolved": False,
