@@ -12,6 +12,7 @@ from sysdialogue.ui.tui_app import (
     _format_confirmation_result,
     _format_error_markdown,
     _format_event_message,
+    _normalize_confirmation_decision,
     _looks_like_failure_reply,
 )
 from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
@@ -76,11 +77,25 @@ def test_tui_confirmation_result_is_user_visible() -> None:
     )
 
     approved = _format_confirmation_result(req, True).plain
+    approved_always = _format_confirmation_result(req, True, "always_this_session").plain
     denied = _format_confirmation_result(req, False).plain
 
     assert "批阅" in approved
     assert "已批准 manage_service" in approved
+    assert "manage_service" in approved_always
+    assert "\u4f1a\u8bdd" in approved_always
     assert "已拒绝 manage_service" in denied
+
+
+def test_tui_confirmation_decision_normalization_supports_session_grants() -> None:
+    assert _normalize_confirmation_decision(True) == {"approved": True, "decision": "once"}
+    assert _normalize_confirmation_decision(False) == {"approved": False, "decision": "deny"}
+    assert _normalize_confirmation_decision(
+        {"approved": True, "decision": "always_this_session"},
+    ) == {"approved": True, "decision": "always_this_session"}
+    assert _normalize_confirmation_decision(
+        {"approved": False, "decision": "always_this_session"},
+    ) == {"approved": False, "decision": "deny"}
 
 
 def test_tui_error_presentation_keeps_technical_details_foldable() -> None:

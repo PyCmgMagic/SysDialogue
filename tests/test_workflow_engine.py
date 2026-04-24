@@ -143,3 +143,54 @@ steps:
     assert execution.final_status == "failed"
     assert execution.steps_state["mutate"].status == "failed"
     assert "resource_locked: tool:mutate_marker" in execution.steps_state["mutate"].error
+
+
+def test_workflow_lock_scope_requires_durable_task_owner(tmp_path: Path) -> None:
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "locked_mutation.yaml").write_text(
+        """
+name: locked_mutation
+parameters: []
+steps:
+  - id: mutate
+    type: tool_call
+    tool: mutate_marker
+    lock_scope: "file:/etc/example.conf"
+    args: {}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    called: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDef(
+            name="mutate_marker",
+            fn=lambda executor: called.append("ran") or ToolResult(success=True),
+            schema={
+                "name": "mutate_marker",
+                "description": "Mutate marker",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    controller = AgentController(
+        executor=LocalExecutor(),
+        env_profile={"remote_mode": False, "current_user": "tester"},
+        audit_log=AuditLog(log_dir=str(tmp_path / "audit")),
+        registry=registry,
+        llm_client=None,
+        session_store=SessionStore(str(tmp_path / "sessions")),
+        task_store=TaskStore(str(tmp_path / "tasks")),
+        lock_store=LockStore(str(tmp_path / "locks")),
+    )
+
+    execution = WorkflowEngine(controller=controller, workflows_dir=workflows_dir).run(
+        "locked_mutation",
+        {},
+    )
+
+    assert execution.final_status == "failed"
+    assert execution.steps_state["mutate"].status == "failed"
+    assert "missing_task_context: file:/etc/example.conf" in execution.steps_state["mutate"].error
+    assert called == []

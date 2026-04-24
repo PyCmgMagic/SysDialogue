@@ -15,7 +15,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from sysdialogue.agent.conversation_store import ConversationStore
-from sysdialogue.agent.error_presentation import format_error_markdown
+from sysdialogue.agent.error_presentation import format_error_markdown, present_error
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
@@ -156,7 +156,7 @@ class SysDialogueTUI(App):
                 VerticalScroll(id="conversation"),
                 Horizontal(id="choice_bar", classes="hidden"),
                 Input(
-                    placeholder="输入运维需求（例：查看系统版本 / 重启 nginx）…",
+                    placeholder="输入运维需求或命令（/status /resume /skills /why /target）…",
                     id="user_input",
                 ),
                 id="left_pane",
@@ -182,7 +182,8 @@ class SysDialogueTUI(App):
         welcome.append("Enter", style="bold")
         welcome.append(" 发送。\n", style="")
         welcome.append(
-            "F2 历史  ·  F3 审计  ·  F4 环境  ·  Ctrl+C 取消  ·  Ctrl+D 退出",
+            "F2 历史  ·  F3 审计  ·  F4 环境  ·  Ctrl+C 取消  ·  Ctrl+D 退出\n"
+            "常用命令：/status /resume /skills /skill /hooks /why /target",
             style="dim",
         )
         self._write_log(
@@ -248,6 +249,14 @@ class SysDialogueTUI(App):
         self._worker = None
         if is_error or _looks_like_failure_reply(reply) or self._turn_failed:
             self._finish_current_card(reply, is_error=True)
+            if is_error:
+                presentation = present_error(reply)
+                reply = (
+                    f"{presentation.user_summary}\n\n"
+                    f"影响：{presentation.impact}\n\n"
+                    "建议：\n"
+                    + "\n".join(f"- {item}" for item in presentation.suggestions)
+                )
             status = "failed"
         elif self._turn_cancelled:
             self._finish_current_card(reply, is_error=False, cancelled=True)
@@ -415,9 +424,9 @@ class SysDialogueTUI(App):
         else:
             self._set_status("就绪")
 
-    def _confirm_callback(self, req: "ConfirmationRequest") -> bool:
+    def _confirm_callback(self, req: "ConfirmationRequest") -> bool | dict[str, Any]:
         event = threading.Event()
-        result: dict[str, bool] = {"ok": False}
+        result: dict[str, Any] = {"ok": False, "decision": {"approved": False, "decision": "deny"}}
         state: dict[str, Any] = {
             "event": event,
             "result": result,
@@ -452,14 +461,14 @@ class SysDialogueTUI(App):
             modal = ConfirmModal(req)
             state["screen"] = modal
 
-            def on_close(approved: bool | None) -> None:
-                self._resolve_confirm_state(bool(approved), state=state)
+            def on_close(decision: dict | bool | None) -> None:
+                self._resolve_confirm_state(decision, state=state)
 
             self.push_screen(modal, on_close)
 
         self.call_from_thread(show)
         event.wait()
-        return result["ok"]
+        return result["decision"]
 
     def _input_callback(self, prompt: str, multiline: bool) -> str:
         event = threading.Event()
@@ -505,7 +514,7 @@ class SysDialogueTUI(App):
 
     def _resolve_confirm_state(
         self,
-        approved: bool,
+        approved: bool | dict | None,
         *,
         state: dict[str, Any] | None = None,
         dismiss: bool = False,
@@ -513,12 +522,14 @@ class SysDialogueTUI(App):
         current = state or self._confirm_state
         if current is None or current["resolved"]:
             return
+        decision = _normalize_confirmation_decision(approved)
         current["resolved"] = True
-        current["result"]["ok"] = bool(approved)
+        current["result"]["ok"] = bool(decision["approved"])
+        current["result"]["decision"] = decision
         req = current.get("request")
         if dismiss and current.get("screen") is not None:
             try:
-                current["screen"].dismiss(bool(approved))
+                current["screen"].dismiss(decision)
             except Exception:
                 pass
         current["event"].set()
@@ -534,7 +545,7 @@ class SysDialogueTUI(App):
         except Exception:
             pass
         if req is not None:
-            result_text = _format_confirmation_result(req, approved)
+            result_text = _format_confirmation_result(req, bool(decision["approved"]), str(decision["decision"]))
             if self._current_card is not None:
                 self._current_card.add_review_result(result_text)
             else:
@@ -746,17 +757,34 @@ def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str
     return message or stage
 
 
-def _format_confirmation_result(req: "ConfirmationRequest", approved: bool) -> Text:
+def _format_confirmation_result(req: "ConfirmationRequest", approved: bool, decision: str = "once") -> Text:
     text = Text()
     if approved:
         text.append("批阅 ", style="bold green")
         text.append("| ", style="dim")
-        text.append(f"已批准 {req.tool}，继续执行。", style="green")
+        if decision == "always_this_session":
+            text.append(f"已批准 {req.tool}，本会话后续同类低风险请求将自动允许。", style="green")
+        else:
+            text.append(f"已批准 {req.tool}，继续执行。", style="green")
     else:
         text.append("批阅 ", style="bold yellow")
         text.append("| ", style="dim")
         text.append(f"已拒绝 {req.tool}，相关操作不会继续。", style="yellow")
     return text
+
+
+def _normalize_confirmation_decision(value: bool | dict | None) -> dict[str, Any]:
+    if isinstance(value, dict):
+        approved = bool(value.get("approved"))
+        decision = str(value.get("decision") or ("once" if approved else "deny"))
+    else:
+        approved = bool(value)
+        decision = "once" if approved else "deny"
+    if decision not in {"once", "always_this_session", "deny"}:
+        decision = "once" if approved else "deny"
+    if not approved:
+        decision = "deny"
+    return {"approved": approved, "decision": decision}
 
 
 def _choices_from_task_event(data: dict[str, Any]) -> list[str]:

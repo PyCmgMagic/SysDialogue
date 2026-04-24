@@ -282,6 +282,9 @@ class TaskTimelineCard(Vertical):
         header = Text()
         header.append(symbol, style=f"bold {color}")
         header.append("  SysDialogue", style=f"bold {color}")
+        if self.goal:
+            header.append("  ·  ", style="dim")
+            header.append(_short_goal(self.goal), style="bold")
         self._header.update(header)
         status_line = Text()
         status_line.append(self.status, style=color)
@@ -357,3 +360,10 @@ def _status_label(status: str) -> str:
         "need_info": "需要补充信息",
         "cancelled": "已取消",
     }.get(status, status)
+
+
+def _short_goal(goal: str, limit: int = 72) -> str:
+    text = " ".join(str(goal or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"

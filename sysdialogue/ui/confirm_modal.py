@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from sysdialogue.security.approval_rules import ConfirmationRequest
 
 
-class ConfirmModal(ModalScreen[bool]):
-    """WARN-HIGH 操作确认。返回 True=批准 / False=拒绝。"""
+class ConfirmModal(ModalScreen[dict]):
+    """WARN-HIGH 操作确认。返回审批决策对象。"""
 
     CSS = """
     ConfirmModal {
@@ -60,9 +60,10 @@ class ConfirmModal(ModalScreen[bool]):
     """
 
     BINDINGS = [
-        Binding("enter", "approve", "批准"),
+        Binding("enter", "approve_once", "批准本次"),
         Binding("escape", "deny", "拒绝"),
-        Binding("y", "approve", show=False),
+        Binding("y", "approve_once", show=False),
+        Binding("a", "approve_always", "本会话总是允许"),
         Binding("n", "deny", show=False),
     ]
 
@@ -78,7 +79,8 @@ class ConfirmModal(ModalScreen[bool]):
                 id="modal_body_scroll",
             ),
             Horizontal(
-                Button("批准 (Enter)", id="btn_approve", variant="warning"),
+                Button("批准本次 (Enter)", id="btn_approve_once", variant="warning"),
+                Button("本会话总是允许 (A)", id="btn_approve_always", variant="success"),
                 Button("拒绝 (Esc)", id="btn_deny", variant="default"),
                 id="modal_buttons",
             ),
@@ -106,13 +108,18 @@ class ConfirmModal(ModalScreen[bool]):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn_approve":
-            self.dismiss(True)
+        if event.button.id == "btn_approve_once":
+            self.dismiss({"approved": True, "decision": "once"})
+        elif event.button.id == "btn_approve_always":
+            self.dismiss({"approved": True, "decision": "always_this_session"})
         else:
-            self.dismiss(False)
+            self.dismiss({"approved": False, "decision": "deny"})
 
-    def action_approve(self) -> None:
-        self.dismiss(True)
+    def action_approve_once(self) -> None:
+        self.dismiss({"approved": True, "decision": "once"})
+
+    def action_approve_always(self) -> None:
+        self.dismiss({"approved": True, "decision": "always_this_session"})
 
     def action_deny(self) -> None:
-        self.dismiss(False)
+        self.dismiss({"approved": False, "decision": "deny"})

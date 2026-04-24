@@ -56,6 +56,7 @@ def _controller(tmp_path: Path) -> AgentController:
         memory_manager=MemoryManager(str(tmp_path / "memory")),
         trace_store=TraceStore(str(tmp_path / "traces")),
         command_registry=CommandRegistry(),
+        target_profile_store=TargetProfileStore(str(tmp_path / "targets")),
     )
 
 
@@ -211,6 +212,30 @@ def test_slash_commands_persist_and_can_compact_memory(tmp_path: Path) -> None:
     assert "remember nginx" in memory
     assert record is not None
     assert [entry["role"] for entry in record.entries[-2:]] == ["user", "assistant"]
+
+
+def test_tui_facing_slash_commands_render_readable_summaries(tmp_path: Path) -> None:
+    project_skill = tmp_path / ".sysdialogue" / "skills" / "deploy" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: deploy\ndescription: deploy playbook\nallowed_tools: [manage_service]\n---\nDeploy safely.\n",
+        encoding="utf-8",
+    )
+    controller = _controller(tmp_path)
+    controller.skill_manager = SkillManager(project_root=tmp_path, user_root=tmp_path / "user-skills")
+    controller.permission_policy.rules = [
+        PermissionRule(rule_id="ask-service", action="ask", kind="tool", pattern="manage_service")
+    ]
+
+    skills = controller.run_turn("/skills")
+    why = controller.run_turn("/why manage_service")
+    target = controller.run_turn("/target set service=nginx")
+
+    assert "tools=manage_service" in skills
+    assert "## Permission decision for `manage_service`" in why
+    assert "Matched rule: `ask-service`" in why
+    assert "Updated target" in target
+    assert controller.conversation_manager.context["target:service"] == "nginx"
 
 
 def test_web_app_exposes_command_trace_and_memory_routes() -> None:

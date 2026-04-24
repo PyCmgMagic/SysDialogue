@@ -76,12 +76,19 @@ class WorkflowExecution:
 # --------------------------------------------------------------------------
 
 class ResourceLockManager:
-    """进程内资源锁。scope 格式：file:<path> / service:<name> / user:<name> / cron:<id>。"""
+    """Workflow resource locks.
+
+    When a controller has a LockStore, workflow lock_scope uses a durable
+    cross-process lease owned by current_task_id. Without a task owner we fail
+    closed instead of falling back to an unsafe in-memory lock. The in-memory
+    path is kept only for standalone compatibility when no LockStore exists.
+    """
 
     def __init__(self, controller: "AgentController" | None = None) -> None:
         self.controller = controller
         self._locks: dict[str, threading.Lock] = {}
         self._mu = threading.Lock()
+        self.last_error = ""
 
     def _lock_for(self, scope: str) -> threading.Lock:
         with self._mu:
@@ -93,7 +100,11 @@ class ResourceLockManager:
 
     def acquire(self, scope: str, timeout: float = 30.0) -> bool:
         """非阻塞轮询 + 超时。成功返回 True，超时返回 False。"""
-        if self.controller is not None and self.controller.lock_store is not None and self.controller.current_task_id:
+        self.last_error = ""
+        if self.controller is not None and self.controller.lock_store is not None:
+            if not self.controller.current_task_id:
+                self.last_error = f"missing_task_context: {scope}"
+                return False
             lease = self.controller.lock_store.acquire(
                 scope,
                 task_id=self.controller.current_task_id,
@@ -108,6 +119,7 @@ class ResourceLockManager:
             if lease is not None:
                 self.controller.register_lock_scope(scope)
                 return True
+            self.last_error = f"resource_locked: {scope}"
             return False
         lk = self._lock_for(scope)
         deadline = time.monotonic() + timeout
@@ -312,12 +324,13 @@ class WorkflowEngine:
                 if lock_scope:
                     ok = self.locks.acquire(lock_scope, timeout=self.lock_timeout)
                     if not ok:
+                        error = self.locks.last_error or f"resource_locked: {lock_scope}"
                         execution.steps_state[sid] = StepResult(
                             step_id=sid, status="failed",
-                            error=f"resource_locked: {lock_scope}",
+                            error=error,
                         )
                         self._log_step(wf_id, sid, step.get("type", "tool_call"), "failed",
-                                       detail={"reason": "resource_locked", "scope": lock_scope})
+                                       detail={"reason": error.split(":", 1)[0], "scope": lock_scope})
                         if step.get("on_fail") == "rollback":
                             triggered_rollback = True
                         break

@@ -220,7 +220,8 @@ def _skills(controller: Any) -> str:
             flags.append("user")
         if skill.model_invocable:
             flags.append("model")
-        lines.append(f"- {skill.name} [{skill.scope}; {', '.join(flags)}]: {skill.description}")
+        tools = ", ".join(skill.allowed_tools) if skill.allowed_tools else "no tool preference"
+        lines.append(f"- {skill.name} [{skill.scope}; {', '.join(flags)}; tools={tools}]: {skill.description}")
     return "\n".join(lines)
 
 
@@ -304,6 +305,13 @@ def _target(controller: Any, arg: str) -> str:
             return "Usage: /target set key=value"
         key, value = assignment.split("=", 1)
         profile = store.remember_fact(target_id, key.strip(), value.strip())
+        controller.conversation_manager.context[f"target:{key.strip()}"] = value.strip()
+        if getattr(controller, "session_store", None) is not None:
+            controller.session_store.sync_manager(
+                controller.session_id,
+                controller.conversation_manager,
+                surface=controller.surface,
+            )
         return f"Updated target {profile.target_id}: {key.strip()}={value.strip()}"
     return "Usage: /target or /target set key=value"
 
@@ -315,7 +323,25 @@ def _why(controller: Any, arg: str) -> str:
     tool = (arg.strip().split() or ["*"])[0]
     target = str((getattr(controller, "env_profile", {}) or {}).get("host") or (getattr(controller, "env_profile", {}) or {}).get("hostname") or "")
     explanation = policy.explain_tool(tool=tool, args={}, risk_level="SAFE", target=target)
-    return json.dumps(explanation, ensure_ascii=False, indent=2)
+    matched = explanation.get("matched_rule") or {}
+    candidates = explanation.get("candidate_rules") or []
+    lines = [
+        f"## Permission decision for `{tool}`",
+        "",
+        f"- Action: `{explanation.get('action')}`",
+        f"- Rule: `{explanation.get('rule_id')}`",
+        f"- Reason: {explanation.get('reason')}",
+        f"- Decision logic: {explanation.get('decision_reason')}",
+    ]
+    if matched:
+        lines.append(f"- Matched rule: `{matched.get('rule_id')}` ({matched.get('kind')}:{matched.get('pattern')})")
+    if explanation.get("suggested_always_grant"):
+        lines.append("- Tip: this can be approved as `always_this_session` from the confirmation dialog.")
+    if candidates:
+        lines.extend(["", "Candidate rules:"])
+        for rule in candidates[:5]:
+            lines.append(f"- `{rule.get('rule_id')}` {rule.get('action')} {rule.get('kind')}:{rule.get('pattern')}")
+    return "\n".join(lines)
 
 
 def _split_name_and_tail(text: str) -> tuple[str, str]:

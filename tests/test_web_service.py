@@ -86,13 +86,14 @@ def test_web_session_can_resolve_persisted_confirmation_from_another_session(
     )
 
     session = _fake_web_session("web_confirm", session_store, TaskStore())
-    session.submit_confirmation(True)
+    session.submit_confirmation(True, decision="always_this_session")
 
     record = session_store.load("web_confirm")
     assert record is not None
     assert record.status == "running"
     assert record.pending_confirmation["resolved"] is True
     assert record.pending_confirmation["approved"] is True
+    assert record.pending_confirmation["decision"] == "always_this_session"
 
 
 def test_web_session_can_resolve_persisted_input_from_another_session(
