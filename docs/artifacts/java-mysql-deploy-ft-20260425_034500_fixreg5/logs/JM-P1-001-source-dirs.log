@@ -1,0 +1,7 @@
+$ mkdir -p '/tmp/sdft_20260425_034500_fixreg5_java_mysql/source' '/tmp/sdft_20260425_034500_fixreg5_java_mysql/source/src/main/java/com/example/sdft' '/tmp/sdft_20260425_034500_fixreg5_java_mysql/source/src/main/resources' '/tmp/sdft_20260425_034500_fixreg5_java_mysql/source/src/test/java/com/example/sdft'
+exit=0
+
+STDOUT:
+
+
+STDERR:

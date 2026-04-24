@@ -27,21 +27,26 @@ class FakeLocalExecutor(LocalExecutor):
         self.calls: list[tuple[list[str], Optional[bytes]]] = []
 
     # Force non-root so run_privileged always takes the sudo branch.
-    def run_privileged(self, cmd, timeout=30):  # noqa: D401 - reuse parent logic
+    def run_privileged(self, cmd, timeout=30, cwd=None):  # noqa: D401 - reuse parent logic
         import os as _os
 
         original_geteuid = getattr(_os, "geteuid", None)
         if original_geteuid is not None:
             _os.geteuid = lambda: 1000  # type: ignore[assignment]
         try:
-            return super().run_privileged(cmd, timeout=timeout)
+            return super().run_privileged(cmd, timeout=timeout, cwd=cwd)
         finally:
             if original_geteuid is not None:
                 _os.geteuid = original_geteuid  # type: ignore[assignment]
 
-    def _raw_run_with_stdin(self, cmd, *, timeout, stdin_bytes):
+    def _raw_run_with_stdin(self, cmd, *, timeout, stdin_bytes, cwd=None):
         self.calls.append((list(cmd), stdin_bytes))
         stdout, stderr, exit_code = self.handler(list(cmd), stdin_bytes)
+        return RunResult(stdout=stdout, stderr=stderr, exit_code=exit_code)
+
+    def _raw_run(self, cmd, timeout, cwd=None):
+        self.calls.append((list(cmd), None))
+        stdout, stderr, exit_code = self.handler(list(cmd), None)
         return RunResult(stdout=stdout, stderr=stderr, exit_code=exit_code)
 
 

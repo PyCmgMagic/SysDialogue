@@ -735,13 +735,31 @@ def _effective_changes_state(
     cmd: list[str],
     mapped: MappedTool | None,
 ) -> bool:
+    if _is_read_only_dynamic_command(cmd):
+        return False
     if declared_changes_state:
         return True
     if mapped is not None and _mapped_tool_key(mapped) in _READ_ONLY_MAPPED_TOOL_KEYS:
         return False
-    if cmd and _command_basename(cmd[0]) in _READ_ONLY_COMMAND_BASENAMES:
-        return False
     return True
+
+
+def _is_read_only_dynamic_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    base = _command_basename(cmd[0])
+    if base in _READ_ONLY_COMMAND_BASENAMES:
+        return True
+    lowered = [str(part).lower() for part in cmd]
+    if base in {"java", "javac", "mvn", "gradle", "node", "npm"}:
+        return any(part in {"-version", "--version", "-v", "version"} for part in lowered[1:])
+    if base == "systemctl":
+        return len(lowered) >= 2 and lowered[1] in {"status", "is-active", "is-enabled", "show"}
+    if base in {"curl", "wget"}:
+        text = " ".join(lowered)
+        write_markers = (" -x post", " -x put", " -x patch", " -x delete", " --request post", " --request put", " --request patch", " --request delete", " -d ", " --data")
+        return not any(marker in f" {text} " for marker in write_markers)
+    return False
 
 
 def _mapped_tool_key(mapped: MappedTool) -> str:

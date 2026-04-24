@@ -395,6 +395,40 @@ def test_linux_path_policies_do_not_depend_on_host_os_separators() -> None:
     assert "B012" in result.error
 
 
+def test_copy_move_path_allows_single_match_source_glob(tmp_path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "app.jar").write_text("jar", encoding="utf-8")
+    dst = tmp_path / "deploy" / "app.jar"
+
+    result = copy_move_path(
+        RecordingExecutor(),
+        str(target_dir / "*.jar"),
+        str(dst),
+        action="copy",
+    )
+
+    assert result.success is True
+    assert dst.read_text(encoding="utf-8") == "jar"
+
+
+def test_copy_move_path_rejects_ambiguous_source_glob(tmp_path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "a.jar").write_text("a", encoding="utf-8")
+    (target_dir / "b.jar").write_text("b", encoding="utf-8")
+
+    result = copy_move_path(
+        RecordingExecutor(),
+        str(target_dir / "*.jar"),
+        str(tmp_path / "deploy" / "app.jar"),
+        action="copy",
+    )
+
+    assert result.success is False
+    assert "multiple" in result.error
+
+
 def test_scheduled_workflow_rejects_high_risk_steps_before_execution(
     tmp_path: Path,
     monkeypatch,

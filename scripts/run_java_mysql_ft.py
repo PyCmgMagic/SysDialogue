@@ -33,11 +33,12 @@ ROOT = Path.cwd()
 ART = ROOT / "docs" / "artifacts" / f"java-mysql-deploy-ft-{RUN_ID}"
 REPORT = ROOT / "docs" / "java-mysql-deployment-functional-test-report.md"
 PREFIX = f"sdft_{RUN_ID}"
+SHORT_RUN_ID = re.sub(r"[^a-z0-9]", "", RUN_ID.lower())[-20:]
 REMOTE_BASE = f"/tmp/{PREFIX}_java_mysql"
 SRC_DIR = f"{REMOTE_BASE}/source"
 APP_DIR = f"/opt/{PREFIX}_app"
 SERVICE = f"{PREFIX}_java.service"
-APP_USER = f"{PREFIX}_appuser"
+APP_USER = f"sdft_{SHORT_RUN_ID}u"
 MYSQL_CONTAINER = f"{PREFIX}_mysql"
 DB_NAME = f"{PREFIX}_db"
 DB_USER = f"{PREFIX}_app"
@@ -354,6 +355,21 @@ def copy_session_artifacts(case_id: str, session_id: str, runtime) -> list[str]:
     return evidence
 
 
+def task_statuses_for_session(session_id: str, runtime) -> list[str]:
+    statuses: list[str] = []
+    try:
+        for task_file in runtime.task_store.storage_dir.glob("*.json"):
+            try:
+                data = json.loads(task_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if data.get("session_id") == session_id:
+                statuses.append(str(data.get("status") or ""))
+    except Exception:
+        return []
+    return statuses
+
+
 def run_agent_case(case_id: str, scenario: str, prompt: str, expected: str) -> dict[str, Any]:
     session_id = f"jm_{RUN_ID}_{case_id.lower().replace('-', '_')}"
     confirmations: list[dict[str, Any]] = []
@@ -380,6 +396,7 @@ def run_agent_case(case_id: str, scenario: str, prompt: str, expected: str) -> d
     reply = ""
     error = ""
     evidence: list[str] = []
+    task_statuses: list[str] = []
     try:
         runtime = create_runtime(make_config(), session_id=session_id, require_api=True, confirm_callback=confirm, input_callback=input_cb, surface="web")
         reply = runtime.controller.run_turn(prompt)
@@ -388,18 +405,20 @@ def run_agent_case(case_id: str, scenario: str, prompt: str, expected: str) -> d
     finally:
         elapsed = time.time() - started
         if runtime is not None:
+            task_statuses = task_statuses_for_session(session_id, runtime)
             evidence.extend(copy_session_artifacts(case_id, session_id, runtime))
             try:
                 runtime.close()
             except Exception:
                 pass
-    response_payload = {"session_id": session_id, "elapsed_sec": round(elapsed, 1), "reply": reply, "error": error, "confirmations": confirmations, "inputs": inputs}
+    response_payload = {"session_id": session_id, "elapsed_sec": round(elapsed, 1), "reply": reply, "error": error, "task_statuses": task_statuses, "confirmations": confirmations, "inputs": inputs}
     response_path = write_artifact(case_id, "responses", f"{case_id}.response.json", response_payload, method="web_agent_response")
     evidence.append(str(response_path.relative_to(ROOT)))
     conf_path = write_artifact(case_id, "state", f"{case_id}-confirmations.json", confirmations, method="confirm_callback")
     evidence.append(str(conf_path.relative_to(ROOT)))
     actual = error or reply[:1000]
-    status = "PASS" if not error and ("completed" in reply.lower() or "success" in reply.lower() or "成功" in reply) else "FAIL"
+    final_status = task_statuses[-1] if task_statuses else ""
+    status = "PASS" if not error and final_status == "completed" else "FAIL"
     add_result(case_id, scenario, "Web Agent", expected, actual, status, evidence, elapsed)
     if status == "FAIL":
         issues.append({"id": case_id, "summary": f"{scenario} did not clearly complete", "details": actual, "evidence": evidence[:5]})
@@ -511,7 +530,7 @@ def secret_scan_artifacts() -> tuple[list[str], Path]:
     return leaks, path
 
 
-def cleanup() -> None:
+def cleanup(original_hostname: str = "") -> None:
     cmds = [
         f"systemctl stop {SERVICE} >/dev/null 2>&1 || true",
         f"systemctl disable {SERVICE} >/dev/null 2>&1 || true",
@@ -523,6 +542,8 @@ def cleanup() -> None:
         f"ufw delete allow {APP_PORT}/tcp >/dev/null 2>&1 || true",
         f"ufw delete allow {MYSQL_PORT}/tcp >/dev/null 2>&1 || true",
     ]
+    if original_hostname:
+        cmds.append(f"hostnamectl set-hostname {original_hostname} >/dev/null 2>&1 || true")
     _, code, path = remote_cmd("CLEANUP", "\n".join(cmds), timeout=120, category="logs", name="cleanup-actions.log")
     cleanup_records.append({"cmd": "cleanup actions", "exit_code": code, "evidence": str(path.relative_to(ROOT))})
     check_cmd = f"set +e; systemctl status {SERVICE} --no-pager >/dev/null 2>&1; echo service_status=$?; docker ps -a --filter name={MYSQL_CONTAINER} --format '{{{{.Names}}}}'; id {APP_USER} 2>/dev/null || true; find /tmp /opt -maxdepth 1 -name '{PREFIX}*' -print 2>/dev/null; ss -ltnp | grep -E ':{APP_PORT}|:{MYSQL_PORT}' || true"
@@ -610,9 +631,15 @@ def build_report(leaks: list[str]) -> None:
 
 def main() -> None:
     write_artifact("RUN", "baseline", "run-context.json", {"run_id": RUN_ID, "prefix": PREFIX, "host": f"{HOST}:{PORT}", "model": MODEL, "base_url": BASE_URL, "started_at": now()}, method="harness")
+    original_hostname = ""
+    try:
+        hout, _, _ = remote_cmd("RUN", "hostname", timeout=20, category="baseline", name="original-hostname.log")
+        original_hostname = hout.split("STDOUT:\n", 1)[-1].split("\n\nSTDERR:", 1)[0].strip().splitlines()[-1]
+    except Exception:
+        original_hostname = ""
     try:
         run_baseline()
-        cleanup()
+        cleanup(original_hostname)
         fixture_path = upload_project_fixture("JM-P1-001")
         add_result("JM-P1-001", "创建/放置 Spring Boot 项目测试夹具", "SSH setup + Web evidence", "文件树正确", f"fixture uploaded to {SRC_DIR}", "PASS", [str(fixture_path.relative_to(ROOT))])
 
@@ -643,12 +670,13 @@ Requirements:
 1. Inspect {SRC_DIR}, Java, Maven, current ports, and the existing MySQL container {MYSQL_CONTAINER}. Mark Java/Maven precheck steps continue_on_failure=true because missing dependencies can be repaired by installation.
 2. If Java 17 or Maven are missing, install openjdk-17-jdk-headless and maven using manage_package, then verify versions.
 3. Run Maven test and Maven package with execute_dynamic_tool cwd={SRC_DIR}; do not use shell cd/&&. Preserve build output evidence.
-4. Create app directory {APP_DIR} and copy the built jar there.
+4. Verify the built JAR with stat_path, create app directory {APP_DIR}, and copy exactly one built jar to {APP_DIR}/app.jar.
 5. Create Linux user {APP_USER} if needed.
 6. Create a root-owned environment file under {APP_DIR}/app.env containing APP_PORT={APP_PORT}, DB_HOST=127.0.0.1, DB_PORT={MYSQL_PORT}, DB_NAME={DB_NAME}, DB_USER={DB_USER}, DB_PASSWORD={DB_APP_PASSWORD}. Do not print the password in the final answer.
-7. Create systemd unit {SERVICE} to run the jar with that environment file.
+7. Create systemd unit {SERVICE} to run {APP_DIR}/app.jar with that environment file.
 8. daemon-reload, enable/start the service, and verify status.
 9. Verify endpoints after the last mutation: http://127.0.0.1:{APP_PORT}/actuator/health, /db-check, and /items. /items must include agent-ok.
+Do not change hostname, SSH settings, firewall rules, or global system identity settings for this deployment.
 Finish completed only if service status and HTTP evidence are present. If package network or Maven dependency download fails, finish blocked with logs and next steps.
 """
         run_agent_case("JM-P1-005", "systemd Java 服务发布", java_prompt, "service active and endpoints healthy")
@@ -667,7 +695,7 @@ Finish completed only if service status and HTTP evidence are present. If packag
         run_slash_export_case()
         run_safety_checks()
     finally:
-        cleanup()
+        cleanup(original_hostname)
         (ART / "manifest.json").write_text(redact_text(json.dumps(manifest, ensure_ascii=False, indent=2)), encoding="utf-8")
         leaks, _ = secret_scan_artifacts()
         build_report(leaks)

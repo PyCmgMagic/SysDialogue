@@ -1,0 +1,8 @@
+{
+  "status": "Session: jm_20260425_034500_fixreg5_exports\nSurface: web\nStatus: ready\nTask: none",
+  "audit": "Recent audit records:\n- env_profile:  ",
+  "memory": "Layered memory: no persisted reusable facts yet.",
+  "permissions": "PermissionPolicy: default follows RiskClassifier; DynTool commands ask; BLOCK=deny.",
+  "export_audit": "Exported audit: C:\\Users\\32563\\.sysdialogue\\exports\\audit_jm_20260425_034500_fixreg5_exports_20260424T184504Z.jsonl",
+  "export_replay": "Exported replay package: C:\\Users\\32563\\.sysdialogue\\exports\\replay_jm_20260425_034500_fixreg5_exports_20260424T184504Z.zip"
+}

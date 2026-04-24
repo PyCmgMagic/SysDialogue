@@ -1227,6 +1227,131 @@ def test_execute_dynamic_tool_inline_mode_supports_cwd(tmp_path: Path) -> None:
     assert execute_result["cwd"] == str(workdir)
 
 
+def test_execute_dynamic_tool_nested_inline_args_are_normalized_for_plan_matching(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    task = TaskRun(task_id="task_nested", goal="check java", requires_environment_feedback=True)
+    task.mode = "plan"
+    task.steps.append(
+        TaskStepRecord(
+            step_id="check_java",
+            tool="execute_dynamic_tool",
+            purpose="Check Java version.",
+            args={
+                "cmd_template": ["java", "-version"],
+                "cwd": str(workdir),
+                "changes_state": False,
+            },
+        )
+    )
+    resolved, error = _resolve_runtime_args_for_tool(
+        task,
+        "execute_dynamic_tool",
+        {
+            "args": {
+                "cmd_template": ["java", "-version"],
+                "cwd": str(workdir),
+                "changes_state": False,
+                "consequences": "Read-only check",
+                "estimated_risk": "SAFE",
+                "intent_summary": "Check Java version",
+            },
+            "consequences": "Read-only check",
+            "estimated_risk": "SAFE",
+            "changes_state": False,
+        },
+    )
+
+    assert error is None
+    assert resolved["cmd_template"] == ["java", "-version"]
+    assert resolved["cwd"] == str(workdir)
+    assert resolved["args"] == {}
+    assert _plan_args_match("execute_dynamic_tool", task.steps[0].args, resolved)
+
+
+def test_dynamic_tool_version_checks_are_read_only_when_declared_read_only(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    decisions: list[dict] = []
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("version", 0))
+
+    result = registry.execute_inline(
+        name="java_version",
+        description="Check Java version",
+        cmd_template=["java", "-version"],
+        params={},
+        args={},
+        consequences="Read-only version check",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        changes_state=False,
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: decisions.append(payload) or True,
+    )
+
+    assert result.success is True
+    assert result.changes_state is False
+    assert decisions[-1]["changes_state"] is False
+
+
+def test_dynamic_tool_maven_build_stays_mutating_even_if_misdeclared(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("built", 0))
+
+    result = registry.execute_inline(
+        name="maven_test",
+        description="Run Maven tests",
+        cmd_template=["mvn", "test"],
+        params={},
+        args={},
+        consequences="Runs project build",
+        risk_assessment="Build",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert result.success is True
+    assert result.changes_state is True
+
+
+def test_dynamic_tool_endpoint_and_service_checks_are_intrinsically_read_only(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("ok", 0))
+
+    curl = registry.execute_inline(
+        name="curl_health",
+        description="Check health endpoint",
+        cmd_template=["curl", "-s", "http://127.0.0.1:18082/actuator/health"],
+        params={},
+        args={},
+        consequences="Endpoint verification",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+    systemctl = registry.execute_inline(
+        name="service_active",
+        description="Check service activity",
+        cmd_template=["systemctl", "is-active", "demo.service"],
+        params={},
+        args={},
+        consequences="Service verification",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert curl.success is True and curl.changes_state is False
+    assert systemctl.success is True and systemctl.changes_state is False
+
+
 def test_execute_dynamic_tool_rejects_invalid_cwd(tmp_path: Path) -> None:
     llm = FakeLLM([
         [

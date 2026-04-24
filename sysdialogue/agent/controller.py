@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy
 from sysdialogue.agent.role_agents import render_role_profiles
@@ -853,6 +854,7 @@ class AgentController:
                 is_error=True,
             )
 
+        args = normalize_execute_dynamic_tool_args(args)
         raw_tool_id = args.get("tool_id", "")
         has_tool_id = isinstance(raw_tool_id, str) and bool(raw_tool_id.strip())
         cmd_template = args.get("cmd_template")

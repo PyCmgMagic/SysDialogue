@@ -299,7 +299,7 @@ SCHEMA_COPY_MOVE_PATH = _schema(
     "copy_move_path",
     "拷贝或移动文件/目录。copy 到系统目录触发 WH024。",
     {
-        "src": {"type": "string"},
+        "src": {"type": "string", "description": "Source path. A single-match glob such as target/*.jar is allowed."},
         "dst": {"type": "string"},
         "action": {"type": "string", "enum": ["copy", "move"], "default": "copy"},
     },

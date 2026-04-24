@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
+from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
 from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_EXECUTE_DYNAMIC_TOOL,
@@ -1039,6 +1040,8 @@ def _plan_step_repair_match(step: TaskStepRecord, name: str, actual: dict) -> bo
 def _resolve_runtime_args_for_tool(task: TaskRun, name: str, args: Any) -> tuple[dict[str, Any], str | None]:
     if not isinstance(args, dict):
         return {}, f"{name} arguments must be an object."
+    if name == META_EXECUTE_DYNAMIC_TOOL:
+        args = normalize_execute_dynamic_tool_args(args)
     if task.mode != "plan":
         return args, None
     resolved, unresolved = _resolve_value(args, task.steps)
@@ -1196,6 +1199,13 @@ def _normalize_plan_args(tool: str, args: Any) -> Any:
             normalized.pop("backend", None)
         if normalized.get("restart_policy") == "no":
             normalized.pop("restart_policy", None)
+    if tool == "create_user":
+        if normalized.get("groups") == []:
+            normalized.pop("groups", None)
+        if normalized.get("shell") == "/bin/bash":
+            normalized.pop("shell", None)
+        if normalized.get("create_home") is True:
+            normalized.pop("create_home", None)
     if "ports" in normalized and isinstance(normalized["ports"], list):
         normalized["ports"] = [
             {k: v for k, v in port.items() if not (k == "protocol" and v == "tcp")}

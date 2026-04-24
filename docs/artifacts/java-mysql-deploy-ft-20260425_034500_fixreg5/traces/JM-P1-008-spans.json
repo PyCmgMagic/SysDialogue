@@ -1,0 +1,118 @@
+[
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_49934fda40",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:27.158361+00:00",
+    "ended_at": "2026-04-24T18:44:44.568304+00:00",
+    "duration_ms": 17409,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 1
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_6615be2581",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:44.619634+00:00",
+    "ended_at": "2026-04-24T18:44:47.165504+00:00",
+    "duration_ms": 2545,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 2
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_54686ccd09",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:47.192626+00:00",
+    "ended_at": "2026-04-24T18:44:49.329954+00:00",
+    "duration_ms": 2137,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 3
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_3d12910f55",
+    "span_type": "guardrail",
+    "name": "permission_policy",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:49.368616+00:00",
+    "ended_at": "2026-04-24T18:44:49.368626+00:00",
+    "duration_ms": 0,
+    "summary": "SAFE tool without a stricter policy rule.",
+    "data": {
+      "tool": "manage_service",
+      "action": "allow",
+      "rule_id": "default:risk-classifier",
+      "risk_level": "SAFE"
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_303a6241f0",
+    "span_type": "tool_call",
+    "name": "manage_service",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "error",
+    "started_at": "2026-04-24T18:44:49.407870+00:00",
+    "ended_at": "2026-04-24T18:44:49.407886+00:00",
+    "duration_ms": 0,
+    "summary": "Unit sdft_20260425_034500_fixreg5_java.service could not be found.",
+    "data": {
+      "tool": "manage_service",
+      "exit_code": 0
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_c057b80936",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:49.436119+00:00",
+    "ended_at": "2026-04-24T18:44:51.048637+00:00",
+    "duration_ms": 1612,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 4
+    }
+  },
+  {
+    "trace_id": "trace_jm_20260425_034500_fixreg5_jm_p1_008",
+    "span_id": "span_da86058e08",
+    "span_type": "llm_call",
+    "name": "chat.completions",
+    "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+    "task_id": "task_2d37ee30",
+    "status": "ok",
+    "started_at": "2026-04-24T18:44:51.075636+00:00",
+    "ended_at": "2026-04-24T18:44:59.793808+00:00",
+    "duration_ms": 8718,
+    "summary": "LLM response received.",
+    "data": {
+      "iteration": 5
+    }
+  }
+]
