@@ -158,7 +158,7 @@ class SysDialogueTUI(App):
         )
         return Panel(
             Group(logo, tagline, Rule(style="dim"), line1, line2, line3),
-            border_style=f"{t.banner_fg} 45%",
+            border_style=f"dim {t.banner_fg}",
             padding=(1, 3),
             title_align="left",
         )
@@ -245,7 +245,7 @@ class SysDialogueTUI(App):
         body.append(f"{g.bullet} 你", style="bold cyan")
         body.append("   刚刚\n", style="dim")
         body.append(text)
-        self._write_log(Panel(body, border_style="cyan 35%", padding=(0, 2)))
+        self._write_log(Panel(body, border_style="dim cyan", padding=(0, 2)))
 
     def _begin_task_card(self, goal: str) -> None:
         if self._current_card is not None:
@@ -268,7 +268,7 @@ class SysDialogueTUI(App):
         self._write_log(Panel(
             Markdown(reply or "（无输出）"),
             title="[bold magenta]SysDialogue[/bold magenta]",
-            title_align="left", border_style="magenta 45%", padding=(1, 2),
+            title_align="left", border_style="dim magenta", padding=(1, 2),
         ))
 
     def _write_error(self, reply: str) -> None:
@@ -284,7 +284,7 @@ class SysDialogueTUI(App):
         self._write_log(Panel(
             Markdown(reply or "当前任务已停止。"),
             title=f"[bold yellow]{g.warn} {title}[/bold yellow]",
-            title_align="left", border_style="yellow 55%", padding=(1, 2),
+            title_align="left", border_style="dim yellow", padding=(1, 2),
         ))
 
     # ─────────────────────────────── events / panels / callbacks ────────────
@@ -547,7 +547,7 @@ class SysDialogueTUI(App):
             Markdown(f"已恢复历史会话：**{record.title}**\n\n"
                       "后续输入复用该对话上下文，历史工具不会重放。"),
             title="[bold cyan]历史已恢复[/bold cyan]",
-            border_style="cyan 45%", padding=(0, 1),
+            border_style="dim cyan", padding=(0, 1),
         ))
 
     def action_cancel_current(self) -> None:
