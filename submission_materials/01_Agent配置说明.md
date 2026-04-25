@@ -69,7 +69,7 @@ python -m sysdialogue.app.cli --run-scheduled-job <job_id>
 远程 SSH 模式：
 
 ```powershell
-python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519
+python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key <ssh_key_path>
 ```
 
 设计语义：
