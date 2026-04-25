@@ -78,6 +78,19 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   max-height: 72px; overflow: auto; white-space: pre-wrap;
   font-family: var(--mono); line-height: 1.45;
 }
+.target-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.target-mode { display: flex; gap: 10px; align-items: center; font-size: 11px; }
+.target-form input[type="text"], .target-form input[type="number"] {
+  width: 100%; border: 1px solid var(--border); border-radius: 5px;
+  padding: 5px 7px; font-size: 11px; font-family: var(--mono);
+}
+.target-form button {
+  border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px;
+  background: var(--btn-bg); color: var(--text2); cursor: pointer;
+  font-size: 11px; font-family: var(--font);
+}
+.target-form button:hover { background: var(--btn-hover); }
+.target-help { font-size: 10px; color: var(--text3); line-height: 1.35; }
 
 .session-item {
   padding: 7px 10px; border-radius: 6px; cursor: pointer;
@@ -249,6 +262,22 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
     </button>
     <div id="session-list"></div>
     <div id="side-panels">
+      <div class="side-card" id="target-card">
+        <div class="side-title">目标机器</div>
+        <div class="side-body" id="target-summary">local control machine</div>
+        <div class="target-form" id="target-config">
+          <div class="target-mode">
+            <label><input type="radio" name="target-mode" value="local" checked> 本机</label>
+            <label><input type="radio" name="target-mode" value="ssh"> SSH</label>
+          </div>
+          <input id="target-host" type="text" placeholder="host，例如 192.168.1.10">
+          <input id="target-user" type="text" placeholder="user，例如 root">
+          <input id="target-port" type="number" min="1" max="65535" value="22" placeholder="port">
+          <input id="target-key" type="text" placeholder="ssh key path，可留空使用 ssh-agent">
+          <button id="btn-target-save" onclick="saveTargetConfig()">应用目标机器</button>
+          <div class="target-help">切换目标前请确保当前任务已结束；SSH 目标会先连接成功再替换当前 runtime。</div>
+        </div>
+      </div>
       <div class="side-card">
         <div class="side-title">Memory</div>
         <div class="side-body" id="memory-summary">暂无记忆</div>
@@ -364,6 +393,18 @@ const policySummary = document.getElementById("policy-summary");
 const traceSummary = document.getElementById("trace-summary");
 const skillSummary = document.getElementById("skill-summary");
 const hookSummary = document.getElementById("hook-summary");
+const targetSummary = document.getElementById("target-summary");
+const targetHost = document.getElementById("target-host");
+const targetUser = document.getElementById("target-user");
+const targetPort = document.getElementById("target-port");
+const targetKey = document.getElementById("target-key");
+let targetFormTouched = false;
+
+document.querySelectorAll('input[name="target-mode"], #target-host, #target-user, #target-port, #target-key')
+  .forEach(el => {
+    el.addEventListener("input", () => { targetFormTouched = true; });
+    el.addEventListener("change", () => { targetFormTouched = true; });
+  });
 
 async function api(path, method = "GET", body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -518,6 +559,24 @@ function renderState(s) {
   hookSummary.textContent = hooks.length
     ? hooks.slice(0, 6).map(h => `${h.event || "event"} -> ${h.action || "action"}`).join("\n")
     : "暂无 hooks";
+
+  renderTargetConfig(s.target_config || {});
+}
+
+function renderTargetConfig(target) {
+  targetSummary.textContent = [
+    target.summary || "local control machine",
+    target.env ? `os=${target.env.os || "unknown"} distro=${target.env.distro || "unknown"}` : "",
+    target.env ? `init=${target.env.init_system || "unknown"} pkg=${target.env.package_manager || "unknown"}` : ""
+  ].filter(Boolean).join("\n");
+  if (targetFormTouched) return;
+  const mode = target.mode === "ssh" ? "ssh" : "local";
+  const radio = document.querySelector(`input[name="target-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  targetHost.value = target.host || "";
+  targetUser.value = target.user || "";
+  targetPort.value = target.port || 22;
+  targetKey.value = target.ssh_key_file || "";
 }
 
 function syncEntries(entries) {
@@ -589,6 +648,25 @@ async function doCancel() {
 async function doResume() {
   await api("/resume", "POST", {});
   await poll();
+}
+
+async function saveTargetConfig() {
+  const mode = document.querySelector('input[name="target-mode"]:checked')?.value || "local";
+  const payload = {
+    mode,
+    host: targetHost.value.trim(),
+    user: targetUser.value.trim(),
+    port: Number(targetPort.value || 22),
+    ssh_key_file: targetKey.value.trim()
+  };
+  try {
+    const result = await api("/target", "POST", payload);
+    targetFormTouched = false;
+    appendMsg("system", `目标机器已切换：${result.summary || "local control machine"}`);
+    await poll();
+  } catch (e) {
+    appendMsg("error", "目标机器配置失败：" + e.message);
+  }
 }
 
 function newSession() {

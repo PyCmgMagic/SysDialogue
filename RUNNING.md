@@ -155,6 +155,19 @@ python -m sysdialogue.app.cli --simple
 python -m sysdialogue.app.cli --web --host 127.0.0.1 --port 8000
 ```
 
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The Web console includes a **目标机器** panel in the sidebar. You can choose:
+
+- `本机`: run tools against the local control machine
+- `SSH`: enter host / user / port / optional SSH key path and switch the current Web session to that remote target
+
+The switch is transactional: SysDialogue first creates and probes a new runtime. If SSH connection fails, the current session keeps using the previous target.
+
 ### Scheduled Job Callback
 
 ```powershell

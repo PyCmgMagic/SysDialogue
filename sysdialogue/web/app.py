@@ -101,6 +101,14 @@ def create_web_app(config) -> FastAPI:
             target=target,
         )
 
+    @app.post("/api/session/{session_id}/target")
+    async def configure_target(session_id: str, payload: dict):
+        try:
+            summary = store.get(session_id).configure_target(payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "summary": summary}
+
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):
         approved = bool(payload.get("approved"))

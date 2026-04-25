@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.error_presentation import present_error
 from sysdialogue.audit.serializers import format_audit_table
 from sysdialogue.app.runtime_factory import create_runtime
@@ -36,6 +37,7 @@ class _PendingInput:
 
 class WebSession:
     def __init__(self, config, session_id: str):
+        self.config = config
         self.runtime = create_runtime(
             config,
             session_id=session_id,
@@ -89,6 +91,7 @@ class WebSession:
                 "permission_policy": self.runtime.permission_policy.render_summary(),
                 "skills": [skill.__dict__ for skill in self.runtime.skill_manager.list_skills()],
                 "hooks": [hook.__dict__ for hook in self.runtime.hook_manager.list_rules()],
+                "target_config": _target_payload(self.config, self.runtime.env_profile),
                 "permission_explain": self.runtime.permission_policy.explain_tool(
                     tool="*",
                     args={},
@@ -195,6 +198,53 @@ class WebSession:
             {"skill": invocation.name, "source": "web", "record_path": invocation.record_path},
         )
         return f"Activated skill {invocation.name}."
+
+    def configure_target(self, payload: dict[str, Any]) -> str:
+        with self._lock:
+            if self._worker and self._worker.is_alive():
+                raise RuntimeError("当前会话仍在执行中，不能切换目标机器")
+            if self.pending_confirmation is not None or self.pending_input is not None:
+                raise RuntimeError("当前存在待确认/待输入请求，不能切换目标机器")
+            new_config = _target_config_from_payload(self.config, payload)
+            old_runtime = self.runtime
+            new_runtime = create_runtime(
+                new_config,
+                session_id=self.session_id,
+                require_api=True,
+                confirm_callback=self._confirm_callback,
+                input_callback=self._input_callback,
+                surface="web",
+            )
+            new_runtime.controller.event_callback = self._event_callback
+            self.runtime = new_runtime
+            self.config = new_config
+            self.runtime.session_store.recover_interrupted(
+                self.session_id,
+                self.runtime.task_store,
+                surface="web",
+            )
+            summary = _target_payload(self.config, self.runtime.env_profile)["summary"]
+            self.runtime.controller.conversation_manager.context["target"] = summary
+            self.runtime.controller.conversation_manager.context["target_mode"] = (
+                "remote" if self.config.remote_mode else "local"
+            )
+            self.runtime.session_store.sync_manager(
+                self.session_id,
+                self.runtime.controller.conversation_manager,
+                surface="web",
+            )
+            self.runtime.session_store.append_entry(
+                self.session_id,
+                "system",
+                f"目标机器已切换：{summary}",
+                surface="web",
+            )
+            self.runtime.session_store.set_status(self.session_id, "ready", surface="web")
+        try:
+            old_runtime.close()
+        except Exception:
+            pass
+        return summary
 
     def cancel(self) -> None:
         self.runtime.controller.request_cancel()
@@ -418,6 +468,68 @@ class WebSessionStore:
                 session = WebSession(self.config, session_id)
                 self._sessions[session_id] = session
             return session
+
+
+def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> AppConfig:
+    mode = str((payload or {}).get("mode") or "local").strip().lower()
+    if mode not in {"local", "ssh", "remote"}:
+        raise RuntimeError("目标模式必须是 local 或 ssh")
+    new_config = replace(config)
+    if mode == "local":
+        new_config.remote_mode = False
+        new_config.ssh_host = ""
+        new_config.ssh_port = 22
+        new_config.ssh_user = ""
+        new_config.ssh_key_file = ""
+        return new_config
+
+    host = str(payload.get("host") or "").strip()
+    user = str(payload.get("user") or "").strip()
+    key_file = str(payload.get("ssh_key_file") or payload.get("key_file") or "").strip()
+    raw_port = payload.get("port") or 22
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SSH 端口必须是 1..65535 的整数") from exc
+    if not host:
+        raise RuntimeError("SSH 目标 host 不能为空")
+    if not user:
+        raise RuntimeError("SSH 用户名不能为空")
+    if not (1 <= port <= 65535):
+        raise RuntimeError("SSH 端口必须是 1..65535")
+    if key_file and not os.path.exists(os.path.expanduser(key_file)):
+        raise RuntimeError(f"SSH 私钥文件不存在：{key_file}")
+    new_config.remote_mode = True
+    new_config.ssh_host = host
+    new_config.ssh_port = port
+    new_config.ssh_user = user
+    new_config.ssh_key_file = os.path.expanduser(key_file) if key_file else ""
+    return new_config
+
+
+def _target_payload(config: AppConfig, env_profile: dict[str, Any]) -> dict[str, Any]:
+    if config.remote_mode:
+        summary = f"ssh://{config.ssh_user}@{config.ssh_host}:{config.ssh_port}"
+        mode = "ssh"
+    else:
+        summary = "local control machine"
+        mode = "local"
+    return {
+        "mode": mode,
+        "summary": summary,
+        "host": config.ssh_host if config.remote_mode else "",
+        "port": config.ssh_port if config.remote_mode else 22,
+        "user": config.ssh_user if config.remote_mode else "",
+        "ssh_key_file": config.ssh_key_file if config.remote_mode else "",
+        "remote_mode": bool(config.remote_mode),
+        "env": {
+            "os": env_profile.get("os", "unknown"),
+            "distro": env_profile.get("distro", "unknown"),
+            "hostname": env_profile.get("hostname", ""),
+            "init_system": env_profile.get("init_system", "unknown"),
+            "package_manager": env_profile.get("package_manager", "unknown"),
+        },
+    }
 
 
 def _task_payload(task) -> dict[str, Any] | None:

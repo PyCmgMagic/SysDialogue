@@ -249,6 +249,7 @@ def test_web_app_exposes_command_trace_and_memory_routes() -> None:
     assert "/api/session/{session_id}/skill" in paths
     assert "/api/session/{session_id}/hooks" in paths
     assert "/api/session/{session_id}/permissions/explain" in paths
+    assert "/api/session/{session_id}/target" in paths
 
 
 def test_skill_manager_project_skill_overrides_user_skill(tmp_path: Path) -> None:

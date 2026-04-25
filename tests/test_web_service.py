@@ -4,8 +4,9 @@ import os
 import threading
 from types import SimpleNamespace
 
+from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.state_store import SessionStore, TaskStore
-from sysdialogue.web.service import WebSession, _process_alive
+from sysdialogue.web.service import WebSession, _process_alive, _target_config_from_payload
 
 
 def _fake_web_session(session_id: str, session_store: SessionStore, task_store: TaskStore) -> WebSession:
@@ -126,3 +127,45 @@ def test_web_session_can_resolve_persisted_input_from_another_session(
     assert record.status == "running"
     assert record.pending_input["resolved"] is True
     assert record.pending_input["value"] == "nginx"
+
+
+def test_web_target_config_payload_supports_local_and_ssh(tmp_path) -> None:
+    key = tmp_path / "id_ed25519"
+    key.write_text("not-a-real-key", encoding="utf-8")
+    base = AppConfig(
+        api_key="key",
+        base_url="https://example.test/v1",
+        model="model",
+        remote_mode=False,
+    )
+
+    remote = _target_config_from_payload(
+        base,
+        {
+            "mode": "ssh",
+            "host": "example.com",
+            "user": "root",
+            "port": "2222",
+            "ssh_key_file": str(key),
+        },
+    )
+    local = _target_config_from_payload(remote, {"mode": "local"})
+
+    assert remote.remote_mode is True
+    assert remote.ssh_host == "example.com"
+    assert remote.ssh_port == 2222
+    assert remote.ssh_user == "root"
+    assert remote.ssh_key_file == str(key)
+    assert local.remote_mode is False
+    assert local.ssh_host == ""
+
+
+def test_web_target_config_rejects_incomplete_ssh_payload() -> None:
+    base = AppConfig(api_key="key", model="model")
+
+    try:
+        _target_config_from_payload(base, {"mode": "ssh", "host": "example.com"})
+    except RuntimeError as exc:
+        assert "SSH 用户名不能为空" in str(exc)
+    else:
+        raise AssertionError("expected incomplete SSH target to fail")
