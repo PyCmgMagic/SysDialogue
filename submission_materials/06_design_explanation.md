@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    UI["TUI / Web / Simple CLI / Cron"] --> Runtime["runtime_factory"]
+    UI["TUI / Simple CLI / Cron"] --> Runtime["runtime_factory"]
     Runtime --> Controller["AgentController"]
     Controller --> ReAct["ReActRunner"]
     ReAct --> LLM["OpenAI-compatible Chat Completions"]
@@ -38,7 +38,6 @@ flowchart LR
 | `sysdialogue/security/` | 风险分类、审批规则、远程锁门、命令安全。 |
 | `sysdialogue/runtime/` | 本地/远程 executor、能力探测、目标机文件访问。 |
 | `sysdialogue/ui/` | TUI task card、确认框、历史、审计/环境面板。 |
-| `sysdialogue/web/` | Web session service、API、Jinja2 页面。 |
 
 ## 3. 实现进度与深度
 
@@ -50,12 +49,12 @@ flowchart LR
 - 10 个 workflow。
 - ReAct 任务级闭环。
 - 动态迭代预算。
-- TUI / Web / Simple CLI。
+- TUI / Simple CLI。
 - 远程 SSH 执行。
 - SessionStore / TaskStore / LockStore。
 - PermissionPolicy、MemoryManager、TraceStore。
 - Skills、Hooks、Role Handoff、TargetProfile。
-- Web/TUI 友好错误包装与技术详情折叠。
+- TUI 友好错误包装与技术详情折叠。
 
 需要真实环境继续验收：
 
@@ -123,7 +122,7 @@ task_started -> plan/observe -> act -> observe -> repair/continue -> verify -> f
 | 取舍 | 选择 | 原因 |
 | --- | --- | --- |
 | Agent 框架 | 自研轻量 runtime | 保持安全门、OpenAI-compatible、workflow 与持久化状态可控。 |
-| 前端 | Textual + FastAPI/Jinja2 | 避免引入复杂前端构建系统，便于演示和部署。 |
+| 前端 | Textual | 避免引入复杂前端构建系统，便于演示和部署。 |
 | 状态存储 | JSON + filelock | 轻量、可审计、易复现。 |
 | 动态工具 | 始终开启但最后手段 | 保证能力上限，同时用安全链限制风险。 |
 | Memory | Markdown + JSON | 第一版不引入向量库，降低复杂度。 |

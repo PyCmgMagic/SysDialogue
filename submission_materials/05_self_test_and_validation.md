@@ -77,7 +77,6 @@ python -m sysdialogue.app.cli --verify
 | 类型 | 路径/入口 | 内容 |
 | --- | --- | --- |
 | TUI 任务卡片 | TUI 左侧主流程 | 请求、计划/思考摘要、工具、审批、验证、结果、技术详情。 |
-| Web 状态 | `GET /api/session/{id}/state` | entries、task_events、active_task、pending、traces、memory、skills、hooks。 |
 | Session | `~/.sysdialogue/sessions/<session_id>.json` | 用户消息、助手回复、上下文、pending 描述。 |
 | Task | `~/.sysdialogue/tasks/<task_id>.json` | goal、status、phase、steps、iteration budget、verification 状态。 |
 | Lock | `~/.sysdialogue/locks/<scope_hash>.json` | 跨进程资源 lease。 |
@@ -168,24 +167,6 @@ python -m sysdialogue.app.cli
 - validate_config 结果。
 - 如果制造失败，展示 rollback。
 
-### 视频 5：Web 控制台与持久化
-
-```powershell
-python -m sysdialogue.app.cli --web --host 127.0.0.1 --port 8000
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:8000
-```
-
-需要展示：
-
-- running / waiting_confirm / waiting_input / interrupted 状态。
-- resume 按钮。
-- skills/hooks/permission explain 面板。
-- 页面刷新后 session 状态仍存在。
 
 ## 5. 预测评测关注点与验证方式
 

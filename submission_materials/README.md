@@ -25,7 +25,7 @@
    - `RUNNING.md`
    - `CLAUDE.md`
    - `framework/claudeplan9.md`
-   - 关键代码目录：`sysdialogue/agent/`、`sysdialogue/tools/`、`sysdialogue/workflows/`、`sysdialogue/ui/`、`sysdialogue/web/`
+   - 关键代码目录：`sysdialogue/agent/`、`sysdialogue/tools/`、`sysdialogue/workflows/`、`sysdialogue/ui/`
 
 ## 评审阅读顺序
 

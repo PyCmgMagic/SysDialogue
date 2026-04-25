@@ -99,7 +99,7 @@ Conclusion: runtime sees all tools/workflows/security rules and OpenAI-compatibl
 
 ## 5. Evidence paths for live demo
 
-After running TUI/Web demos, collect:
+After running TUI demos, collect:
 
 ```powershell
 Get-ChildItem $env:USERPROFILE\.sysdialogue\sessions

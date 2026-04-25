@@ -60,7 +60,7 @@ flowchart TD
 
 预期结果：
 
-- TUI/Web 展示任务卡片。
+- TUI 展示任务卡片。
 - 工具区显示只读工具调用摘要。
 - 结果区包含 hostname、kernel、load、disk、ports 证据。
 - 审计中记录 SAFE 决策和 command trace。

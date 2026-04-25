@@ -11,7 +11,7 @@ This guide explains how to install, configure, run, and verify the current SysDi
 
 - Python `>= 3.11`
 - Recommended host: Linux
-- Windows is supported as a control plane for TUI / Web / Simple CLI / `--verify`
+- Windows is supported as a control plane for TUI / Simple CLI / `--verify`
 - Remote target host should be Linux and reachable over SSH
 
 ## 2. Install
@@ -149,26 +149,6 @@ python -m sysdialogue.app.cli
 python -m sysdialogue.app.cli --simple
 ```
 
-### Web Console
-
-```powershell
-python -m sysdialogue.app.cli --web --host 127.0.0.1 --port 8000
-```
-
-Open:
-
-```text
-http://127.0.0.1:8000
-```
-
-The Web console includes a **目标机器** panel in the sidebar. You can choose:
-
-- `本机`: run tools against the local control machine
-- `SSH`: enter host / user / port / optional password / optional SSH key path and switch the current Web session to that remote target
-
-The switch is transactional: SysDialogue first creates and probes a new runtime. If SSH connection fails, the current session keeps using the previous target.
-The password is used only for the in-memory runtime switch; it is not returned by the Web state API and is not written into session history.
-
 ### Scheduled Job Callback
 
 ```powershell
@@ -193,16 +173,9 @@ python -m sysdialogue.app.cli --remote user@example.com:22
 
 For quick local testing you can also pass `--ssh-password your_ssh_password`.
 
-Web example:
-
-```powershell
-python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519 --web --host 127.0.0.1 --port 8000
-```
-
 Important:
 
-- the Web service still runs on the local control machine
-- `--remote` changes the execution target, not the hosting location of the UI
+- `--remote` changes the execution target
 - first-time SSH hosts are automatically trusted and appended to `known_hosts`;
   changed host keys are still rejected
 
@@ -231,11 +204,11 @@ SysDialogue now persists shared state under `~/.sysdialogue/`:
 
 What this means:
 
-- Web sessions survive restart at the persisted state layer
+- sessions survive restart at the persisted state layer
 - stale active tasks become `interrupted`
 - cross-process resource locks are durable leases
 - pending confirmations / input are not replayed after restart
-- permission policy, memory, and trace spans are shared across TUI / Web / Simple CLI
+- permission policy, memory, and trace spans are shared across TUI / Simple CLI
 
 ## 9. Slash Commands
 
@@ -310,20 +283,13 @@ DynTool execution still passes through:
 - audit
 - ReAct completion gates
 
-## 13. Web / TUI / Simple CLI Differences
+## 13. TUI / Simple CLI Differences
 
 ### TUI
 
 - richest interaction model
 - task cards for `thinking / tools / verification / result / errors`
 - collapsible technical details
-
-### Web
-
-- browser console
-- persisted session/task state
-- friendly error summaries instead of raw tracebacks in the visible transcript
-- trace and memory endpoints for inspection
 
 ### Simple CLI
 
@@ -349,13 +315,13 @@ Still worth validating on a real Linux machine:
 - rollback chains on real services
 - remote mutation + verify flows
 - system cron execution
-- lock contention between TUI / Web / scheduled jobs
+- lock contention between TUI / scheduled jobs
 
 ## 16. Troubleshooting
 
 ### Missing API config
 
-If TUI / Web / Simple CLI refuses to start:
+If TUI / Simple CLI refuses to start:
 
 - check `OPENAI_API_KEY`
 - check `OPENAI_MODEL`
@@ -398,8 +364,3 @@ python -m sysdialogue.app.cli --verify
 python -m sysdialogue.app.cli
 ```
 
-### Remote Web
-
-```powershell
-python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519 --web --host 127.0.0.1 --port 8000
-```
