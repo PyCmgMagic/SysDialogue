@@ -40,11 +40,37 @@ class _PendingInput:
     value: str = ""
 
 
+def _copy_app_config(config: AppConfig) -> AppConfig:
+    if isinstance(config, AppConfig):
+        return replace(config)
+    return AppConfig(
+        api_key=str(getattr(config, "api_key", "") or ""),
+        base_url=str(getattr(config, "base_url", "") or ""),
+        model=str(getattr(config, "model", "") or ""),
+        remote_mode=bool(getattr(config, "remote_mode", False)),
+        ssh_host=str(getattr(config, "ssh_host", "") or ""),
+        ssh_port=int(getattr(config, "ssh_port", 22) or 22),
+        ssh_user=str(getattr(config, "ssh_user", "") or ""),
+        ssh_key_file=str(getattr(config, "ssh_key_file", "") or ""),
+        ssh_password=str(getattr(config, "ssh_password", "") or ""),
+        ssh_sudo_password=str(getattr(config, "ssh_sudo_password", "") or ""),
+        workflows_dir=str(getattr(config, "workflows_dir", "") or ""),
+        max_iterations=int(getattr(config, "max_iterations", 160) or 160),
+    )
+
+
 class WebSession:
-    def __init__(self, config: AppConfig, session_id: str):
-        self.config = config
+    def __init__(
+        self,
+        config: AppConfig,
+        session_id: str,
+        *,
+        config_update_callback: Any | None = None,
+    ):
+        self.config = _copy_app_config(config)
+        self._config_update_callback = config_update_callback
         self.runtime = create_runtime(
-            config,
+            self.config,
             session_id=session_id,
             require_api=True,
             confirm_callback=self._confirm_callback,
@@ -247,6 +273,8 @@ class WebSession:
             new_runtime.controller.event_callback = self._event_callback
             self.runtime = new_runtime
             self.config = new_config
+            if self._config_update_callback is not None:
+                self._config_update_callback(new_config)
             self.runtime.session_store.recover_interrupted(
                 self.session_id,
                 self.runtime.task_store,
@@ -299,6 +327,8 @@ class WebSession:
             new_runtime.controller.event_callback = self._event_callback
             self.runtime = new_runtime
             self.config = new_config
+            if self._config_update_callback is not None:
+                self._config_update_callback(new_config)
             self.runtime.session_store.recover_interrupted(
                 self.session_id,
                 self.runtime.task_store,
@@ -592,7 +622,7 @@ class WebSession:
 
 class WebSessionStore:
     def __init__(self, config: AppConfig):
-        self.config = config
+        self.config = _copy_app_config(config)
         self._sessions: dict[str, WebSession] = {}
         self._lock = threading.Lock()
         self.session_store = SessionStore()
@@ -604,9 +634,23 @@ class WebSessionStore:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
-                session = WebSession(self.config, session_id)
+                session = WebSession(
+                    self.config,
+                    session_id,
+                    config_update_callback=self._update_api_defaults,
+                )
                 self._sessions[session_id] = session
             return session
+
+    def _update_api_defaults(self, config: AppConfig) -> None:
+        """Keep future Web sessions aligned with the latest model settings."""
+        with self._lock:
+            self.config = replace(
+                self.config,
+                api_key=config.api_key,
+                base_url=config.base_url,
+                model=config.model,
+            )
 
     def create_session(self) -> dict[str, Any]:
         session_id = f"web_{uuid.uuid4().hex[:12]}"
@@ -663,16 +707,24 @@ class WebSessionStore:
         return self.target_profile_store.delete(target_id)
 
     def test_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        probe_session_id = f"target_test_{uuid.uuid4().hex[:8]}"
+        runtime = None
         try:
             probe_config = _target_config_from_payload(self.config, payload, self.target_profile_store)
-            runtime = create_runtime(probe_config, session_id=f"target_test_{uuid.uuid4().hex[:8]}", require_api=False, surface="web")
+            runtime = create_runtime(probe_config, session_id=probe_session_id, require_api=False, surface="web")
             target = _target_payload(probe_config, runtime.env_profile)
-            runtime.close()
             return {"ok": True, "summary": target["summary"], "target": target}
         except RuntimeError as exc:
             return {"ok": False, "category": _target_error_category(exc), "message": str(exc)}
         except Exception as exc:
             return {"ok": False, "category": _target_error_category(exc), "message": _friendly_target_error(exc)}
+        finally:
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except Exception:
+                    pass
+            _cleanup_probe_artifacts(probe_session_id)
 
 
 def _target_config_from_payload(
@@ -729,6 +781,21 @@ def _target_config_from_payload(
     new_config.ssh_key_file = os.path.expanduser(key_file) if key_file else ""
     new_config.ssh_password = password
     return new_config
+
+
+def _cleanup_probe_artifacts(session_id: str) -> None:
+    """Remove transient session/audit files created by connection probes."""
+    cleanup_paths = [
+        SessionStore()._path(session_id),
+        TaskStore()._path(session_id),
+        AuditLog(session_id).path,
+    ]
+    for path in cleanup_paths:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
 
 
 def _api_config_payload(config: AppConfig) -> dict[str, Any]:

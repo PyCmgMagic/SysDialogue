@@ -252,6 +252,27 @@ def test_web_session_store_can_create_and_list_sessions(monkeypatch, tmp_path) -
     assert any(item["session_id"] == created["session_id"] for item in sessions)
 
 
+def test_web_api_config_updates_future_session_defaults(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = WebSessionStore(AppConfig(api_key="old-key", base_url="old-url", model="old-model"))
+
+    current = store.get("default")
+    current.configure_api(
+        {
+            "api_key": "new-key",
+            "base_url": "https://new.example/v1",
+            "model": "new-model",
+        }
+    )
+    created = store.create_session()
+    next_session = store.get(created["session_id"])
+
+    assert next_session.config.api_key == "new-key"
+    assert next_session.config.base_url == "https://new.example/v1"
+    assert next_session.config.model == "new-model"
+
+
 def test_web_session_list_includes_target_group_metadata(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -282,6 +303,18 @@ def test_web_target_test_rejects_bad_payload_without_switching_runtime(monkeypat
 
     assert result["ok"] is False
     assert "SSH 用户名不能为空" in result["message"]
+
+
+def test_web_target_test_success_does_not_create_visible_session(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = WebSessionStore(AppConfig(api_key="key", model="model"))
+
+    result = store.test_target({"mode": "local"})
+    sessions = store.list_sessions()
+
+    assert result["ok"] is True
+    assert all(not item["session_id"].startswith("target_test_") for item in sessions)
 
 
 def test_web_target_management_saves_password_without_api_echo(monkeypatch, tmp_path) -> None:
