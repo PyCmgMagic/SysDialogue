@@ -1,4 +1,4 @@
-"""InputModal - workflow/user input collection dialog."""
+"""InputModal — 工作流 / 智能代理补充输入弹窗。"""
 
 from __future__ import annotations
 
@@ -10,96 +10,152 @@ from textual.widgets import Button, Input, Static
 
 try:
     from textual.widgets import TextArea
-except ImportError:  # pragma: no cover - depends on installed Textual version
+except ImportError:  # pragma: no cover
     TextArea = None  # type: ignore[assignment]
 
 
 class InputModal(ModalScreen[str | None]):
-    """Collect a single-line or multi-line input value."""
+    """收集单行或多行补充输入，由工作流或智能代理在执行中途触发。"""
 
     CSS = """
     InputModal {
         align: center middle;
     }
+
     #modal_box {
-        width: 82%;
-        max-width: 100;
+        width: 84%;
+        max-width: 104;
         height: auto;
-        max-height: 85%;
+        max-height: 88%;
         border: heavy $accent;
         background: $surface;
-        padding: 1 2;
+        layout: vertical;
     }
-    #modal_title {
-        text-align: center;
+
+    /* ── 顶部标题 ── */
+    #modal_header {
+        background: $accent 20%;
+        padding: 0 2;
+        height: 2;
+        content-align: left middle;
         text-style: bold;
-        background: $accent 25%;
-        padding: 0 1;
+        border-bottom: solid $accent 20%;
     }
-    #modal_prompt {
-        padding: 1 0;
+
+    /* ── 提示语区 ── */
+    #modal_prompt_area {
+        padding: 1 2 0 2;
+        height: auto;
     }
-    #modal_hint {
+
+    #modal_prompt_label {
         color: $text-muted;
-        padding: 0 0 1 0;
+        text-style: bold;
+        height: 1;
     }
+
+    #modal_prompt_text {
+        padding: 0 0 1 0;
+        height: auto;
+    }
+
+    /* ── 输入控件 ── */
+    #modal_input_area {
+        padding: 0 2;
+        height: auto;
+    }
+
     #modal_input {
         width: 100%;
+        border: round $accent 40%;
     }
+
+    #modal_input:focus {
+        border: round $accent 80%;
+    }
+
     #modal_textarea {
         width: 100%;
-        height: 12;
+        height: 10;
+        border: round $accent 40%;
     }
+
+    #modal_textarea:focus {
+        border: round $accent 80%;
+    }
+
+    /* ── 快捷键提示 ── */
+    #modal_keyhint {
+        padding: 0 2 1 2;
+        color: $text-muted;
+        height: 1;
+    }
+
+    /* ── 按钮 ── */
     #modal_buttons {
-        height: 3;
+        height: 4;
         align: center middle;
-        margin-top: 1;
+        padding: 0 2;
+        border-top: solid $primary 15%;
     }
+
     #modal_buttons Button {
-        margin: 0 1;
+        margin: 0 2;
+        min-width: 16;
     }
     """
 
     BINDINGS = [
-        Binding("f2", "submit", "提交"),
+        Binding("f2",         "submit", "提交"),
         Binding("ctrl+enter", "submit", show=False),
-        Binding("escape", "cancel", "取消"),
+        Binding("escape",     "cancel", "取消"),
     ]
 
     def __init__(self, prompt: str, multiline: bool):
         super().__init__()
-        self.prompt = prompt
-        self.multiline = multiline
-        self._use_textarea = bool(multiline and TextArea is not None)
+        self.prompt         = prompt
+        self.multiline      = multiline
+        self._use_textarea  = bool(multiline and TextArea is not None)
 
     def compose(self) -> ComposeResult:
-        hint = "按 F2 或 Ctrl+Enter 提交，Esc 取消。"
-        if not self.multiline:
-            hint = "按 Enter 或 F2 提交，Esc 取消。"
-        elif not self._use_textarea:
-            hint = "当前 Textual 版本缺少 TextArea，将退化为单行输入；按 Enter 或 F2 提交。"
+        if self.multiline:
+            title    = "✏  多行输入请求"
+            keyhint  = (
+                "F2 或 Ctrl+Enter 提交  ·  Esc 取消输入"
+                if self._use_textarea
+                else "Enter / F2 提交  ·  Esc 取消  （当前环境不支持多行，将以单行模式采集）"
+            )
+        else:
+            title   = "✏  输入请求"
+            keyhint = "Enter 或 F2 提交  ·  Esc 取消"
 
         yield Container(
-            Static("输入请求", id="modal_title"),
-            Static(self.prompt, id="modal_prompt"),
-            Static(hint, id="modal_hint"),
-            Vertical(self._compose_input_widget()),
+            Static(f"  {title}", id="modal_header"),
+            Vertical(
+                Static("智能代理需要你提供以下信息：", id="modal_prompt_label"),
+                Static(self.prompt or "（无具体说明）", id="modal_prompt_text"),
+                id="modal_prompt_area",
+            ),
+            Vertical(
+                self._build_input_widget(),
+                id="modal_input_area",
+            ),
+            Static(keyhint, id="modal_keyhint"),
             Horizontal(
-                Button("提交", id="btn_submit", variant="primary"),
-                Button("取消", id="btn_cancel", variant="default"),
+                Button("提交  F2", id="btn_submit", variant="primary"),
+                Button("取消  Esc", id="btn_cancel", variant="default"),
                 id="modal_buttons",
             ),
             id="modal_box",
         )
 
-    def _compose_input_widget(self):
+    def _build_input_widget(self):
         if self._use_textarea:
-            yield TextArea(id="modal_textarea")  # type: ignore[misc]
-        else:
-            placeholder = "请输入内容"
-            if self.multiline:
-                placeholder = "请输入内容（当前环境将按单行模式采集）"
-            yield Input(placeholder=placeholder, id="modal_input")
+            return TextArea(id="modal_textarea")  # type: ignore[misc]
+        placeholder = "在此输入内容…"
+        if self.multiline and not self._use_textarea:
+            placeholder = "在此输入内容（当前版本不支持多行，按 Enter 提交）…"
+        return Input(placeholder=placeholder, id="modal_input")
 
     def on_mount(self) -> None:
         if self._use_textarea:

@@ -1,4 +1,4 @@
-"""SysDialogue TUI main interface."""
+"""SysDialogue TUI main interface with the compact origin/ui layout."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import threading
 import traceback
 from typing import TYPE_CHECKING, Any
 
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -15,112 +17,61 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from sysdialogue.agent.conversation_store import ConversationStore
-from sysdialogue.agent.error_presentation import format_error_markdown, present_error
+from sysdialogue.agent.error_presentation import format_error_markdown
 from sysdialogue.ui.audit_panel import AuditPanel
 from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
 from sysdialogue.ui.history_modal import HistoryModal
 from sysdialogue.ui.input_modal import InputModal
+from sysdialogue.ui.status_panel import StatusPanel
 from sysdialogue.ui.task_timeline import TaskTimelineCard
+from sysdialogue.ui.theme import get_glyphs, get_theme
 
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
     from sysdialogue.security.approval_rules import ConfirmationRequest
 
 
-_EVENT_LABELS = {
-    "task_started": "开始",
-    "model_response": "分析",
-    "correction": "调整",
-    "tool_started": "工具",
-    "tool_finished": "结果",
-    "workflow_started": "流程",
-    "workflow_finished": "流程",
-    "confirmation_requested": "确认",
-    "verification": "验证",
-    "task_finished": "完成",
-    "task_failed": "结束",
-}
-
-
-_EVENT_STYLES = {
-    "task_started": "bold cyan",
-    "model_response": "cyan",
-    "correction": "yellow",
-    "tool_started": "blue",
-    "tool_finished": "green",
-    "workflow_started": "blue",
-    "workflow_finished": "green",
-    "confirmation_requested": "bold yellow",
-    "verification": "bold green",
-    "task_finished": "bold green",
-    "task_failed": "bold red",
-}
+_ASCII_LOGO = r"""
+  ___         ___  _      _
+ / __|_  _ __|   \(_)__ _| |___  __ _ _  _ ___
+ \__ \ || (_-< |) | / _` | / _ \/ _` | || / -_)
+ |___/\_, /__/___/|_\__,_|_\___/\__, |\_,_\___|
+      |__/                      |___/
+"""
 
 
 class SysDialogueTUI(App):
-    """SysDialogue v9 Textual application."""
+    """SysDialogue Textual application."""
 
     CSS = """
-    Screen {
-        layout: vertical;
-        background: $surface;
-    }
-    #main_layout {
-        height: 1fr;
-        layout: horizontal;
-        padding: 0;
-    }
-    #left_pane {
-        width: 65%;
-        height: 100%;
-        layout: vertical;
-        padding: 0 1 0 1;
-    }
-    #right_pane {
-        width: 35%;
-        height: 100%;
-        background: $panel;
-        border-left: tall $primary 30%;
-        padding: 0 1;
-    }
-    #conversation {
-        height: 1fr;
-        padding: 1 2;
-        scrollbar-size: 1 1;
-    }
-    #choice_bar {
-        height: auto;
-        min-height: 3;
-        padding: 1 2;
-        margin: 0 0 1 0;
-        background: $accent 8%;
-        border: round $accent 35%;
-    }
-    #choice_bar.hidden {
-        display: none;
-    }
-    #choice_bar Button {
-        margin: 0 1 0 0;
-        max-width: 32;
-    }
-    #user_input {
-        margin: 0 0 1 0;
-        border: round $primary 45%;
-        padding: 0 1;
-    }
-    #user_input:focus {
-        border: round $accent 70%;
-    }
-    #status_bar {
-        height: 1;
-        background: $primary 18%;
-        padding: 0 2;
-        color: $text-muted;
-    }
-    .log_line {
-        margin: 0 0 1 0;
-    }
+    Screen { layout: vertical; background: $surface; }
+
+    #main_layout { height: 1fr; layout: horizontal; }
+    #left_pane   { width: 64%; height: 100%; layout: vertical; padding: 0 1; }
+    #right_pane  { width: 36%; height: 100%; background: $panel;
+                   border-left: vkey $primary 20%; padding: 0; layout: vertical; }
+
+    #right_pane StatusPanel { height: auto; }
+    #right_pane AuditPanel  { height: 1fr; }
+
+    #conversation { height: 1fr; padding: 1; scrollbar-size: 1 1; scrollbar-color: $primary 25%; }
+    .log_line { margin: 0 0 1 0; }
+
+    #choice_bar { height: auto; min-height: 3; padding: 0 2 1 2;
+                  background: $accent 5%; border-top: dashed $accent 25%; }
+    #choice_bar.hidden { display: none; }
+    #choice_label { color: $accent; text-style: bold; padding: 1 0 0 0; height: auto; }
+    #choice_bar Button { margin: 0 1 0 0; max-width: 36; border: tall $accent 35%; }
+    #choice_bar Button:hover { background: $accent 18%; }
+
+    #input_area { height: auto; border-top: solid $primary 12%; }
+    #user_input { margin: 1 0; border: round $primary 35%; padding: 0 1; height: 3; }
+    #user_input:focus { border: round $accent 75%; }
+    #input_hint { height: 1; padding: 0 1; color: $text-muted; text-style: italic; }
+
+    #status_bar { height: 1; background: $primary 10%; padding: 0 2;
+                  color: $text-muted; border-top: solid $primary 12%; }
     """
 
     BINDINGS = [
@@ -128,8 +79,8 @@ class SysDialogueTUI(App):
         Binding("f3", "toggle_audit", "审计"),
         Binding("f4", "toggle_env", "环境"),
         Binding("ctrl+c", "cancel_current", "取消"),
-        Binding("ctrl+d", "quit", "退出"),
         Binding("ctrl+l", "clear_log", "清屏"),
+        Binding("ctrl+d", "quit", "退出"),
     ]
 
     def __init__(self, controller: "AgentController"):
@@ -154,58 +105,75 @@ class SysDialogueTUI(App):
         yield Container(
             Vertical(
                 VerticalScroll(id="conversation"),
-                Horizontal(id="choice_bar", classes="hidden"),
-                Input(
-                    placeholder="输入运维需求或命令（/status /resume /skills /why /target）…",
-                    id="user_input",
+                Horizontal(
+                    Static("或者试试：", id="choice_label"),
+                    id="choice_bar",
+                    classes="hidden",
+                ),
+                Vertical(
+                    Input(
+                        placeholder="描述运维需求 - 例如：查看磁盘使用率 / 重启 nginx",
+                        id="user_input",
+                    ),
+                    Static(
+                        "/status  /resume  /skills  /skill  /hooks  /why  /target",
+                        id="input_hint",
+                    ),
+                    id="input_area",
                 ),
                 id="left_pane",
             ),
             Vertical(
+                StatusPanel(getattr(self.controller, "env_profile", None)),
                 AuditPanel(self.controller.audit_log),
                 id="right_pane",
             ),
             id="main_layout",
         )
-        yield Static("状态：就绪", id="status_bar")
+        yield Static("", id="status_bar")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "SysDialogue v9"
+        self.title = "SysDialogue"
         self.sub_title = "Linux 运维智能代理"
-        welcome = Text()
-        welcome.append("SysDialogue v9", style="bold cyan")
-        welcome.append("  ·  ", style="dim")
-        welcome.append("Linux 运维智能代理", style="cyan")
-        welcome.append("\n\n")
-        welcome.append("输入自然语言运维需求，", style="")
-        welcome.append("Enter", style="bold")
-        welcome.append(" 发送。\n", style="")
-        welcome.append(
-            "F2 历史  ·  F3 审计  ·  F4 环境  ·  Ctrl+C 取消  ·  Ctrl+D 退出\n"
-            "常用命令：/status /resume /skills /skill /hooks /why /target",
-            style="dim",
-        )
-        self._write_log(
-            Panel(
-                welcome,
-                border_style="dim cyan",
-                padding=(1, 2),
-                title_align="left",
-            )
-        )
+        self._write_log(self._build_welcome())
+        self._set_status("就绪")
         self.query_one("#user_input", Input).focus()
+
+    def _build_welcome(self):
+        theme = get_theme()
+        glyphs = get_glyphs()
+        logo = Text(_ASCII_LOGO, style=f"bold {theme.banner_fg}")
+        tagline = Text()
+        tagline.append("Linux 运维智能代理", style="bold")
+        tagline.append("  ·  ", style="dim")
+        tagline.append("自然语言 -> 意图解析 -> 安全执行 -> 反馈核查", style="dim")
+        line1 = Text.from_markup(
+            f"[dim]{glyphs.bullet}[/dim]  直接输入需求回车即可；[bold]/plan[/bold] 进入审查模式。"
+        )
+        line2 = Text.from_markup(
+            f"[dim]{glyphs.bullet}[/dim]  高风险操作会主动拦截，请求二次确认。"
+        )
+        line3 = Text.from_markup(
+            f"[dim]{glyphs.bullet}[/dim]  "
+            "[bold]F2[/bold] 历史  [bold]F3[/bold] 审计  [bold]F4[/bold] 环境  "
+            "[bold]^C[/bold] 取消  [bold]^L[/bold] 清屏  [bold]^D[/bold] 退出"
+        )
+        return Panel(
+            Group(logo, tagline, Rule(style="dim"), line1, line2, line3),
+            border_style=f"dim {theme.banner_fg}",
+            padding=(1, 3),
+            title_align="left",
+        )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "user_input":
             return
-
         text = (event.value or "").strip()
         if not text:
             return
         event.input.value = ""
         self._hide_choice_bar()
-
         self._start_turn(text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -217,8 +185,7 @@ class SysDialogueTUI(App):
             text = self._choice_values[index]
         except (IndexError, ValueError):
             return
-        input_box = self.query_one("#user_input", Input)
-        if input_box.disabled:
+        if self.query_one("#user_input", Input).disabled:
             return
         self._hide_choice_bar()
         self._start_turn(text)
@@ -229,9 +196,8 @@ class SysDialogueTUI(App):
         self._current_goal = text
         self._write_user_bubble(text)
         self._begin_task_card(text)
-        input_box = self.query_one("#user_input", Input)
-        input_box.disabled = True
-        self._set_status("思考中…")
+        self.query_one("#user_input", Input).disabled = True
+        self._set_status("推理中...")
 
         def worker() -> None:
             try:
@@ -249,14 +215,6 @@ class SysDialogueTUI(App):
         self._worker = None
         if is_error or _looks_like_failure_reply(reply) or self._turn_failed:
             self._finish_current_card(reply, is_error=True)
-            if is_error:
-                presentation = present_error(reply)
-                reply = (
-                    f"{presentation.user_summary}\n\n"
-                    f"影响：{presentation.impact}\n\n"
-                    "建议：\n"
-                    + "\n".join(f"- {item}" for item in presentation.suggestions)
-                )
             status = "failed"
         elif self._turn_cancelled:
             self._finish_current_card(reply, is_error=False, cancelled=True)
@@ -270,45 +228,34 @@ class SysDialogueTUI(App):
             status = "completed"
         self._persist_history(reply, status)
         self._refresh_audit_panel()
-        input_box = self.query_one("#user_input", Input)
-        input_box.disabled = False
-        input_box.focus()
+        input_widget = self.query_one("#user_input", Input)
+        input_widget.disabled = False
+        input_widget.focus()
         self._set_status("就绪")
 
     def _write_log(self, renderable) -> None:
-        self.query_one("#conversation", VerticalScroll).mount(
-            Static(renderable, classes="log_line")
-        )
+        scroll = self.query_one("#conversation", VerticalScroll)
+        scroll.mount(Static(renderable, classes="log_line"))
+        scroll.scroll_end(animate=False)
 
     def _write_user_bubble(self, text: str) -> None:
+        glyphs = get_glyphs()
         body = Text()
-        body.append("你  ", style="bold cyan")
-        body.append("·  刚刚", style="dim")
-        body.append("\n")
+        body.append(f"{glyphs.bullet} 你", style="bold cyan")
+        body.append("   刚刚\n", style="dim")
         body.append(text)
-        self._write_log(
-            Panel(
-                body,
-                border_style="dim cyan",
-                padding=(0, 2),
-                title_align="left",
-            )
-        )
+        self._write_log(Panel(body, border_style="dim cyan", padding=(0, 2)))
 
     def _begin_task_card(self, goal: str) -> None:
         if self._current_card is not None:
             self._current_card._collapse_after_finish()
         card = TaskTimelineCard(goal)
         self._current_card = card
-        self.query_one("#conversation", VerticalScroll).mount(card)
+        scroll = self.query_one("#conversation", VerticalScroll)
+        scroll.mount(card)
+        scroll.scroll_end(animate=False)
 
-    def _finish_current_card(
-        self,
-        reply: str,
-        *,
-        is_error: bool,
-        cancelled: bool = False,
-    ) -> None:
+    def _finish_current_card(self, reply: str, *, is_error: bool, cancelled: bool = False) -> None:
         if self._current_card is None:
             if is_error:
                 self._write_error(reply)
@@ -319,36 +266,23 @@ class SysDialogueTUI(App):
             return
         self._current_card.finish_with_reply(reply, is_error=is_error, cancelled=cancelled)
 
-    def _persist_history(self, reply: str, status: str) -> None:
-        if not self._current_goal:
-            return
-        try:
-            snapshot = self._current_card.snapshot() if self._current_card else {}
-            self.controller.session_store.sync_manager(
-                self.controller.session_id,
-                self.controller.conversation_manager,
-                surface=self.controller.surface,
-                events_summary={**snapshot, "status": status},
-            )
-        except Exception:
-            pass
-
     def _write_assistant(self, reply: str) -> None:
         self._write_log(
             Panel(
                 Markdown(reply or "（无输出）"),
-                title="● SysDialogue",
+                title="[bold magenta]SysDialogue[/bold magenta]",
                 title_align="left",
-                border_style="magenta",
+                border_style="dim magenta",
                 padding=(1, 2),
             )
         )
 
     def _write_error(self, reply: str) -> None:
+        glyphs = get_glyphs()
         self._write_log(
             Panel(
                 Markdown(format_error_markdown(reply)),
-                title="✕ 执行遇到问题",
+                title=f"[bold red]{glyphs.fail} 执行遇到问题[/bold red]",
                 title_align="left",
                 border_style="red",
                 padding=(1, 2),
@@ -356,12 +290,13 @@ class SysDialogueTUI(App):
         )
 
     def _write_warning(self, reply: str, *, title: str = "提示") -> None:
+        glyphs = get_glyphs()
         self._write_log(
             Panel(
                 Markdown(reply or "当前任务已停止。"),
-                title=f"◐ {title}",
+                title=f"[bold yellow]{glyphs.warn} {title}[/bold yellow]",
                 title_align="left",
-                border_style="yellow",
+                border_style="dim yellow",
                 padding=(1, 2),
             )
         )
@@ -381,52 +316,64 @@ class SysDialogueTUI(App):
             choices = _choices_from_task_event(data)
             if choices:
                 self.call_from_thread(lambda: self._show_choice_bar(choices))
-
-        def write() -> None:
-            self._write_event(stage, message, data)
-
-        self.call_from_thread(write)
+        self.call_from_thread(lambda: self._write_event(stage, message, data))
 
     def _write_event(self, stage: str, message: str, data: dict[str, Any]) -> None:
         if self._current_card is not None:
             self._current_card.apply_event(stage, message, data)
-            return
-        label = _EVENT_LABELS.get(stage, "事件")
-        style = _event_style(stage, data)
-        text = Text()
-        text.append(f"{label:<4}", style=style)
-        text.append(" | ", style="dim")
-        text.append(_format_event_message(stage, message, data), style=style if stage in {"task_failed", "correction"} else "")
-        self._write_log(text)
 
     def _refresh_audit_panel(self) -> None:
         try:
-            panel = self.query_one(AuditPanel)
-            panel.refresh_data()
+            self.query_one(AuditPanel).refresh_data()
         except Exception:
             pass
 
+    def _switch_right_panel(self, mode: str) -> None:
+        right = self.query_one("#right_pane", Vertical)
+        right.remove_children()
+        status_panel = StatusPanel(getattr(self.controller, "env_profile", None))
+        if mode == "env":
+            right.mount(status_panel)
+            right.mount(EnvPanel(self.controller.env_profile))
+            self._right_panel_mode = "env"
+        else:
+            right.mount(status_panel)
+            audit = AuditPanel(self.controller.audit_log)
+            right.mount(audit)
+            self.call_later(audit.refresh_data)
+            self._right_panel_mode = "audit"
+
     def _set_status(self, text: str) -> None:
+        glyphs = get_glyphs()
         try:
-            self.query_one("#status_bar", Static).update(f"状态：{text}")
+            session_id = getattr(self.controller, "session_id", "") or ""
+            model = (getattr(self.controller, "model", "") or "").split("/")[-1]
+            parts = [f"{glyphs.bullet} {text}"]
+            if session_id:
+                parts.append(f"会话 #{session_id[:6]}")
+            if model:
+                parts.append(model)
+            self.query_one("#status_bar", Static).update(f"  {glyphs.sep}  ".join(parts))
         except Exception:
             pass
 
     def _refresh_runtime_status(self) -> None:
         if self.controller.is_cancel_requested():
-            self._set_status("取消中…")
+            self._set_status("取消中...")
         elif self._confirm_state is not None:
             self._set_status("等待确认")
         elif self._input_state is not None:
             self._set_status("等待输入")
         elif self._worker is not None and self._worker.is_alive():
-            self._set_status("思考中…")
+            self._set_status("推理中...")
         else:
             self._set_status("就绪")
 
     def _confirm_callback(self, req: "ConfirmationRequest") -> bool | dict[str, Any]:
         event = threading.Event()
-        result: dict[str, Any] = {"ok": False, "decision": {"approved": False, "decision": "deny"}}
+        result: dict[str, Any] = {
+            "decision": {"approved": False, "decision": "deny"},
+        }
         state: dict[str, Any] = {
             "event": event,
             "result": result,
@@ -453,18 +400,15 @@ class SysDialogueTUI(App):
         def show() -> None:
             if state["resolved"]:
                 return
+            notice = f"需要审批高风险操作：{req.tool}（{req.risk.level}）"
             if self._current_card is not None:
-                self._current_card.add_notice(f"等待用户批阅：{req.tool} ({req.risk.level})")
+                self._current_card.add_notice(notice)
             else:
-                self._write_log(f"[yellow]需要确认:[/yellow] {req.tool} ({req.risk.level})")
+                self._write_warning(notice, title="等待审批")
             self._refresh_runtime_status()
             modal = ConfirmModal(req)
             state["screen"] = modal
-
-            def on_close(decision: dict | bool | None) -> None:
-                self._resolve_confirm_state(decision, state=state)
-
-            self.push_screen(modal, on_close)
+            self.push_screen(modal, lambda decision: self._resolve_confirm_state(decision, state=state))
 
         self.call_from_thread(show)
         event.wait()
@@ -494,18 +438,15 @@ class SysDialogueTUI(App):
             if state["resolved"]:
                 return
             mode = "多行" if multiline else "单行"
+            notice = f"需要补充信息：{prompt}（{mode}输入）"
             if self._current_card is not None:
-                self._current_card.add_notice(f"需要补充输入：{prompt}（{mode}）")
+                self._current_card.add_notice(notice)
             else:
-                self._write_log(f"[yellow]需要输入:[/yellow] {prompt} ({mode})")
+                self._write_warning(notice, title="需要输入")
             self._refresh_runtime_status()
             modal = InputModal(prompt=prompt, multiline=multiline)
             state["screen"] = modal
-
-            def on_close(value: str | None) -> None:
-                self._resolve_input_state(value or "", state=state)
-
-            self.push_screen(modal, on_close)
+            self.push_screen(modal, lambda value: self._resolve_input_state(value or "", state=state))
 
         self.call_from_thread(show)
         if not event.wait(timeout=300):
@@ -524,7 +465,6 @@ class SysDialogueTUI(App):
             return
         decision = _normalize_confirmation_decision(approved)
         current["resolved"] = True
-        current["result"]["ok"] = bool(decision["approved"])
         current["result"]["decision"] = decision
         req = current.get("request")
         if dismiss and current.get("screen") is not None:
@@ -545,20 +485,18 @@ class SysDialogueTUI(App):
         except Exception:
             pass
         if req is not None:
-            result_text = _format_confirmation_result(req, bool(decision["approved"]), str(decision["decision"]))
+            text = _format_confirmation_result(
+                req,
+                bool(decision["approved"]),
+                str(decision["decision"]),
+            )
             if self._current_card is not None:
-                self._current_card.add_review_result(result_text)
+                self._current_card.add_review_result(text)
             else:
-                self._write_log(result_text)
+                self._write_log(text)
         self._refresh_runtime_status()
 
-    def _resolve_input_state(
-        self,
-        value: str,
-        *,
-        state: dict[str, Any] | None = None,
-        dismiss: bool = False,
-    ) -> None:
+    def _resolve_input_state(self, value: str, *, state=None, dismiss=False) -> None:
         current = state or self._input_state
         if current is None or current["resolved"]:
             return
@@ -583,8 +521,50 @@ class SysDialogueTUI(App):
             pass
         self._refresh_runtime_status()
 
+    def _persist_history(self, reply: str, status: str) -> None:
+        if not self._current_goal:
+            return
+        try:
+            snapshot = self._current_card.snapshot() if self._current_card else {}
+            self.controller.session_store.sync_manager(
+                self.controller.session_id,
+                self.controller.conversation_manager,
+                surface=self.controller.surface,
+                events_summary={**snapshot, "status": status},
+            )
+        except Exception:
+            pass
+
+    def _show_choice_bar(self, choices: list[str]) -> None:
+        bar = self.query_one("#choice_bar", Horizontal)
+        for button in bar.query(Button):
+            button.remove()
+        self._choice_values = choices[:3]
+        for index, choice in enumerate(self._choice_values):
+            bar.mount(
+                Button(
+                    _choice_button_label(index, choice),
+                    id=f"choice_{index}",
+                    variant="primary" if index == 0 else "default",
+                )
+            )
+        bar.remove_class("hidden")
+
+    def _hide_choice_bar(self) -> None:
+        try:
+            bar = self.query_one("#choice_bar", Horizontal)
+            bar.add_class("hidden")
+            for button in bar.query(Button):
+                button.remove()
+        except Exception:
+            pass
+        self._choice_values = []
+
     def action_toggle_audit(self) -> None:
         self._switch_right_panel("audit")
+
+    def action_toggle_env(self) -> None:
+        self._switch_right_panel("env")
 
     def action_show_history(self) -> None:
         busy = (
@@ -593,27 +573,23 @@ class SysDialogueTUI(App):
             or self._input_state is not None
         )
         if busy:
-            self._write_log(Panel("任务执行中，暂时不能恢复历史。", border_style="yellow", title="历史"))
+            self._write_warning("任务执行中，请等待完成后再查看历史。", title="历史会话")
             return
         summaries = self._history_store.list_summaries(limit=30)
         if not summaries:
-            self._write_log(Panel("还没有可恢复的历史对话。", border_style="yellow", title="历史"))
+            self._write_log(
+                Panel("还没有可恢复的历史对话。", border_style="dim", title="历史", padding=(0, 1))
+            )
             return
-
-        def on_close(session_id: str | None) -> None:
-            if session_id:
-                self._restore_history(session_id)
-
-        self.push_screen(HistoryModal(summaries), on_close)
+        self.push_screen(HistoryModal(summaries), lambda sid: sid and self._restore_history(sid))
 
     def _restore_history(self, session_id: str) -> None:
         try:
             record = self._history_store.restore_to_manager(
-                session_id,
-                self.controller.conversation_manager,
+                session_id, self.controller.conversation_manager
             )
         except Exception as exc:
-            self._write_log(Panel(f"恢复历史失败：{exc}", border_style="red", title="历史"))
+            self._write_error(f"恢复历史失败：{exc}")
             return
         try:
             if hasattr(self.controller, "switch_session"):
@@ -621,9 +597,7 @@ class SysDialogueTUI(App):
             task_store = getattr(self.controller, "task_store", None)
             if task_store is not None:
                 self.controller.session_store.recover_interrupted(
-                    record.session_id,
-                    task_store,
-                    surface=self.controller.surface,
+                    record.session_id, task_store, surface=self.controller.surface
                 )
             self.controller.session_store.sync_manager(
                 record.session_id,
@@ -635,17 +609,14 @@ class SysDialogueTUI(App):
         self._write_log(
             Panel(
                 Markdown(
-                    f"已恢复历史对话：**{record.title}**\n\n"
-                    "后续输入会复用该对话的上下文；不会重放历史工具执行。"
+                    f"已恢复历史会话：**{record.title}**\n\n"
+                    "后续输入复用该对话上下文，历史工具不会重放。"
                 ),
-                title="历史已恢复",
-                border_style="cyan",
+                title="[bold cyan]历史已恢复[/bold cyan]",
+                border_style="dim cyan",
                 padding=(0, 1),
             )
         )
-
-    def action_toggle_env(self) -> None:
-        self._switch_right_panel("env")
 
     def action_cancel_current(self) -> None:
         busy = (
@@ -654,30 +625,18 @@ class SysDialogueTUI(App):
             or self._input_state is not None
         )
         if not busy:
-            self._write_log(Panel("当前没有正在执行的任务。", border_style="yellow", title="提示"))
+            self._write_log(
+                Panel("当前没有正在执行的任务。", border_style="dim", title="提示", padding=(0, 1))
+            )
             return
-
         self.controller.request_cancel()
         if self._current_card is not None:
-            self._current_card.add_notice("已请求取消当前执行。")
+            self._current_card.add_notice("已发出取消请求，等待当前步骤退出...")
         else:
-            self._write_log(Panel("已请求取消当前执行。", border_style="yellow", title="提示"))
-        self._set_status("取消中…")
+            self._write_warning("已发出取消请求，等待当前步骤退出...", title="取消中")
+        self._set_status("取消中...")
         self._resolve_confirm_state(False, dismiss=True)
         self._resolve_input_state("", dismiss=True)
-
-    def _switch_right_panel(self, mode: str) -> None:
-        right = self.query_one("#right_pane", Vertical)
-        right.remove_children()
-        if mode == "env":
-            right.mount(EnvPanel(self.controller.env_profile))
-            self._right_panel_mode = "env"
-            return
-
-        panel = AuditPanel(self.controller.audit_log)
-        right.mount(panel)
-        self.call_later(panel.refresh_data)
-        self._right_panel_mode = "audit"
 
     def action_clear_log(self) -> None:
         self.query_one("#conversation", VerticalScroll).remove_children()
@@ -686,89 +645,22 @@ class SysDialogueTUI(App):
     def action_quit(self) -> None:
         self.exit()
 
-    def _show_choice_bar(self, choices: list[str]) -> None:
-        choice_bar = self.query_one("#choice_bar", Horizontal)
-        choice_bar.remove_children()
-        self._choice_values = choices[:3]
-        choice_bar.mount(Static("需要补充？", classes="choice_label"))
-        for index, choice in enumerate(self._choice_values):
-            choice_bar.mount(
-                Button(
-                    _choice_button_label(index, choice),
-                    id=f"choice_{index}",
-                    variant="primary" if index == 0 else "default",
-                )
-            )
-        choice_bar.remove_class("hidden")
 
-    def _hide_choice_bar(self) -> None:
-        try:
-            choice_bar = self.query_one("#choice_bar", Horizontal)
-            choice_bar.add_class("hidden")
-            choice_bar.remove_children()
-        except Exception:
-            pass
-        self._choice_values = []
-
-
-def _event_style(stage: str, data: dict[str, Any]) -> str:
-    if stage == "task_failed" and data.get("status") == "cancelled":
-        return "yellow"
-    if stage in {"tool_finished", "workflow_finished"} and data.get("success") is False:
-        return "red"
-    return _EVENT_STYLES.get(stage, "dim")
-
-
-def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str:
-    if stage == "task_started":
-        return "已接收需求，正在建立任务上下文。"
-    if stage == "model_response":
-        count = data.get("tool_count", 0)
-        if count:
-            return f"已规划下一步动作：{count} 个工具/流程调用。"
-        return "正在整理回复格式，等待 ReAct 收口。"
-    if stage == "correction":
-        count = data.get("correction_count")
-        suffix = f"（累计 {count} 次）" if count else ""
-        return f"ReAct 协议纠偏已记录到技术详情{suffix}。"
-    if stage == "tool_started":
-        return f"正在调用工具：{data.get('tool') or message}"
-    if stage == "tool_finished":
-        tool = data.get("tool") or message
-        return f"工具完成：{tool}" if data.get("success") is not False else f"工具失败：{tool}"
-    if stage == "workflow_started":
-        return f"开始执行工作流：{data.get('workflow_name') or message}"
-    if stage == "workflow_finished":
-        name = data.get("workflow_name") or message
-        return f"工作流完成：{name}" if data.get("success") is not False else f"工作流失败：{name}"
-    if stage == "confirmation_requested":
-        tool = data.get("tool") or "当前操作"
-        risk = data.get("risk_level") or "WARN-HIGH"
-        reason = data.get("reason") or message
-        return f"{tool} 需要确认（{risk}）：{reason}"
-    if stage == "verification":
-        return message or "验证已记录。"
-    if stage == "task_finished":
-        return f"任务已收口：{data.get('status') or 'completed'}。"
-    if stage == "task_failed":
-        if data.get("status") == "cancelled":
-            return "任务已取消，未继续执行后续工具。"
-        return message or "任务未完成。"
-    return message or stage
-
-
-def _format_confirmation_result(req: "ConfirmationRequest", approved: bool, decision: str = "once") -> Text:
+def _format_confirmation_result(
+    req: "ConfirmationRequest",
+    approved: bool,
+    decision: str = "once",
+) -> Text:
+    glyphs = get_glyphs()
     text = Text()
     if approved:
-        text.append("批阅 ", style="bold green")
-        text.append("| ", style="dim")
+        text.append(f"{glyphs.ok} 批阅通过  ", style="bold green")
         if decision == "always_this_session":
-            text.append(f"已批准 {req.tool}，本会话后续同类低风险请求将自动允许。", style="green")
+            text.append(f"已批准 {req.tool}，本会话后续同类请求将自动允许。", style="green")
         else:
             text.append(f"已批准 {req.tool}，继续执行。", style="green")
     else:
-        text.append("批阅 ", style="bold yellow")
-        text.append("| ", style="dim")
+        text.append(f"{glyphs.fail} 批阅拒绝  ", style="bold yellow")
         text.append(f"已拒绝 {req.tool}，相关操作不会继续。", style="yellow")
     return text
 
@@ -788,46 +680,78 @@ def _normalize_confirmation_decision(value: bool | dict | None) -> dict[str, Any
 
 
 def _choices_from_task_event(data: dict[str, Any]) -> list[str]:
-    status = data.get("status")
-    if status not in {"need_info", "blocked"}:
+    if data.get("status") not in {"need_info", "blocked"}:
         return []
-    raw_choices = data.get("choices") or data.get("next_steps") or []
-    choices: list[str] = []
-    for item in raw_choices:
+    raw: list = data.get("choices") or data.get("next_steps") or []
+    out: list[str] = []
+    for item in raw:
         if not isinstance(item, str):
             continue
         text = item.strip()
-        if not text or text in choices:
-            continue
-        choices.append(text)
-        if len(choices) >= 3:
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= 3:
             break
-    return choices
+    return out
 
 
 def _choice_button_label(index: int, choice: str) -> str:
-    normalized = " ".join(choice.split())
-    if len(normalized) > 24:
-        normalized = normalized[:23] + "…"
-    return f"{index + 1}. {normalized}"
+    label = " ".join(choice.split())
+    if len(label) > 26:
+        label = label[:25] + "…"
+    return f"{index + 1}. {label}"
 
 
 def _looks_like_failure_reply(reply: str) -> bool:
-    text = (reply or "").strip()
-    failure_markers = (
+    markers = (
         "LLM 调用失败",
         "未按 ReAct 协议",
         "达到最大 ReAct",
         "Traceback (most recent call last)",
     )
-    return any(marker in text for marker in failure_markers)
+    return any(marker in (reply or "") for marker in markers)
 
 
 def _format_error_markdown(reply: str) -> str:
     return format_error_markdown(reply)
 
 
+def _format_event_message(stage: str, message: str, data: dict[str, Any]) -> str:
+    if stage == "task_started":
+        return "已接收需求，正在建立任务上下文。"
+    if stage == "model_response":
+        count = int(data.get("tool_count") or 0)
+        if count:
+            return f"已规划下一步动作：{count} 个工具/流程调用。"
+        return data.get("analysis_summary") or "模型正在整理下一步。"
+    if stage == "correction":
+        return "ReAct 协议纠偏已记录在技术详情中。"
+    if stage == "tool_started":
+        return f"开始执行工具：{data.get('tool') or message}"
+    if stage == "tool_finished":
+        return f"工具执行完成：{data.get('tool') or message}"
+    if stage == "workflow_started":
+        return f"开始执行工作流：{data.get('workflow_name') or message}"
+    if stage == "workflow_finished":
+        return f"工作流执行完成：{data.get('workflow_name') or message}"
+    if stage == "task_finished":
+        return data.get("summary") or "任务已完成。"
+    if stage == "task_failed":
+        return data.get("error_summary") or "任务未完成。"
+    return message or stage
+
+
+def _event_style(stage: str, data: dict[str, Any]) -> str:
+    if stage in {"task_failed"}:
+        return "yellow" if data.get("status") == "cancelled" else "red"
+    if stage in {"tool_finished", "workflow_finished"}:
+        return "green" if data.get("success") is not False else "red"
+    if stage == "task_finished":
+        return "bold green"
+    if stage == "confirmation_requested":
+        return "yellow"
+    return "dim"
+
+
 def run_tui(controller: "AgentController") -> None:
-    """Launch the TUI with the provided controller."""
-    app = SysDialogueTUI(controller)
-    app.run()
+    SysDialogueTUI(controller).run()

@@ -48,7 +48,12 @@ class SafeExecutor(ABC):
 
 
 class LocalExecutor(SafeExecutor):
-    """Local process executor using shell=False."""
+    """Local process executor using shell=False.
+
+    Supports an optional :class:`PrivilegeManager` for interactive sudo
+    elevation. The password is piped via stdin and never appears in argv, so it
+    cannot leak into process listings, command traces, or audit logs.
+    """
 
     def __init__(self, privilege_manager: PrivilegeManager | None = None):
         self.privilege_manager = privilege_manager
@@ -56,28 +61,41 @@ class LocalExecutor(SafeExecutor):
     def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             return self.run(cmd, timeout=timeout, cwd=cwd)
+
         sudo_cmd = ["sudo", "-n", "--", *cmd]
-        result = self.run_full(sudo_cmd, timeout=timeout, cwd=cwd)
-        if result.exit_code == 0 or self.privilege_manager is None:
+        result = self._raw_run_with_stdin(sudo_cmd, timeout=timeout, stdin_bytes=None, cwd=cwd)
+        if result.exit_code == 0:
             return _combine_result(result)
-        password = self.privilege_manager.ensure_password()
+
+        pm = self.privilege_manager
+        if pm is None or not pm.can_prompt:
+            return _combine_result(result)
+
+        last_failure = result
         for attempt in range(2):
+            password = pm.ensure_password(force_refresh=(attempt > 0))
             if not password:
-                return _combine_result(result)
-            validate = self._raw_run_with_stdin(
+                pm.invalidate()
+                return _combine_result(last_failure)
+
+            validation = self._raw_run_with_stdin(
                 ["sudo", "-S", "-p", "", "-v"],
                 timeout=timeout,
                 stdin_bytes=(password + "\n").encode("utf-8"),
                 cwd=cwd,
             )
-            if validate.exit_code == 0:
-                return self.run(sudo_cmd, timeout=timeout, cwd=cwd)
-            self.privilege_manager.invalidate()
-            if attempt == 0:
-                password = self.privilege_manager.ensure_password(force_refresh=True)
-                continue
-            return _combine_result(validate)
-        return _combine_result(result)
+            if validation.exit_code == 0:
+                final = self._raw_run_with_stdin(
+                    sudo_cmd,
+                    timeout=timeout,
+                    stdin_bytes=None,
+                    cwd=cwd,
+                )
+                return _combine_result(final)
+            last_failure = validation
+
+        pm.invalidate()
+        return _combine_result(last_failure)
 
     def _raw_run_with_stdin(
         self,
@@ -107,31 +125,8 @@ class LocalExecutor(SafeExecutor):
         except FileNotFoundError:
             return RunResult(stdout="", stderr=f"Command not found: {cmd[0]}", exit_code=127)
 
-
     def _raw_run(self, cmd: list[str], timeout: int, cwd: str | None = None) -> RunResult:
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=timeout,
-                shell=False,
-                cwd=cwd,
-            )
-            stdout = _truncate(proc.stdout.decode("utf-8", errors="replace"))
-            stderr = _truncate(proc.stderr.decode("utf-8", errors="replace"))
-            truncated = (
-                len(proc.stdout) >= MAX_OUTPUT_BYTES or len(proc.stderr) >= MAX_OUTPUT_BYTES
-            )
-            return RunResult(
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=proc.returncode,
-                truncated=truncated,
-            )
-        except subprocess.TimeoutExpired:
-            return RunResult(stdout="", stderr="Command timed out", exit_code=124, timed_out=True)
-        except FileNotFoundError:
-            return RunResult(stdout="", stderr=f"Command not found: {cmd[0]}", exit_code=127)
+        return self._raw_run_with_stdin(cmd, timeout=timeout, stdin_bytes=None, cwd=cwd)
 
 
 def _combine_result(result: RunResult) -> tuple[str, int]:

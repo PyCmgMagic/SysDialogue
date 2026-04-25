@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import getpass
+
 from sysdialogue.agent.error_presentation import present_error
 from sysdialogue.app.runtime_factory import create_runtime
 
@@ -59,8 +61,13 @@ def _confirm_callback(req) -> bool:
     return answer in {"y", "yes"}
 
 
-def _input_callback(prompt: str, multiline: bool) -> str:
+def _input_callback(prompt: str, multiline: bool, sensitive: bool = False) -> str:
     print(f"\n[需要输入] {prompt}")
+    if sensitive:
+        try:
+            return getpass.getpass("> ")
+        except (EOFError, KeyboardInterrupt):
+            return ""
     if not multiline:
         return input("> ")
     print("输入多行内容，单独输入 '.' 结束。")

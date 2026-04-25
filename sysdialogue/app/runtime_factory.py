@@ -155,6 +155,9 @@ def create_runtime(
         controller.confirm_callback = confirm_callback
     if input_callback is not None:
         controller.input_callback = input_callback
+        privilege_manager.set_input_callback(input_callback)
+    else:
+        privilege_manager.set_input_callback(controller.input_callback)
 
     return RuntimeBundle(
         executor=executor,
