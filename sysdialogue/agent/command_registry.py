@@ -7,6 +7,9 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
+from sysdialogue.audit.serializers import export_audit_jsonl, export_replay_package
+from sysdialogue.audit.trace_store import AuditLog
+
 
 @dataclass
 class CommandResult:
@@ -32,6 +35,10 @@ class CommandRegistry:
             return CommandResult(_active_task_steps(controller))
         if command == "/audit":
             return CommandResult(_audit(controller))
+        if command == "/export-audit":
+            return CommandResult(_export_audit(controller, arg))
+        if command == "/export-replay":
+            return CommandResult(_export_replay(controller, arg))
         if command == "/memory":
             return CommandResult(_memory(controller, arg))
         if command == "/tools":
@@ -74,6 +81,8 @@ def _help_text() -> str:
             "- /locks: show current lock leases",
             "- /plan: show active durable plan/workflow steps",
             "- /audit: show recent audit records",
+            "- /export-audit [session_id]: export sanitized audit JSONL",
+            "- /export-replay [session_id]: export sanitized replay ZIP",
             "- /memory [text]: list memory or remember a note",
             "- /tools: show static and reusable dynamic tools",
             "- /permissions: show active permission policy summary",
@@ -157,6 +166,29 @@ def _audit(controller: Any) -> str:
     for record in records:
         lines.append(f"- {record.get('type', 'record')}: {record.get('tool', '')} {record.get('decision', '')}")
     return "\n".join(lines)
+
+
+def _export_audit(controller: Any, arg: str) -> str:
+    audit = _audit_for_session(controller, arg)
+    if not audit.path.exists():
+        return f"Audit session not found: {audit.session_id}"
+    path = export_audit_jsonl(audit)
+    return f"Exported audit: {path}"
+
+
+def _export_replay(controller: Any, arg: str) -> str:
+    audit = _audit_for_session(controller, arg)
+    if not audit.path.exists():
+        return f"Audit session not found: {audit.session_id}"
+    path = export_replay_package(audit)
+    return f"Exported replay package: {path}"
+
+
+def _audit_for_session(controller: Any, arg: str) -> AuditLog:
+    session_id = (arg or "").strip() or getattr(controller.audit_log, "session_id", "")
+    if session_id == getattr(controller.audit_log, "session_id", ""):
+        return controller.audit_log
+    return AuditLog(session_id=session_id)
 
 
 def _memory(controller: Any, arg: str) -> str:

@@ -1,0 +1,7 @@
+﻿$ hostnamectl set-hostname foofish-VMware-Virtual-Platform && hostname
+exit=0
+
+STDOUT:
+foofish-VMware-Virtual-Platform
+
+STDERR:

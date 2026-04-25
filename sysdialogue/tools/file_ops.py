@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import glob
+
 from sysdialogue.runtime.secure_runner import SafeExecutor
 from sysdialogue.runtime.target_fs import TargetFileAccess
 from sysdialogue.tools.base import ToolResult
@@ -58,6 +60,27 @@ def read_file(
         )
     except Exception as e:
         return ToolResult(success=False, error=str(e))
+
+
+def _has_glob_magic(path: str) -> bool:
+    return any(ch in path for ch in "*?[")
+
+
+def _resolve_single_glob(fs: TargetFileAccess, pattern: str) -> tuple[str, str]:
+    if fs.is_remote:
+        parent = fs.dirname(pattern) or "."
+        name = fs.basename(pattern)
+        out, code = fs.remote_run(["find", parent, "-maxdepth", "1", "-name", name, "-print"], timeout=15)
+        if code != 0:
+            return "", out or f"glob lookup failed: {pattern}"
+        matches = sorted(line.strip() for line in out.splitlines() if line.strip())
+    else:
+        matches = sorted(glob.glob(pattern))
+    if not matches:
+        return "", f"glob matched no source paths: {pattern}"
+    if len(matches) > 1:
+        return "", f"glob matched multiple source paths: {pattern}: {matches[:5]}"
+    return matches[0], ""
 
 
 def write_file(
@@ -174,6 +197,10 @@ def copy_move_path(
     fs = TargetFileAccess(executor)
     src_path = fs.expand(src)
     dst_path = fs.expand(dst)
+    if _has_glob_magic(src_path):
+        src_path, glob_error = _resolve_single_glob(fs, src_path)
+        if glob_error:
+            return ToolResult(success=False, error=glob_error)
     if not fs.exists(src_path):
         return ToolResult(success=False, error=f"源路径不存在：{src}")
 

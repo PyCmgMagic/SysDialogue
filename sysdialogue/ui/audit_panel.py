@@ -48,11 +48,14 @@ class AuditPanel(Vertical):
 
     def refresh_data(self) -> None:
         table = self.query_one("#audit_table", DataTable)
+        if not table.columns:
+            return
         table.clear()
         records = self.audit_log.read_all()
         # 只显示最近 50 条
         for rec in records[-50:]:
-            ts = rec.get("ts", "")[-9:-4]  # 显示 HH:MM
+            ts_str = rec.get("ts", "")
+            ts = ts_str[11:16] if len(ts_str) >= 16 else ts_str  # 显示 HH:MM
             rtype = rec.get("type", "")
             if rtype == "decision":
                 tool = rec.get("tool", "")

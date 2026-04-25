@@ -14,9 +14,11 @@ class RecordingExecutor(SafeExecutor):
     ):
         self.handler = handler or (lambda cmd, timeout: ("", 0))
         self.calls: list[list[str]] = []
+        self.cwd_calls: list[str | None] = []
 
-    def _raw_run(self, cmd: list[str], timeout: int) -> RunResult:
+    def _raw_run(self, cmd: list[str], timeout: int, cwd: str | None = None) -> RunResult:
         self.calls.append(cmd)
+        self.cwd_calls.append(cwd)
         result = self.handler(cmd, timeout)
         if len(result) == 2:
             stdout, exit_code = result

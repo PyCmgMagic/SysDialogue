@@ -7,6 +7,7 @@ import os
 import posixpath
 import shutil
 import stat as stat_mod
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -97,17 +98,28 @@ class TargetFileAccess:
         if self.is_remote:
             sftp = self._remote_sftp()
             if atomic:
-                tmp = f"{path}.tmp"
+                tmp = self.join(parent or ".", f".{self.basename(path)}.{uuid.uuid4().hex}.tmp")
                 with sftp.open(tmp, "wb") as fh:
                     fh.write(data)
-                sftp.rename(tmp, path)
+                    try:
+                        fh.flush()
+                    except Exception:
+                        pass
+                try:
+                    self._remote_atomic_rename(sftp, tmp, path)
+                except Exception:
+                    try:
+                        sftp.remove(tmp)
+                    except Exception:
+                        pass
+                    raise
                 return
             with sftp.open(path, "wb") as fh:
                 fh.write(data)
             return
 
         if atomic:
-            tmp = f"{path}.tmp"
+            tmp = str(Path(path).with_name(f".{Path(path).name}.{uuid.uuid4().hex}.tmp"))
             Path(tmp).write_bytes(data)
             os.replace(tmp, path)
         else:
@@ -203,6 +215,66 @@ class TargetFileAccess:
             encoding="utf-8",
         )
 
+    def write_text_privileged(
+        self,
+        path: str,
+        content: str,
+        *,
+        mode: int | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        data = content.encode(encoding)
+        if not self._needs_remote_privilege():
+            self.write_bytes(path, data, atomic=True)
+            if mode is not None:
+                self.chmod(path, mode)
+            return
+
+        path = self.expand(path)
+        parent = self.dirname(path)
+        if parent:
+            self.mkdir_privileged(parent)
+        tmp_dir = self.join(self.home_dir(), ".sysdialogue", "tmp")
+        self.mkdir(tmp_dir, parents=True)
+        tmp = self.join(tmp_dir, f"{self.basename(path)}.{uuid.uuid4().hex}.tmp")
+        self.write_bytes(tmp, data, atomic=True)
+        try:
+            cmd = ["install"]
+            if mode is not None:
+                cmd.extend(["-m", f"{mode:04o}"])
+            cmd.extend([tmp, path])
+            out, code = self.executor.run_privileged(cmd, timeout=15)
+            if code != 0:
+                raise OSError(out or f"privileged install failed: {path}")
+        finally:
+            if self.exists(tmp):
+                self.remove(tmp)
+
+    def write_json_privileged(self, path: str, data: Any, *, mode: int | None = None) -> None:
+        self.write_text_privileged(
+            path,
+            json.dumps(data, indent=2, ensure_ascii=False),
+            mode=mode,
+            encoding="utf-8",
+        )
+
+    def mkdir_privileged(self, path: str) -> None:
+        if not self._needs_remote_privilege():
+            self.mkdir(path, parents=True)
+            return
+        out, code = self.executor.run_privileged(["mkdir", "-p", self.expand(path)], timeout=10)
+        if code != 0:
+            raise OSError(out or f"privileged mkdir failed: {path}")
+
+    def remove_privileged(self, path: str, *, recursive: bool = False) -> None:
+        if not self._needs_remote_privilege():
+            self.remove(path, recursive=recursive)
+            return
+        cmd = ["rm", "-rf" if recursive else "-f", self.expand(path)]
+        out, code = self.executor.run_privileged(cmd, timeout=15)
+        if code != 0:
+            raise OSError(out or f"privileged remove failed: {path}")
+
     def dirname(self, path: str) -> str:
         if self.is_remote:
             return posixpath.dirname(path)
@@ -212,6 +284,25 @@ class TargetFileAccess:
         if self.is_remote:
             return posixpath.basename(path)
         return Path(path).name
+
+    def _remote_atomic_rename(self, sftp, tmp: str, path: str) -> None:
+        posix_rename = getattr(sftp, "posix_rename", None)
+        if callable(posix_rename):
+            try:
+                posix_rename(tmp, path)
+                return
+            except OSError:
+                pass
+        try:
+            sftp.rename(tmp, path)
+            return
+        except OSError:
+            pass
+        try:
+            sftp.remove(path)
+        except OSError:
+            pass
+        sftp.rename(tmp, path)
 
     def remote_run(self, cmd: list[str], *, timeout: int = 30) -> tuple[str, int]:
         return self.executor.run(cmd, timeout=timeout)
@@ -242,4 +333,8 @@ class TargetFileAccess:
         out, code = self.executor.run(cmd, timeout=timeout)
         if code != 0:
             raise OSError(out or f"command failed: {' '.join(cmd)}")
+
+    def _needs_remote_privilege(self) -> bool:
+        remote = self.executor
+        return isinstance(remote, RemoteExecutor) and remote.username != "root"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from sysdialogue.security.path_policies import private_subnet_key
 from sysdialogue.security.risk_classifier import classify
 from sysdialogue.tools.net_diag import check_endpoint
+from sysdialogue.tools.process_ports import list_processes
 
 from tests.helpers import RecordingExecutor
 
@@ -58,3 +59,24 @@ def test_check_endpoint_blocks_redirects_into_private_network() -> None:
     assert "WH025" in result.error
     assert result.data["redirect_url"] == "https://10.0.0.5/internal"
     assert counters["private_probe_subnets"]["10.0.0.0/24"] == 1
+
+
+def test_container_exec_requires_non_empty_argv() -> None:
+    decision = classify("manage_container", {"action": "exec", "name": "db", "command": []}, env_profile={})
+
+    assert decision.level == "BLOCK"
+    assert decision.rule_ids == ["B032"]
+
+
+def test_list_processes_uses_portable_ps_sort_keys() -> None:
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: (
+            "USER PID %CPU %MEM COMMAND\ntester 1 10.0 1.0 python",
+            0,
+        )
+    )
+
+    result = list_processes(executor, sort_by="cpu")
+
+    assert result.success is True
+    assert executor.calls[0] == ["ps", "aux", "--sort", "-%cpu"]

@@ -1,0 +1,30 @@
+$ D:\develop\anaconda\python.exe -m pytest -q
+exit=1
+
+STDOUT:
+.............................F.......................................... [ 63%]
+..........................................                               [100%]
+================================== FAILURES ===================================
+___________________ test_load_config_clamps_max_iterations ____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000180FC88D5E0>
+tmp_path = WindowsPath('C:/Users/32563/AppData/Local/Temp/pytest-of-32563/pytest-24/test_load_config_clamps_max_it0')
+
+    def test_load_config_clamps_max_iterations(monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+>       assert load_config().max_iterations == 160
+E       AssertionError: assert 220 == 160
+E        +  where 220 = AppConfig(api_key=<redacted>', base_url='https://xplt.sdu.edu.cn:4000', model='Ali-dashscope/Qwen3.5-F...ssh_port=22, ssh_user='', ssh_key_file='', ssh_password='', ssh_sudo_password='', workflows_dir='', max_iterations=220).max_iterations
+E        +    where AppConfig(api_key=<redacted>', base_url='https://xplt.sdu.edu.cn:4000', model='Ali-dashscope/Qwen3.5-F...ssh_port=22, ssh_user='', ssh_key_file='', ssh_password='', ssh_sudo_password='', workflows_dir='', max_iterations=220) = load_config()
+
+D:\project\Nexus\Nexus\tests\test_cli_entrypoints.py:55: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_cli_entrypoints.py::test_load_config_clamps_max_iterations
+1 failed, 113 passed in 9.39s
+
+
+STDERR:
+C:\Users\32563\AppData\Roaming\Python\Python313\site-packages\pytest_asyncio\plugin.py:247: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))

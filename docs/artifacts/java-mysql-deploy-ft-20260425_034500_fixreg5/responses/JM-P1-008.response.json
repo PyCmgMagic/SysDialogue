@@ -1,0 +1,11 @@
+{
+  "session_id": "jm_20260425_034500_fixreg5_jm_p1_008",
+  "elapsed_sec": 34.4,
+  "reply": "Service `sdft_20260425_034500_fixreg5_java.service` not found on the system. Cannot proceed with failure testing without the target service being deployed.\n证据：manage_service(status) returned: Unit sdft_20260425_034500_fixreg5_java.service could not be found.\n未执行系统操作：The planned failure handling test requires the Java service sdft_20260425_034500_fixreg5_java.service to be deployed and running. Since the service does not exist on this system, no mutations, verification, or rollback tests can be performed. \nNext steps: Deploy or start the Java service first, then retry the failure handling test workflow.",
+  "error": "",
+  "task_statuses": [
+    "blocked"
+  ],
+  "confirmations": [],
+  "inputs": []
+}

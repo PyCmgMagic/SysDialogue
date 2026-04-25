@@ -5,8 +5,19 @@ from copy import deepcopy
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
-from sysdialogue.agent.react_runner import _iteration_budget, _requires_environment_feedback
-from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.react_runner import (
+    LLMVerificationJudge,
+    TaskRun,
+    VerificationJudge,
+    _is_mutating_tool,
+    _is_verification_tool,
+    _iteration_budget,
+    _plan_step_repair_match,
+    _plan_args_match,
+    _requires_environment_feedback,
+    _resolve_runtime_args_for_tool,
+)
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStepRecord, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
@@ -21,6 +32,26 @@ class FakeLLM:
         self.calls: list[dict] = []
 
     def messages_create(self, *, system, messages, tools):
+        if any(tool.get("name") == "submit_verification_judgement" for tool in tools):
+            self.calls.append({"system": system, "messages": deepcopy(messages), "tools": deepcopy(tools)})
+            return LLMResponse(
+                content=[
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "sufficient": True,
+                                "covered_requirements": ["test evidence accepted"],
+                                "missing_requirements": [],
+                                "confidence": "high",
+                                "recommended_next_verification": [],
+                                "reason": "Unit-test judge accepted the provided tool evidence.",
+                            }
+                        ),
+                    }
+                ],
+                stop_reason="stop",
+            )
         self.calls.append({"system": system, "messages": deepcopy(messages), "tools": deepcopy(tools)})
         content = self.responses.pop(0)
         stop_reason = "tool_use" if any(block.get("type") == "tool_use" for block in content) else "stop"
@@ -49,6 +80,238 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         lock_store=LockStore(str(tmp_path / "locks")),
     )
     return controller, events
+
+
+class JudgeLLM:
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    def messages_create(self, *, system, messages, tools):
+        self.calls += 1
+        return LLMResponse(content=self.content, stop_reason="stop")
+
+
+def _verified_mysql_task() -> TaskRun:
+    task = TaskRun(
+        task_id="task_judge",
+        goal="create a Docker MySQL user and table",
+        requires_environment_feedback=True,
+    )
+    task.changed_state = True
+    task.last_action_step = 3
+    task.tool_steps = 4
+    task.verification_candidates.append(
+        {
+            "tool": "manage_container",
+            "action_key": "manage_container:exec",
+            "args": {"action": "exec", "command": ["mysql", "-e", "SELECT 1"]},
+            "data": {"exit_code": 0, "stdout": "1"},
+            "step": 4,
+            "after_last_action": True,
+        }
+    )
+    return task
+
+
+def test_llm_verification_judge_can_accept_rule_sufficient_evidence() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([
+        {
+            "type": "text",
+            "text": json.dumps(
+                {
+                    "sufficient": True,
+                    "covered_requirements": ["mysql SELECT confirms table is reachable"],
+                    "missing_requirements": [],
+                    "confidence": "high",
+                    "recommended_next_verification": [],
+                    "reason": "Targeted SELECT ran after the mutation.",
+                }
+            ),
+        }
+    ])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "llm"
+    assert llm.calls == 1
+
+
+def test_llm_verification_judge_cannot_override_rule_rejection() -> None:
+    task = TaskRun(task_id="task_judge", goal="create user", requires_environment_feedback=True)
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": '{"sufficient": true}'}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is False
+    assert llm.calls == 0
+
+
+def test_llm_verification_judge_parse_failure_falls_back_to_rules() -> None:
+    task = _verified_mysql_task()
+    rule = VerificationJudge().judge(task)
+    llm = JudgeLLM([{"type": "text", "text": "not json"}])
+
+    judgement = LLMVerificationJudge(llm).judge(task, rule)
+
+    assert judgement["sufficient"] is False
+    assert judgement["judge"] == "llm"
+    assert judgement["llm_judge_error"] == "invalid llm judgement"
+
+
+def test_plan_args_match_tolerates_container_defaults_and_deferred_values() -> None:
+    expected = {
+        "action": "run",
+        "backend": "docker",
+        "command": ["sh", "-c", "ignored for run"],
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306, "protocol": "tcp"}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+        "restart_policy": "no",
+    }
+    actual = {
+        "action": "run",
+        "name": "db",
+        "image": "mysql:8",
+        "ports": [{"host_port": 13306, "container_port": 3306}],
+        "env_vars": {"MYSQL_DATABASE": "app", "MYSQL_ROOT_PASSWORD": "secret"},
+    }
+
+    assert _plan_args_match("manage_container", expected, actual)
+    assert _plan_args_match(
+        "manage_authorized_keys",
+        {"action": "add", "username": "alice", "public_key_from_file": "/tmp/key.pub"},
+        {"action": "add", "username": "alice", "public_key": "ssh-ed25519 AAAA test"},
+    )
+    assert _plan_args_match(
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app", "timeout": 120},
+    )
+    assert not _plan_args_match(
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/other"},
+    )
+
+
+def test_frozen_plan_runtime_arg_binding_resolves_previous_step_data() -> None:
+    task = TaskRun(
+        task_id="task_bind",
+        goal="create and delete cron",
+        requires_environment_feedback=True,
+        mode="plan",
+        steps=[
+            TaskStepRecord(
+                step_id="create_cron",
+                tool="manage_cron",
+                args={"action": "create"},
+                status="completed",
+                result_data={"job_id": "job_1234abcd"},
+            ),
+            TaskStepRecord(
+                step_id="delete_cron",
+                tool="manage_cron",
+                args={"action": "delete", "job_id": "{{create_cron.data.job_id}}"},
+            ),
+        ],
+    )
+
+    resolved, error = _resolve_runtime_args_for_tool(
+        task,
+        "manage_cron",
+        {"action": "delete", "job_id": "{{create_cron.data.job_id}}"},
+    )
+
+    assert error is None
+    assert resolved == {"action": "delete", "job_id": "job_1234abcd"}
+
+
+def test_container_exec_verification_only_accepts_read_only_checks() -> None:
+    select_args = {
+        "action": "exec",
+        "name": "mysql",
+        "command": ["mysql", "-uroot", "-e", "SELECT COUNT(*) FROM app.users"],
+    }
+    create_args = {
+        "action": "exec",
+        "name": "mysql",
+        "command": ["mysql", "-uroot", "-e", "CREATE TABLE app.users(id int)"],
+    }
+
+    assert _is_verification_tool("manage_container", select_args)
+    assert not _is_mutating_tool("manage_container", select_args)
+    assert not _is_verification_tool("manage_container", create_args)
+    assert _is_mutating_tool("manage_container", create_args)
+    assert _is_verification_tool(
+        "manage_container",
+        {
+            "action": "wait_exec",
+            "name": "mysql",
+            "command": ["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "ping"],
+        },
+    )
+
+
+def test_frozen_plan_allows_limited_repairs_for_cwd_and_mysql_tcp() -> None:
+    maven_step = TaskStepRecord(
+        step_id="maven-test",
+        tool="execute_dynamic_tool",
+        status="failed",
+        args={"cmd_template": ["mvn", "test"]},
+    )
+    assert _plan_step_repair_match(
+        maven_step,
+        "execute_dynamic_tool",
+        {"cmd_template": ["mvn", "test"], "cwd": "/tmp/app"},
+    )
+
+    mysql_step = TaskStepRecord(
+        step_id="mysql-ready",
+        tool="manage_container",
+        status="failed",
+        args={"action": "exec", "name": "db", "command": ["mysqladmin", "-uroot", "-psecret", "ping"]},
+    )
+    assert _plan_step_repair_match(
+        mysql_step,
+        "manage_container",
+        {
+            "action": "wait_exec",
+            "name": "db",
+            "command": ["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "-uroot", "-psecret", "ping"],
+        },
+    )
+
+
+def test_verification_judge_only_requires_post_mutation_tool_evidence() -> None:
+    task = TaskRun(
+        task_id="task_verify",
+        goal="create a user",
+        requires_environment_feedback=True,
+        changed_state=True,
+        acted=True,
+        last_action_step=2,
+        verification_candidates=[
+            {
+                "tool": "get_system_info",
+                "action_key": "get_system_info",
+                "step": 3,
+                "after_last_action": True,
+                "data": {"hostname": "testbox"},
+            }
+        ],
+    )
+
+    judgement = VerificationJudge().judge(task)
+
+    assert judgement["sufficient"] is True
+    assert judgement["judge"] == "hard_gate"
+    assert "get_system_info" in judgement["covered_requirements"][0]
 
 
 def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
@@ -422,7 +685,7 @@ def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> N
     assert "完成验证" in reply
     rejected_result = llm.calls[3]["messages"][-1]["content"][0]
     assert rejected_result["is_error"] is True
-    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+    assert "verification must run after the last mutation" in rejected_result["content"]
     stages = [event.stage for event in events]
     assert stages.count("correction") == 1
 
@@ -481,6 +744,241 @@ def test_frozen_plan_allows_only_dependency_ready_steps(tmp_path: Path) -> None:
     verify_step = [step for step in payload["steps"] if step["step_id"] == "verify"][0]
     assert verify_step["depends_on"] == ["observe"]
     assert verify_step["finding_id"] == "finding-1"
+
+
+def test_frozen_plan_cron_create_delete_uses_bound_job_id(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    calls = []
+
+    def manage_cron(executor, action: str, scope: str = "user", schedule=None, job_target=None, job_id=None):
+        calls.append({"action": action, "scope": scope, "job_id": job_id})
+        if action == "create":
+            return ToolResult(
+                success=True,
+                data={
+                    "job_id": "job_bound123",
+                    "scope": scope,
+                    "schedule": schedule,
+                    "job_target": job_target,
+                    "enabled": True,
+                },
+            )
+        if action == "list":
+            return ToolResult(success=True, data={"managed": {}})
+        if action == "delete":
+            return ToolResult(success=True, data={"job_id": job_id, "action": "delete"})
+        return ToolResult(success=False, error="bad action")
+
+    registry.register(
+        ToolDef(
+            name="manage_cron",
+            fn=manage_cron,
+            schema={
+                "name": "manage_cron",
+                "description": "Cron test tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "scope": {"type": "string"},
+                        "schedule": {"type": "string"},
+                        "job_id": {"type": "string"},
+                        "job_target": {"type": "object"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        )
+    )
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "create_cron",
+                            "tool": "manage_cron",
+                            "args": {
+                                "action": "create",
+                                "scope": "system",
+                                "schedule": "*/5 * * * *",
+                                "job_target": {"kind": "tool", "name": "get_system_info", "args": {}},
+                            },
+                        },
+                        {
+                            "step_id": "list_after_create",
+                            "tool": "manage_cron",
+                            "args": {"action": "list", "scope": "system"},
+                            "depends_on": ["create_cron"],
+                        },
+                        {
+                            "step_id": "delete_cron",
+                            "tool": "manage_cron",
+                            "args": {
+                                "action": "delete",
+                                "scope": "system",
+                                "job_id": "{{create_cron.data.job_id}}",
+                            },
+                            "depends_on": ["list_after_create"],
+                        },
+                        {
+                            "step_id": "list_after_delete",
+                            "tool": "manage_cron",
+                            "args": {"action": "list", "scope": "system"},
+                            "depends_on": ["delete_cron"],
+                        },
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+        [
+            _tool_use(
+                "manage_cron",
+                {
+                    "action": "create",
+                    "scope": "system",
+                    "schedule": "*/5 * * * *",
+                    "job_target": {"kind": "tool", "name": "get_system_info", "args": {}},
+                },
+                tool_id="create_1",
+            )
+        ],
+        [_tool_use("manage_cron", {"action": "list", "scope": "system"}, tool_id="list_1")],
+        [
+            _tool_use(
+                "manage_cron",
+                {"action": "delete", "scope": "system", "job_id": "{{create_cron.data.job_id}}"},
+                tool_id="delete_1",
+            )
+        ],
+        [_tool_use("manage_cron", {"action": "list", "scope": "system"}, tool_id="list_2")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Cron lifecycle completed.",
+                "evidence": ["created job_bound123", "deleted job_bound123", "list verified"],
+                "verification": "manage_cron:list ran after delete.",
+                "changed_state": True,
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, registry)
+    controller.confirm_callback = lambda req: True
+
+    reply = controller.run_turn("create then delete cron")
+
+    assert "Cron lifecycle completed" in reply
+    assert calls[2] == {"action": "delete", "scope": "system", "job_id": "job_bound123"}
+    payload = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    create_step = [step for step in payload["steps"] if step["step_id"] == "create_cron"][0]
+    assert create_step["result_data"]["job_id"] == "job_bound123"
+
+
+def test_react_runner_stops_repeated_no_progress_plan_deviations(tmp_path: Path) -> None:
+    responses = [
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "mutate",
+                            "tool": "mutate_marker",
+                            "args": {},
+                        }
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+    ]
+    responses.extend([[_tool_use("get_system_info", {}, tool_id=f"wrong_{index}")] for index in range(10)])
+    llm = FakeLLM(responses)
+    controller, events = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("run a frozen mutation plan")
+
+    assert "Task blocked after repeated no-progress" in reply
+    assert len(llm.calls) < len(responses)
+    assert [event.stage for event in events].count("correction") >= 8
+
+
+def test_continue_on_failure_read_only_precheck_does_not_block_repair_plan(tmp_path: Path) -> None:
+    registry = _registry_with_mutation_and_validation()
+
+    def fail_info(executor):
+        return ToolResult(success=False, error="java missing")
+
+    registry.register(
+        ToolDef(
+            name="get_system_info",
+            fn=fail_info,
+            schema={
+                "name": "get_system_info",
+                "description": "Failing precheck",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        )
+    )
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "precheck",
+                            "tool": "get_system_info",
+                            "args": {},
+                            "purpose": "Expected-to-fail dependency precheck",
+                            "continue_on_failure": True,
+                        },
+                        {
+                            "step_id": "mutate",
+                            "tool": "mutate_marker",
+                            "args": {},
+                            "purpose": "Repair/install equivalent mutation",
+                        },
+                        {
+                            "step_id": "verify",
+                            "tool": "validate_config",
+                            "args": {"path": "/tmp/example.conf"},
+                            "purpose": "Verify after mutation",
+                        },
+                    ],
+                },
+                tool_id="plan_continue",
+            )
+        ],
+        [_tool_use("get_system_info", {}, tool_id="precheck_1")],
+        [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="verify_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Repair plan completed after failed precheck.",
+                "evidence": ["precheck skipped", "mutation succeeded", "validation succeeded"],
+                "verification": "validate_config ran after mutation",
+                "changed_state": True,
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, registry)
+
+    reply = controller.run_turn("repair after expected precheck failure")
+
+    assert "Repair plan completed" in reply
+    record = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    steps = {step["step_id"]: step for step in record["steps"]}
+    assert steps["precheck"]["status"] == "skipped"
+    assert steps["precheck"]["continue_on_failure"] is True
+    assert steps["mutate"]["status"] == "completed"
+    assert steps["verify"]["status"] == "completed"
 
 
 def test_failed_mutation_does_not_satisfy_completion_gate(tmp_path: Path) -> None:
@@ -709,6 +1207,213 @@ def test_execute_dynamic_tool_inline_mode_supports_one_off_command(tmp_path: Pat
     assert not (tmp_path / "dynamic_tools.json").exists()
 
 
+def test_execute_dynamic_tool_inline_mode_supports_cwd(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_name": "pwd_in_project",
+                    "cmd_template": ["pwd"],
+                    "cwd": str(workdir),
+                    "args": {},
+                    "intent_summary": "Run a read-only cwd diagnostic in the project directory.",
+                    "consequences": "Read/build project files in place.",
+                    "risk_assessment": "Build command with explicit working directory.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_inline_cwd",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Maven test command ran in the project directory.",
+                "evidence": ["execute_dynamic_tool cwd matched project directory"],
+            })
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("ok", 0) if cmd == ["pwd"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("run maven test")
+
+    assert "Maven test command ran" in reply
+    assert executor.calls == [["pwd"]]
+    assert executor.cwd_calls == [str(workdir)]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["cwd"] == str(workdir)
+
+
+def test_execute_dynamic_tool_nested_inline_args_are_normalized_for_plan_matching(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    task = TaskRun(task_id="task_nested", goal="check java", requires_environment_feedback=True)
+    task.mode = "plan"
+    task.steps.append(
+        TaskStepRecord(
+            step_id="check_java",
+            tool="execute_dynamic_tool",
+            purpose="Check Java version.",
+            args={
+                "cmd_template": ["java", "-version"],
+                "cwd": str(workdir),
+                "changes_state": False,
+            },
+        )
+    )
+    resolved, error = _resolve_runtime_args_for_tool(
+        task,
+        "execute_dynamic_tool",
+        {
+            "args": {
+                "cmd_template": ["java", "-version"],
+                "cwd": str(workdir),
+                "changes_state": False,
+                "consequences": "Read-only check",
+                "estimated_risk": "SAFE",
+                "intent_summary": "Check Java version",
+            },
+            "consequences": "Read-only check",
+            "estimated_risk": "SAFE",
+            "changes_state": False,
+        },
+    )
+
+    assert error is None
+    assert resolved["cmd_template"] == ["java", "-version"]
+    assert resolved["cwd"] == str(workdir)
+    assert resolved["args"] == {}
+    assert _plan_args_match("execute_dynamic_tool", task.steps[0].args, resolved)
+
+
+def test_dynamic_tool_version_checks_are_read_only_when_declared_read_only(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    decisions: list[dict] = []
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("version", 0))
+
+    result = registry.execute_inline(
+        name="java_version",
+        description="Check Java version",
+        cmd_template=["java", "-version"],
+        params={},
+        args={},
+        consequences="Read-only version check",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        changes_state=False,
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: decisions.append(payload) or True,
+    )
+
+    assert result.success is True
+    assert result.changes_state is False
+    assert decisions[-1]["changes_state"] is False
+
+
+def test_dynamic_tool_maven_build_stays_mutating_even_if_misdeclared(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("built", 0))
+
+    result = registry.execute_inline(
+        name="maven_test",
+        description="Run Maven tests",
+        cmd_template=["mvn", "test"],
+        params={},
+        args={},
+        consequences="Runs project build",
+        risk_assessment="Build",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert result.success is True
+    assert result.changes_state is True
+
+
+def test_dynamic_tool_endpoint_and_service_checks_are_intrinsically_read_only(tmp_path: Path) -> None:
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("ok", 0))
+
+    curl = registry.execute_inline(
+        name="curl_health",
+        description="Check health endpoint",
+        cmd_template=["curl", "-s", "http://127.0.0.1:18082/actuator/health"],
+        params={},
+        args={},
+        consequences="Endpoint verification",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+    systemctl = registry.execute_inline(
+        name="service_active",
+        description="Check service activity",
+        cmd_template=["systemctl", "is-active", "demo.service"],
+        params={},
+        args={},
+        consequences="Service verification",
+        risk_assessment="Read-only",
+        estimated_risk="SAFE",
+        executor=executor,
+        env_profile={},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert curl.success is True and curl.changes_state is False
+    assert systemctl.success is True and systemctl.changes_state is False
+
+
+def test_execute_dynamic_tool_rejects_invalid_cwd(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "tool_name": "bad_cwd",
+                    "cmd_template": ["pwd"],
+                    "cwd": "../relative",
+                    "args": {},
+                    "intent_summary": "Bad cwd.",
+                    "consequences": "None.",
+                    "risk_assessment": "Invalid path.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_bad_cwd",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Invalid cwd was blocked.",
+                "next_steps": ["Use an absolute directory path"],
+            })
+        ],
+    ])
+    executor = RecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("run with bad cwd")
+
+    assert "Invalid cwd was blocked" in reply
+    result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert result["blocked"] is True
+    assert "cwd" in result["reason"]
+    assert executor.calls == []
+
+
 def test_registered_dynamic_tool_is_reused_by_signature(tmp_path: Path) -> None:
     registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
 
@@ -738,6 +1443,37 @@ def test_registered_dynamic_tool_is_reused_by_signature(tmp_path: Path) -> None:
     assert second["tool_id"] == first["tool_id"]
     assert second["reused_existing"] is True
     assert len(registry.list_tools()) == 1
+
+
+def test_registered_dynamic_tool_executes_with_stored_cwd(tmp_path: Path) -> None:
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    registry = DynamicToolRegistry(storage_path=str(tmp_path / "dynamic_tools.json"))
+    tool = registry.register(
+        name="pwd_in_project",
+        description="Run pwd in a project directory",
+        cmd_template=["pwd"],
+        params={},
+        cwd=str(workdir),
+        consequences="Read-only diagnostic.",
+        risk_assessment="SAFE shape.",
+        estimated_risk="WARN-LOW",
+        changes_state=False,
+    )
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("ok", 0))
+
+    result = registry.execute(
+        tool["tool_id"],
+        {},
+        executor=executor,
+        env_profile={"remote_mode": False},
+        confirm_fn=lambda payload: True,
+    )
+
+    assert result.success is True
+    assert result.cwd == str(workdir)
+    assert executor.calls == [["pwd"]]
+    assert executor.cwd_calls == [str(workdir)]
 
 
 def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(
@@ -793,7 +1529,7 @@ def test_dynamic_tool_declared_read_only_must_be_proven_before_completion(
     assert execute_result["changes_state"] is True
     rejected_result = llm.calls[2]["messages"][-1]["content"][0]
     assert rejected_result["is_error"] is True
-    assert "verification tool/workflow after the mutation" in rejected_result["content"]
+    assert "verification must run after the last mutation" in rejected_result["content"]
 
 
 def test_execute_dynamic_tool_invalid_args_return_tool_errors(tmp_path: Path) -> None:

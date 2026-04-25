@@ -17,6 +17,9 @@ from sysdialogue.tools.config_validate import validate_config
 from sysdialogue.tools.cron_jobs import get_cron_job, manage_cron
 from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
+from sysdialogue.tools.containers import manage_container
+from sysdialogue.tools.services import manage_service
+from sysdialogue.tools.users_groups import create_user
 
 from tests.helpers import RecordingExecutor
 
@@ -51,6 +54,26 @@ def test_manage_authorized_keys_removes_key_by_fingerprint(tmp_path: Path, monke
     authorized_keys = key_path.read_text(encoding="utf-8")
     assert key_one not in authorized_keys
     assert key_two in authorized_keys
+
+
+def test_manage_authorized_keys_can_add_public_key_from_path(tmp_path: Path, monkeypatch) -> None:
+    home_dir = tmp_path / "alice"
+    key_path = home_dir / ".ssh" / "authorized_keys"
+    public_key_path = tmp_path / "id_ed25519.pub"
+    public_key = _fake_public_key("path-key")
+    public_key_path.write_text(public_key + "\n", encoding="utf-8")
+    executor = RecordingExecutor()
+    monkeypatch.setattr(auth_keys_module, "_auth_keys_path", lambda executor, username: str(key_path))
+
+    result = manage_authorized_keys(
+        executor,
+        "add",
+        "alice",
+        public_key_path=str(public_key_path),
+    )
+
+    assert result.success is True
+    assert public_key in key_path.read_text(encoding="utf-8")
 
 
 def test_manage_cron_create_updates_index_and_installs_user_crontab(
@@ -198,6 +221,85 @@ def test_manage_firewall_iptables_delete_uses_delete_op_and_policy() -> None:
     ]
 
 
+class PrivilegeRecordingExecutor(RecordingExecutor):
+    def __init__(self):
+        super().__init__()
+        self.privileged_calls: list[list[str]] = []
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30):
+        self.privileged_calls.append(cmd)
+        return "", 0
+
+
+def test_system_tools_use_privileged_executor_path() -> None:
+    executor = PrivilegeRecordingExecutor()
+
+    service_result = manage_service(executor, name="demo.service", action="restart")
+    user_result = create_user(executor, username="sdft_user")
+
+    assert service_result.success is True
+    assert user_result.success is True
+    assert executor.privileged_calls[0] == ["systemctl", "restart", "demo.service"]
+    assert executor.privileged_calls[1][:1] == ["useradd"]
+
+
+def test_manage_container_exec_uses_argv_without_shell() -> None:
+    executor = RecordingExecutor()
+    result = manage_container(
+        executor,
+        action="exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysql", "-uroot", "-e", "SELECT 1"],
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["docker", "exec", "mysql-test", "mysql", "-uroot", "-e", "SELECT 1"]
+    assert result.data["verification_candidate"] is True
+
+
+def test_manage_container_wait_exec_retries_read_only_mysql_ping() -> None:
+    attempts = {"count": 0}
+
+    def handler(cmd: list[str], timeout: int):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return ("", 1, "not ready")
+        return ("mysqld is alive", 0, "")
+
+    executor = RecordingExecutor(handler=handler)
+    result = manage_container(
+        executor,
+        action="wait_exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysqladmin", "--protocol=TCP", "-h127.0.0.1", "ping"],
+        retries=3,
+        interval_sec=0,
+        success_contains="alive",
+    )
+
+    assert result.success is True
+    assert attempts["count"] == 2
+    assert result.data["verification_candidate"] is True
+    assert result.data["read_only_reason"] == "MySQL readiness ping"
+
+
+def test_manage_container_wait_exec_rejects_write_sql() -> None:
+    executor = RecordingExecutor()
+    result = manage_container(
+        executor,
+        action="wait_exec",
+        backend="docker",
+        name="mysql-test",
+        command=["mysql", "-uroot", "-e", "CREATE TABLE t(id int)"],
+    )
+
+    assert result.success is False
+    assert "read-only" in result.error
+    assert executor.calls == []
+
+
 def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -> None:
     def handler(cmd: list[str], timeout: int):
         if cmd == ["cat", "/etc/os-release"]:
@@ -232,6 +334,33 @@ def test_capability_probe_sets_supports_system_cron_only_when_crontab_exists() -
     assert profile_without_cron["supports_system_cron"] is False
 
 
+class PasswordSudoExecutor(RecordingExecutor):
+    has_sudo_password = True
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30):
+        return "", 0
+
+
+def test_capability_probe_reports_password_backed_sudo() -> None:
+    def handler(cmd: list[str], timeout: int):
+        if cmd == ["whoami"]:
+            return ("alice", 0)
+        if cmd == ["id", "-u"]:
+            return ("1000", 0)
+        if cmd == ["sudo", "-n", "true"]:
+            return ("password required", 1)
+        if cmd and cmd[0] == "which":
+            return ("", 1)
+        return ("", 1)
+
+    profile = CapabilityProbe(PasswordSudoExecutor(handler=handler)).probe()
+
+    assert profile["is_root"] is False
+    assert profile["sudo_passwordless"] is False
+    assert profile["has_sudo"] is True
+    assert profile["cron_writable"] is True
+
+
 def test_validate_config_supports_fstab_and_cron_static_checks(tmp_path: Path) -> None:
     executor = RecordingExecutor()
     fstab_path = tmp_path / "fstab"
@@ -264,6 +393,40 @@ def test_linux_path_policies_do_not_depend_on_host_os_separators() -> None:
     result = copy_move_path(RecordingExecutor(), "/tmp/source", "/etc/passwd", action="copy")
     assert result.success is False
     assert "B012" in result.error
+
+
+def test_copy_move_path_allows_single_match_source_glob(tmp_path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "app.jar").write_text("jar", encoding="utf-8")
+    dst = tmp_path / "deploy" / "app.jar"
+
+    result = copy_move_path(
+        RecordingExecutor(),
+        str(target_dir / "*.jar"),
+        str(dst),
+        action="copy",
+    )
+
+    assert result.success is True
+    assert dst.read_text(encoding="utf-8") == "jar"
+
+
+def test_copy_move_path_rejects_ambiguous_source_glob(tmp_path) -> None:
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "a.jar").write_text("a", encoding="utf-8")
+    (target_dir / "b.jar").write_text("b", encoding="utf-8")
+
+    result = copy_move_path(
+        RecordingExecutor(),
+        str(target_dir / "*.jar"),
+        str(tmp_path / "deploy" / "app.jar"),
+        action="copy",
+    )
+
+    assert result.success is False
+    assert "multiple" in result.error
 
 
 def test_scheduled_workflow_rejects_high_risk_steps_before_execution(

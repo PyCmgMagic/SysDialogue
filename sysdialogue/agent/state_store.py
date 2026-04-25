@@ -14,6 +14,7 @@ from typing import Any, Callable
 from filelock import FileLock
 
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 
 
 def _now_iso() -> str:
@@ -111,11 +112,19 @@ class TaskStepRecord:
     audit_refs: list[str] = field(default_factory=list)
     lock_scope: str = ""
     depends_on: list[str] = field(default_factory=list)
+    continue_on_failure: bool = False
+    repair_attempts: int = 0
+    repaired_from_failure: bool = False
+    last_rejected_args: dict[str, Any] = field(default_factory=dict)
+    read_only_reason: str = ""
+    attempts: int = 0
     finding_id: str = ""
     severity: str = ""
     blocking: bool = False
     resolution: str = ""
     source_ref: str = ""
+    result_data: dict[str, Any] = field(default_factory=dict)
+    result_summary: str = ""
     updated_at: str = field(default_factory=_now_iso)
 
 
@@ -270,14 +279,16 @@ class SessionStore:
             record.surface = surface or record.surface
             record.status = status
             if user_message:
-                record.user_messages.append(_truncate(user_message, 500))
-                entry: dict[str, Any] = {"role": "user", "text": user_message}
+                clean_user = sanitize_text(user_message, limit=2000)
+                record.user_messages.append(_truncate(clean_user, 500))
+                entry: dict[str, Any] = {"role": "user", "text": clean_user}
                 if record.active_task_id:
                     entry["task_id"] = record.active_task_id
                 record.entries.append(entry)
             if final_reply:
-                record.final_replies.append(_truncate(final_reply, 2000))
-                entry = {"role": entry_role, "text": final_reply}
+                clean_reply = sanitize_text(final_reply, limit=4000)
+                record.final_replies.append(_truncate(clean_reply, 2000))
+                entry = {"role": entry_role, "text": clean_reply}
                 if record.active_task_id:
                     entry["task_id"] = record.active_task_id
                 record.entries.append(entry)
@@ -306,7 +317,8 @@ class SessionStore:
     ) -> SessionRecord:
         def mutate(record: SessionRecord) -> None:
             record.surface = surface or record.surface
-            entry: dict[str, Any] = {"role": role, "text": text}
+            clean_text = sanitize_text(text, limit=4000)
+            entry: dict[str, Any] = {"role": role, "text": clean_text}
             effective_task_id = task_id or record.active_task_id
             if effective_task_id:
                 entry["task_id"] = effective_task_id
@@ -315,11 +327,11 @@ class SessionStore:
             record.entries.append(entry)
             record.entries = record.entries[-200:]
             if role == "user" and text.strip():
-                record.user_messages.append(_truncate(text, 500))
+                record.user_messages.append(_truncate(sanitize_text(text, limit=500), 500))
                 if not record.title or record.title == "Untitled conversation":
                     record.title = _title_from_message(text)
             if role in {"assistant", "error"} and text.strip():
-                record.final_replies.append(_truncate(text, 2000))
+                record.final_replies.append(_truncate(sanitize_text(text, limit=2000), 2000))
             if technical_details:
                 record.technical_details = technical_details
 
@@ -341,8 +353,9 @@ class SessionStore:
             if active_task_id is not None:
                 record.active_task_id = active_task_id
             if clean:
-                record.user_messages.append(_truncate(clean, 500))
-                entry: dict[str, Any] = {"role": "user", "text": clean}
+                clean_text = sanitize_text(clean, limit=2000)
+                record.user_messages.append(_truncate(clean_text, 500))
+                entry: dict[str, Any] = {"role": "user", "text": clean_text}
                 if active_task_id:
                     entry["task_id"] = active_task_id
                 record.entries.append(entry)
@@ -824,7 +837,7 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
 
 
 def _message_content(role: str, text: str) -> str | list[dict[str, str]]:
-    text = _truncate(text, 1200)
+    text = _truncate(sanitize_text(text, limit=1200), 1200)
     if role == "assistant":
         return [{"type": "text", "text": text}]
     return text
@@ -851,12 +864,13 @@ def _json_safe_dict(value: dict[str, Any]) -> dict[str, Any]:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
+        return sanitize_text(value, limit=12000) if isinstance(value, str) else value
     if isinstance(value, list):
         return [_json_safe(item) for item in value[:50]]
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in list(value.items())[:50]}
-    return str(value)
+        safe = sanitize_value({str(key): item for key, item in list(value.items())[:50]})
+        return safe if isinstance(safe, dict) else {}
+    return sanitize_text(str(value), limit=12000)
 
 
 def _title_from_message(message: str) -> str:

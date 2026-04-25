@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -172,6 +172,22 @@ def create_web_app(config) -> FastAPI:
     @app.post("/api/targets/test")
     async def test_target(payload: dict):
         return store.test_target(payload)
+
+    @app.get("/api/session/{session_id}/export/audit")
+    async def download_audit(session_id: str):
+        session = store.get(session_id)
+        path = session.export_audit_file()
+        if path is None:
+            raise HTTPException(status_code=404, detail="audit session not found")
+        return FileResponse(path, filename=path.name, media_type="application/jsonl")
+
+    @app.get("/api/session/{session_id}/export/replay")
+    async def download_replay(session_id: str):
+        session = store.get(session_id)
+        path = session.export_replay()
+        if path is None:
+            raise HTTPException(status_code=404, detail="audit session not found")
+        return FileResponse(path, filename=path.name, media_type="application/zip")
 
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):

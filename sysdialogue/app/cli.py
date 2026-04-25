@@ -19,6 +19,8 @@ from sysdialogue.app.jobs import run_scheduled_job
 from sysdialogue.app.runtime_factory import create_runtime
 from sysdialogue.app.simple_cli import run_simple_cli
 from sysdialogue.app.verify import run_demo, run_verify
+from sysdialogue.audit.serializers import export_audit_jsonl, export_replay_package
+from sysdialogue.audit.trace_store import AuditLog
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -27,12 +29,20 @@ from sysdialogue.app.verify import run_demo, run_verify
 @click.option("--remote", metavar="USER@HOST[:PORT]", help="远程 SSH 模式")
 @click.option("--ssh-key", "ssh_key_file", type=click.Path(exists=True),
               help="SSH 私钥文件路径")
+@click.option("--ssh-password", envvar="SYSDIALOGUE_SSH_PASSWORD",
+              help="SSH 密码；也可用环境变量 SYSDIALOGUE_SSH_PASSWORD")
 @click.option("--model", help="覆盖 OpenAI-compatible 模型（如 gpt-5.4 或你的服务模型名）")
 @click.option("--env-file", type=click.Path(), help=".env 配置文件路径")
 @click.option("--workflows-dir", type=click.Path(),
               help="工作流 YAML 目录（默认 sysdialogue/workflows/）")
 @click.option("--run-scheduled-job", "scheduled_job_id",
               help="执行已注册的计划任务（供 cron 调用）")
+@click.option("--export-audit", "export_audit_session",
+              help="Export sanitized audit JSONL for a session id")
+@click.option("--export-replay", "export_replay_session",
+              help="Export sanitized replay ZIP for a session id")
+@click.option("--export-dir", "export_dir", type=click.Path(file_okay=False),
+              help="Directory for audit/replay exports")
 @click.option("--simple", is_flag=True, help="启动 stdin/stdout 轻量 CLI")
 @click.option("--web", "web_mode", is_flag=True, help="启动轻量 Web 控制台")
 @click.option("--host", "web_host", default="127.0.0.1", show_default=True,
@@ -40,9 +50,11 @@ from sysdialogue.app.verify import run_demo, run_verify
 @click.option("--port", "web_port", default=8000, show_default=True, type=int,
               help="Web 控制台监听端口")
 def main(verify: bool, demo: bool, remote: str | None,
-         ssh_key_file: str | None,
+         ssh_key_file: str | None, ssh_password: str | None,
          model: str | None, env_file: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
+         export_audit_session: str | None, export_replay_session: str | None,
+         export_dir: str | None,
          simple: bool, web_mode: bool, web_host: str, web_port: int) -> None:
     """SysDialogue v9 — Linux 服务器运维智能代理。"""
 
@@ -59,10 +71,12 @@ def main(verify: bool, demo: bool, remote: str | None,
         if ":" in hostport:
             host, port = hostport.rsplit(":", 1)
             ssh_conf = {"user": user, "host": host,
-                        "port": int(port), "key_file": ssh_key_file or ""}
+                        "port": int(port), "key_file": ssh_key_file or "",
+                        "password": ssh_password or ""}
         else:
             ssh_conf = {"user": user, "host": hostport,
-                        "port": 22, "key_file": ssh_key_file or ""}
+                        "port": 22, "key_file": ssh_key_file or "",
+                        "password": ssh_password or ""}
 
     config = load_config(
         env_file=env_file,
@@ -73,6 +87,12 @@ def main(verify: bool, demo: bool, remote: str | None,
     if workflows_dir:
         config.workflows_dir = workflows_dir
 
+    if export_audit_session:
+        _export_session_artifact(export_audit_session, "audit", export_dir)
+        return
+    if export_replay_session:
+        _export_session_artifact(export_replay_session, "replay", export_dir)
+        return
     if verify:
         sys.exit(run_verify(config))
     if demo:
@@ -128,6 +148,19 @@ def _run_tui(config) -> None:
         run_tui(runtime.controller)
     finally:
         runtime.close()
+
+
+def _export_session_artifact(session_id: str, kind: str, export_dir: str | None) -> None:
+    audit = AuditLog(session_id=session_id)
+    if not audit.path.exists():
+        raise click.ClickException(f"audit session not found: {session_id}")
+    if kind == "audit":
+        path = export_audit_jsonl(audit, output_dir=export_dir)
+    elif kind == "replay":
+        path = export_replay_package(audit, output_dir=export_dir)
+    else:
+        raise click.ClickException(f"unknown export kind: {kind}")
+    click.echo(str(path))
 
 
 if __name__ == "__main__":

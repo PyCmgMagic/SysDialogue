@@ -13,7 +13,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from sysdialogue.agent.memory import redact_sensitive
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 
 
 @dataclass
@@ -159,36 +159,13 @@ class TraceStore:
 
 
 def _safe_data(data: dict[str, Any] | None) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in (data or {}).items():
-        if any(token in str(key).lower() for token in ("secret", "token", "password", "api_key")):
-            safe[str(key)] = "<redacted>"
-        elif isinstance(value, (str, int, float, bool)) or value is None:
-            safe[str(key)] = _safe_text(value) if isinstance(value, str) else value
-        elif isinstance(value, (list, dict)):
-            rendered = json.dumps(_redact_nested(value), ensure_ascii=False, default=str)
-            safe[str(key)] = rendered[:2000]
-        else:
-            safe[str(key)] = _safe_text(str(value))
-    return safe
+    safe = sanitize_value(data or {}, limit=2000)
+    return safe if isinstance(safe, dict) else {}
 
 
 def _safe_text(value: str, *, limit: int = 2000) -> str:
-    text = redact_sensitive(str(value or ""))
-    return text if len(text) <= limit else text[:limit]
+    return sanitize_text(value, limit=limit)
 
 
 def _redact_nested(value: Any) -> Any:
-    if isinstance(value, str):
-        return _safe_text(value)
-    if isinstance(value, list):
-        return [_redact_nested(item) for item in value[:50]]
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in list(value.items())[:50]:
-            if any(token in str(key).lower() for token in ("secret", "token", "password", "api_key")):
-                redacted[str(key)] = "<redacted>"
-            else:
-                redacted[str(key)] = _redact_nested(item)
-        return redacted
-    return value
+    return sanitize_value(value, limit=2000)

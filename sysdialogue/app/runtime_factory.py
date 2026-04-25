@@ -18,6 +18,7 @@ from sysdialogue.agent.target_profile import TargetProfileStore
 from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.capability_probe import CapabilityProbe
+from sysdialogue.runtime.privilege_manager import PrivilegeManager
 from sysdialogue.runtime.secure_runner import LocalExecutor, SafeExecutor
 from sysdialogue.runtime.ssh_adapter import RemoteExecutor, SSHConfig
 from sysdialogue.tools.dynamic_registry import DynamicToolRegistry
@@ -49,6 +50,7 @@ class RuntimeBundle:
     hook_manager: HookManager
     role_runner: RoleRunner
     target_profile_store: TargetProfileStore
+    privilege_manager: PrivilegeManager
 
     def close(self) -> None:
         try:
@@ -60,6 +62,7 @@ class RuntimeBundle:
                 self.executor.disconnect()  # type: ignore[attr-defined]
             except Exception:
                 pass
+        self.privilege_manager.clear()
 
 
 def create_runtime(
@@ -72,6 +75,7 @@ def create_runtime(
     input_callback=None,
     surface: str = "unknown",
 ) -> RuntimeBundle:
+    privilege_manager = PrivilegeManager(input_callback=input_callback)
     if config.remote_mode:
         ssh_cfg = SSHConfig(
             host=config.ssh_host,
@@ -79,11 +83,12 @@ def create_runtime(
             username=config.ssh_user,
             password=config.ssh_password or None,
             key_filename=config.ssh_key_file or None,
+            sudo_password=config.ssh_sudo_password or None,
         )
         executor = RemoteExecutor(ssh_cfg)
         executor.connect()
     else:
-        executor = LocalExecutor()
+        executor = LocalExecutor(privilege_manager=privilege_manager)
 
     probe = CapabilityProbe(
         executor,
@@ -167,4 +172,5 @@ def create_runtime(
         hook_manager=hook_manager,
         role_runner=role_runner,
         target_profile_store=target_profile_store,
+        privilege_manager=privilege_manager,
     )

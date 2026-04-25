@@ -32,13 +32,30 @@ _REACT_PROTOCOL = """[ReAct Task Protocol]
 All user inputs must close through the ReAct protocol:
 1. Do not end a task with plain natural-language output. The final step must be finish_task.
 2. Operational, diagnostic, mutating, remote-target, security, audit, key, and configuration tasks must observe the target environment before status=completed.
-3. Mutating tasks must follow observe -> act -> verify -> finish. Without post-mutation verification, status=completed is invalid.
+3. Mutating tasks must follow observe -> act -> verify -> finish. Without post-mutation verification and LLM verification-judge approval, status=completed is invalid.
 4. Casual chat, project explanations, documentation explanations, and design discussions must still call finish_task, using no_action_reason when no system action was taken.
 5. After a tool failure, repair, downgrade, request more information, or finish with failed/blocked/need_info. Do not ignore the failed tool result.
 6. Failed or blocked mutation attempts do not count as completed changes. To complete, there must be a successful mutation plus later verification, or a successful built-in workflow that includes its own validation.
 7. Do not expose hidden chain-of-thought. Show only user-visible plan summaries, observations, verification conclusions, and final summaries.
 
 finish_task requirements: status and summary are required. completed operational tasks need evidence. need_info, blocked, and failed need next_steps or no_action_reason."""
+
+
+_VERIFICATION_GUIDANCE = """[Verification Guidance]
+After any mutation, run a targeted read-only verification tool before finish_task:
+- files/config: read_file, stat_path, search_file_content, or validate_config.
+- service: manage_service(status), then read_log or check_endpoint when applicable.
+- cron: manage_cron(list) and verify the target job_id/state.
+- SSH keys: manage_authorized_keys(list) and verify the expected user/fingerprint.
+- containers: manage_container(status/inspect/logs), or manage_container(exec/wait_exec) only for read-only checks such as SELECT/SHOW, mysqladmin --protocol=TCP -h127.0.0.1 ping, redis-cli PING, or HTTP health checks.
+- packages, firewall, sysctl, hosts, mounts, archives: use the corresponding list/get/status tool.
+The verification must happen after the last mutation and must refer to the object that was changed. The LLM verification judge decides whether the evidence is sufficient; if it rejects completion, run the recommended verification or finish blocked/partial."""
+
+
+_JAVA_MYSQL_DEPLOYMENT_GUIDANCE = """[Java + MySQL Deployment Guidance]
+For Java/Spring + MySQL deployments, use this order: inspect project tree and ports -> run Docker MySQL -> wait_exec TCP readiness -> initialize DB/user/table/seed -> verify with SELECT -> install Java/Maven if missing -> rerun java -version and mvn -version as separate execute_dynamic_tool calls -> run mvn test/package with execute_dynamic_tool cwd set to the project directory -> verify JAR with stat_path -> copy exactly one built JAR to a stable app path such as /opt/<app>/app.jar -> create app user/config/systemd -> daemon-reload/start/status -> verify journal plus /actuator/health and CRUD endpoints.
+For Maven/Gradle/npm project commands, set execute_dynamic_tool.cwd to the observed absolute project directory. Do not encode cd, &&, ;, or shell syntax inside cmd_template; split combined checks into separate tool calls.
+Use continue_on_failure=true only for read-only dependency prechecks that are expected to fail before an install/repair step. Completion requires JAR, systemd status, endpoint, and DB/CRUD evidence."""
 
 
 _SAFETY_SUMMARY = """[Safety Summary]
@@ -112,6 +129,8 @@ def build_system_prompt(
         [
             _REACT_PROTOCOL,
             _EXECUTION_MODE_RULES,
+            _VERIFICATION_GUIDANCE,
+            _JAVA_MYSQL_DEPLOYMENT_GUIDANCE,
             _SAFETY_SUMMARY,
             _render_tools(registry),
         ]

@@ -42,14 +42,21 @@ def run_verify(config: "AppConfig") -> int:
             CapabilityProbe,
             EnvProfileSanitizer,
         )
-        from sysdialogue.runtime.secure_runner import LocalExecutor
+        if config.remote_mode:
+            runtime = create_runtime(config, session_id="verify", require_api=False)
+            try:
+                profile = runtime.env_profile
+            finally:
+                runtime.close()
+        else:
+            from sysdialogue.runtime.secure_runner import LocalExecutor
 
-        probe = CapabilityProbe(
-            LocalExecutor(),
-            remote_mode=config.remote_mode,
-            ssh_port=config.ssh_port,
-        )
-        profile = probe.probe()
+            probe = CapabilityProbe(
+                LocalExecutor(),
+                remote_mode=config.remote_mode,
+                ssh_port=config.ssh_port,
+            )
+            profile = probe.probe()
         sanitized = EnvProfileSanitizer.sanitize(profile)
         _safe_print("\n[1/5] Sanitized environment profile:")
         for key, value in sanitized.items():

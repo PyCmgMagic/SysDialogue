@@ -18,7 +18,7 @@ def create_user(
     if create_home:
         cmd.append("-m")
     cmd += ["-s", shell, username]
-    out, code = executor.run(cmd, timeout=15)
+    out, code = executor.run_privileged(cmd, timeout=15)
     traces = [" ".join(cmd)]
 
     if code != 0:
@@ -28,7 +28,7 @@ def create_user(
     if groups:
         for g in groups:
             cmd_g = ["usermod", "-aG", g, username]
-            out_g, code_g = executor.run(cmd_g, timeout=10)
+            out_g, code_g = executor.run_privileged(cmd_g, timeout=10)
             traces.append(" ".join(cmd_g))
             if code_g != 0:
                 return ToolResult(success=False, error=f"加入组 {g} 失败：{out_g}", cmd_trace=traces)
@@ -42,7 +42,7 @@ def delete_user(executor: SafeExecutor, username: str, remove_home: bool = False
     if remove_home:
         cmd.append("-r")
     cmd.append(username)
-    out, code = executor.run(cmd, timeout=15)
+    out, code = executor.run_privileged(cmd, timeout=15)
     return ToolResult(
         success=(code == 0),
         data=out or f"用户 {username} 已删除",
@@ -62,7 +62,7 @@ def modify_user_groups(
     if action == "add":
         for g in groups:
             cmd = ["usermod", "-aG", g, username]
-            out, code = executor.run(cmd, timeout=10)
+            out, code = executor.run_privileged(cmd, timeout=10)
             traces.append(" ".join(cmd))
             if code != 0:
                 return ToolResult(success=False, error=f"加入组 {g} 失败：{out}", cmd_trace=traces)
@@ -76,7 +76,7 @@ def modify_user_groups(
         current = out_id.split()
         remaining = [g for g in current if g not in groups and g != username]
         cmd = ["usermod", "-G", ",".join(remaining), username]
-        out, code = executor.run(cmd, timeout=10)
+        out, code = executor.run_privileged(cmd, timeout=10)
         traces.append(" ".join(cmd))
         return ToolResult(
             success=(code == 0),

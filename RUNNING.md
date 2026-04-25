@@ -183,6 +183,16 @@ Run the control plane locally, but execute tools against a remote Linux host:
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519
 ```
 
+Password authentication is also supported. Prefer the environment variable so the
+password is not stored in shell history:
+
+```powershell
+$env:SYSDIALOGUE_SSH_PASSWORD="your_ssh_password"
+python -m sysdialogue.app.cli --remote user@example.com:22
+```
+
+For quick local testing you can also pass `--ssh-password your_ssh_password`.
+
 Web example:
 
 ```powershell
@@ -193,7 +203,8 @@ Important:
 
 - the Web service still runs on the local control machine
 - `--remote` changes the execution target, not the hosting location of the UI
-- remote hosts should already be trusted in `known_hosts`
+- first-time SSH hosts are automatically trusted and appended to `known_hosts`;
+  changed host keys are still rejected
 
 ## 7. TUI Shortcuts
 

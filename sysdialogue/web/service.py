@@ -6,6 +6,7 @@ import os
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from sysdialogue.agent.error_presentation import present_error
@@ -13,7 +14,7 @@ from sysdialogue.agent.state_store import LockStore, SessionStore, TaskRecord, T
 from sysdialogue.agent.target_profile import TargetProfile, TargetProfileStore
 from sysdialogue.app.config import AppConfig
 from sysdialogue.app.runtime_factory import create_runtime
-from sysdialogue.audit.serializers import export_replay_package, format_audit_table
+from sysdialogue.audit.serializers import export_audit_jsonl, export_replay_package, format_audit_table
 from sysdialogue.audit.trace_store import AuditLog
 
 
@@ -128,6 +129,16 @@ class WebSession:
                 raise RuntimeError("command must start with /")
             reply = self.runtime.controller.run_turn(text)
             return reply
+
+    def export_audit_file(self) -> Path | None:
+        if not self.runtime.audit_log.path.exists():
+            return None
+        return export_audit_jsonl(self.runtime.audit_log)
+
+    def export_replay(self) -> Path | None:
+        if not self.runtime.audit_log.path.exists():
+            return None
+        return export_replay_package(self.runtime.audit_log)
 
     def submit_turn_input(self, text: str) -> None:
         with self._lock:

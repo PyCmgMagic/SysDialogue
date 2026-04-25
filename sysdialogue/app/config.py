@@ -18,6 +18,7 @@ class AppConfig:
     ssh_user: str = ""
     ssh_key_file: str = ""
     ssh_password: str = ""
+    ssh_sudo_password: str = ""
     workflows_dir: str = ""  # 空则默认 sysdialogue/workflows/
     max_iterations: int = 160
 
@@ -57,7 +58,11 @@ def load_config(
         cfg.ssh_port = int(ssh.get("port", 22))
         cfg.ssh_user = ssh.get("user", "")
         cfg.ssh_key_file = ssh.get("key_file", "")
-        cfg.ssh_password = ssh.get("password", "")
+        cfg.ssh_password = ssh.get("password", "") or os.environ.get("SYSDIALOGUE_SSH_PASSWORD", "")
+        cfg.ssh_sudo_password = (
+            ssh.get("sudo_password", "")
+            or os.environ.get("SYSDIALOGUE_SUDO_PASSWORD", "")
+        )
     return cfg
 
 

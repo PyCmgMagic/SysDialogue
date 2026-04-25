@@ -26,6 +26,7 @@ except ImportError:
     _HAS_FILELOCK = False
 
 from sysdialogue.security.command_safety import check_command
+from sysdialogue.security import path_policies as pp
 from sysdialogue.security.risk_classifier import classify as risk_classify
 from sysdialogue.tools.base import ToolResult
 
@@ -42,6 +43,7 @@ class DynamicTool(TypedDict):
     name: str
     description: str
     cmd_template: list[str]
+    cwd: str | None
     params: dict
     risk_level: str          # 永远 "UNKNOWN"
     estimated_risk: str
@@ -65,6 +67,7 @@ class DynToolResult:
     exit_code: int = 0
     reason: str = ""
     cmd: list[str] = field(default_factory=list)
+    cwd: str | None = None
     final_risk: str = "UNKNOWN"
     declared_changes_state: bool = True
     changes_state: bool = True
@@ -264,6 +267,7 @@ class DynamicToolRegistry:
         description: str,
         cmd_template: list[str],
         params: dict,
+        cwd: str | None = None,
         consequences: str,
         risk_assessment: str,
         estimated_risk: str,
@@ -275,10 +279,12 @@ class DynamicToolRegistry:
         _validate_tool_spec(
             name=name,
             cmd_template=cmd_template,
+            cwd=cwd,
             params=params,
         )
         signature = _tool_signature(
             cmd_template=cmd_template,
+            cwd=cwd,
             params=params,
             changes_state=bool(changes_state),
             reversible=bool(reversible),
@@ -297,6 +303,7 @@ class DynamicToolRegistry:
                 "name": name,
                 "description": description,
                 "cmd_template": cmd_template,
+                "cwd": cwd,
                 "params": params,
                 "risk_level": "UNKNOWN",
                 "estimated_risk": estimated_risk,
@@ -343,6 +350,7 @@ class DynamicToolRegistry:
         env_profile: "EnvProfile",
         confirm_fn: Callable[[dict], bool],
         timeout: int = 30,
+        cwd: str | None = None,
     ) -> DynToolResult:
         """Execute a DynTool through the three-layer safety chain."""
         tool = self.get(tool_id)
@@ -359,6 +367,7 @@ class DynamicToolRegistry:
             env_profile=env_profile,
             confirm_fn=confirm_fn,
             timeout=timeout,
+            cwd=cwd,
             persist_usage=True,
         )
 
@@ -369,6 +378,7 @@ class DynamicToolRegistry:
         description: str,
         cmd_template: list[str],
         params: dict,
+        cwd: str | None = None,
         args: dict,
         consequences: str,
         risk_assessment: str,
@@ -384,6 +394,7 @@ class DynamicToolRegistry:
             _validate_tool_spec(
                 name=name or _default_tool_name(cmd_template),
                 cmd_template=cmd_template,
+                cwd=cwd,
                 params=params,
             )
         except ValueError as exc:
@@ -399,6 +410,7 @@ class DynamicToolRegistry:
             "name": name or _default_tool_name(cmd_template),
             "description": description or "Ad-hoc dynamic execution",
             "cmd_template": cmd_template,
+            "cwd": cwd,
             "params": params,
             "risk_level": "UNKNOWN",
             "estimated_risk": estimated_risk,
@@ -412,6 +424,7 @@ class DynamicToolRegistry:
             "safety_overrides": 0,
             "signature": _tool_signature(
                 cmd_template=cmd_template,
+                cwd=cwd,
                 params=params,
                 changes_state=bool(changes_state),
                 reversible=bool(reversible),
@@ -425,6 +438,7 @@ class DynamicToolRegistry:
             env_profile=env_profile,
             confirm_fn=confirm_fn,
             timeout=timeout,
+            cwd=cwd,
             persist_usage=False,
         )
 
@@ -438,9 +452,11 @@ class DynamicToolRegistry:
         env_profile: "EnvProfile",
         confirm_fn: Callable[[dict], bool],
         timeout: int,
+        cwd: str | None,
         persist_usage: bool,
     ) -> DynToolResult:
         declared_changes_state = bool(tool.get("changes_state", True))
+        effective_cwd = cwd if cwd is not None else tool.get("cwd")
 
         missing = _missing_required_args(tool, args)
         if missing:
@@ -453,6 +469,14 @@ class DynamicToolRegistry:
 
         # 渲染 cmd
         cmd = self._render(tool["cmd_template"], args)
+        cwd_error = _validate_cwd(effective_cwd, executor, env_profile)
+        if cwd_error:
+            return DynToolResult(
+                success=False, blocked=True, cmd=cmd, cwd=effective_cwd,
+                reason=cwd_error,
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
+            )
         unresolved = _unresolved_placeholders(cmd)
         if unresolved:
             return DynToolResult(
@@ -500,6 +524,7 @@ class DynamicToolRegistry:
             "tool_id": tool_id,
             "tool_name": tool["name"],
             "cmd": cmd,
+            "cwd": effective_cwd,
             "dynamic_mode": "registered" if persist_usage else "inline",
             "safety_level": safety.level,
             "safety_rules": safety.rule_ids,
@@ -528,7 +553,7 @@ class DynamicToolRegistry:
             )
 
         # 实际执行
-        output, exit_code = executor.run(cmd, timeout=timeout)
+        output, exit_code = executor.run(cmd, timeout=timeout, cwd=effective_cwd)
 
         # 更新用量统计
         if persist_usage:
@@ -548,6 +573,7 @@ class DynamicToolRegistry:
         return DynToolResult(
             success=(exit_code == 0),
             cmd=cmd, output=output, exit_code=exit_code,
+            cwd=effective_cwd,
             final_risk=highest,
             declared_changes_state=declared_changes_state,
             changes_state=effective_changes_state,
@@ -573,7 +599,28 @@ def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
 
 
-def _validate_tool_spec(*, name: str, cmd_template: list[str], params: dict) -> None:
+def _validate_cwd(cwd: str | None, executor: "SafeExecutor", env_profile: "EnvProfile") -> str:
+    if cwd in (None, ""):
+        return ""
+    cwd_text = str(cwd)
+    is_remote = bool((env_profile or {}).get("remote_mode")) if isinstance(env_profile, dict) else False
+    is_absolute = cwd_text.startswith("/") if is_remote else os.path.isabs(cwd_text)
+    if not is_absolute:
+        return "DynTool cwd must be an absolute directory path."
+    if pp.has_path_traversal(cwd_text):
+        return "DynTool cwd must not contain path traversal."
+    if pp.matches_sensitive_credential(cwd_text):
+        return "DynTool cwd must not point at a sensitive credential path."
+    if is_remote:
+        _, code = executor.run(["test", "-d", cwd_text], timeout=5)
+        if code != 0:
+            return f"DynTool cwd does not exist or is not a directory: {cwd_text}"
+    elif not os.path.isdir(cwd_text):
+        return f"DynTool cwd does not exist or is not a directory: {cwd_text}"
+    return ""
+
+
+def _validate_tool_spec(*, name: str, cmd_template: list[str], cwd: str | None = None, params: dict) -> None:
     if not str(name).strip():
         raise ValueError("DynTool name 不能为空")
     if not cmd_template:
@@ -586,8 +633,71 @@ def _validate_tool_spec(*, name: str, cmd_template: list[str], params: dict) -> 
         if len(str(token)) > 256:
             raise ValueError("cmd_template 元素长度超过 256")
 
+    if cwd is not None and len(str(cwd)) > 512:
+        raise ValueError("cwd is too long")
+
 
 def _tool_signature(
+    *,
+    cmd_template: list[str],
+    cwd: str | None = None,
+    params: dict,
+    changes_state: bool,
+    reversible: bool,
+) -> str:
+    normalized_params = {
+        str(key): {
+            "type": str((value or {}).get("type", "")),
+            "required": bool((value or {}).get("required", False)),
+        }
+        for key, value in sorted((params or {}).items())
+    }
+    return json.dumps(
+        {
+            "cmd_template": [str(token) for token in cmd_template],
+            "cwd": cwd or None,
+            "params": normalized_params,
+            "changes_state": bool(changes_state),
+            "reversible": bool(reversible),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _find_by_signature(data: dict[str, DynamicTool], signature: str) -> DynamicTool | None:
+    requested_legacy = _drop_cwd_from_signature(signature)
+    for tool in data.values():
+        tool_signature = tool.get("signature") or _tool_signature(
+            cmd_template=list(tool.get("cmd_template") or []),
+            cwd=tool.get("cwd"),
+            params=dict(tool.get("params") or {}),
+            changes_state=bool(tool.get("changes_state", True)),
+            reversible=bool(tool.get("reversible", False)),
+        )
+        legacy_signature = _legacy_tool_signature(
+            cmd_template=list(tool.get("cmd_template") or []),
+            params=dict(tool.get("params") or {}),
+            changes_state=bool(tool.get("changes_state", True)),
+            reversible=bool(tool.get("reversible", False)),
+        )
+        if tool_signature == signature or legacy_signature == signature or tool_signature == requested_legacy:
+            return tool
+    return None
+
+
+def _drop_cwd_from_signature(signature: str) -> str:
+    try:
+        payload = json.loads(signature)
+        if payload.get("cwd") is not None:
+            return signature
+        payload.pop("cwd", None)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return signature
+
+
+def _legacy_tool_signature(
     *,
     cmd_template: list[str],
     params: dict,
@@ -613,19 +723,6 @@ def _tool_signature(
     )
 
 
-def _find_by_signature(data: dict[str, DynamicTool], signature: str) -> DynamicTool | None:
-    for tool in data.values():
-        tool_signature = tool.get("signature") or _tool_signature(
-            cmd_template=list(tool.get("cmd_template") or []),
-            params=dict(tool.get("params") or {}),
-            changes_state=bool(tool.get("changes_state", True)),
-            reversible=bool(tool.get("reversible", False)),
-        )
-        if tool_signature == signature:
-            return tool
-    return None
-
-
 def _default_tool_name(cmd_template: list[str]) -> str:
     if not cmd_template:
         return "adhoc_command"
@@ -638,13 +735,31 @@ def _effective_changes_state(
     cmd: list[str],
     mapped: MappedTool | None,
 ) -> bool:
+    if _is_read_only_dynamic_command(cmd):
+        return False
     if declared_changes_state:
         return True
     if mapped is not None and _mapped_tool_key(mapped) in _READ_ONLY_MAPPED_TOOL_KEYS:
         return False
-    if cmd and _command_basename(cmd[0]) in _READ_ONLY_COMMAND_BASENAMES:
-        return False
     return True
+
+
+def _is_read_only_dynamic_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    base = _command_basename(cmd[0])
+    if base in _READ_ONLY_COMMAND_BASENAMES:
+        return True
+    lowered = [str(part).lower() for part in cmd]
+    if base in {"java", "javac", "mvn", "gradle", "node", "npm"}:
+        return any(part in {"-version", "--version", "-v", "version"} for part in lowered[1:])
+    if base == "systemctl":
+        return len(lowered) >= 2 and lowered[1] in {"status", "is-active", "is-enabled", "show"}
+    if base in {"curl", "wget"}:
+        text = " ".join(lowered)
+        write_markers = (" -x post", " -x put", " -x patch", " -x delete", " --request post", " --request put", " --request patch", " --request delete", " -d ", " --data")
+        return not any(marker in f" {text} " for marker in write_markers)
+    return False
 
 
 def _mapped_tool_key(mapped: MappedTool) -> str:

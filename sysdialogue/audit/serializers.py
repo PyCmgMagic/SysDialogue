@@ -9,6 +9,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sysdialogue.audit.trace_store import AuditLog
+from sysdialogue.security.output_sanitizer import sanitize_command, sanitize_value
+
+
+def export_audit_jsonl(audit: AuditLog, output_dir: str | None = None) -> Path:
+    """Export a sanitized audit JSONL for a session."""
+    records = [sanitize_value(record) for record in audit.read_all()]
+    out_dir = Path(output_dir or os.path.expanduser("~/.sysdialogue/exports"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = out_dir / f"audit_{audit.session_id}_{ts}.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records),
+        encoding="utf-8",
+    )
+    return path
 
 
 def export_replay_package(audit: AuditLog, output_dir: str | None = None) -> Path:
@@ -20,7 +35,7 @@ def export_replay_package(audit: AuditLog, output_dir: str | None = None) -> Pat
     - commands.txt — 可读命令列表（仅供审计参考，不作为用户侧命令建议）
     - summary.json — 最终状态摘要
     """
-    records = audit.read_all()
+    records = [sanitize_value(record) for record in audit.read_all()]
     out_dir = Path(output_dir or os.path.expanduser("~/.sysdialogue/exports"))
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -45,9 +60,10 @@ def export_replay_package(audit: AuditLog, output_dir: str | None = None) -> Pat
         lines = ["# 以下命令仅供审计复现参考，不作为操作建议"]
         for r in cmd_records:
             tool = r.get("tool", "")
-            cmd = r.get("cmd", [])
+            cmd = sanitize_command(r.get("cmd", []))
             code = r.get("exit_code", "?")
-            lines.append(f"[{tool}] exit={code}  $ {' '.join(cmd)}")
+            rendered_cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            lines.append(f"[{tool}] exit={code}  $ {rendered_cmd}")
         zf.writestr("commands.txt", "\n".join(lines))
 
         # summary.json

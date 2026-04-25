@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
+from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_ACTIVATE_SKILL,
     META_EXECUTE_DYNAMIC_TOOL,
@@ -60,18 +62,39 @@ READ_ONLY_TOOLS = {
     "manage_sysctl:get",
 }
 
-VERIFICATION_TOOLS = {
+VERIFICATION_CANDIDATE_TOOLS = {
     "validate_config",
     "check_endpoint",
     "get_port_status",
     "read_log",
+    "read_file",
+    "stat_path",
+    "list_directory",
+    "search_file_content",
+    "get_disk_usage",
+    "list_processes",
+    "get_network_info",
+    "resolve_dns",
     "get_system_info",
     "get_resource_stats",
     "manage_service:status",
+    "manage_cron:list",
     "manage_container:status",
     "manage_container:logs",
     "manage_container:inspect",
+    "manage_authorized_keys:list",
+    "manage_package:list",
+    "manage_package:search",
+    "manage_firewall:list",
+    "manage_sysctl:get",
+    "manage_sysctl:list",
+    "get_set_system_config:get",
+    "manage_hosts_entries:list",
+    "manage_mount:list",
+    "backup_path:list",
+    "manage_archive:list",
 }
+VERIFICATION_TOOLS = VERIFICATION_CANDIDATE_TOOLS
 
 READ_ONLY_WORKFLOWS = {"security_audit", "disk_cleanup"}
 WORKFLOWS_WITH_INTERNAL_VERIFICATION = {
@@ -116,6 +139,8 @@ class TaskRun:
     last_action_step: int = 0
     last_verification_step: int = 0
     failed_mutations: list[str] = field(default_factory=list)
+    verification_candidates: list[dict[str, Any]] = field(default_factory=list)
+    verification_judgement: dict[str, Any] = field(default_factory=dict)
     events: list[TaskEvent] = field(default_factory=list)
     final_status: str = ""
     final_reply: str = ""
@@ -123,6 +148,8 @@ class TaskRun:
     iteration_budget: int = 0
     iteration_limit: int = 0
     technical_details: str = ""
+    no_progress_turns: int = 0
+    progress_signature: str = ""
 
 
 class ReActRunner:
@@ -330,6 +357,17 @@ class ReActRunner:
                         final_ready = not result_block.get("is_error")
                         continue
 
+                    resolved_args, resolve_error = _resolve_runtime_args_for_tool(task, name, args)
+                    if resolve_error:
+                        result_blocks.append(_tool_result(tool_use_id, resolve_error, is_error=True))
+                        self._emit_correction(
+                            task,
+                            "Planned step argument binding failed.",
+                            {"errors": [resolve_error]},
+                        )
+                        continue
+                    args = resolved_args
+
                     plan_error = self._guard_plan_step(task, name, args)
                     if plan_error:
                         result_blocks.append(_tool_result(tool_use_id, plan_error, is_error=True))
@@ -356,6 +394,23 @@ class ReActRunner:
                     return task.final_reply
 
                 if final_ready:
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                if self._detect_no_progress(task):
+                    task.final_status = "blocked"
+                    task.final_reply = _blocked_no_progress_reply(task)
+                    self._emit(
+                        task,
+                        "task_failed",
+                        "ReAct task stopped after repeated no-progress turns.",
+                        {
+                            "status": "blocked",
+                            "no_progress_turns": task.no_progress_turns,
+                            "remaining_steps": _remaining_step_ids(task.steps),
+                            "verification_judgement": task.verification_judgement,
+                        },
+                    )
                     self._commit_final(messages, task)
                     return task.final_reply
 
@@ -471,6 +526,8 @@ class ReActRunner:
                         "tool": step.tool,
                         "args": step.args,
                         "purpose": step.purpose,
+                        "continue_on_failure": step.continue_on_failure,
+                        "repair_attempts": step.repair_attempts,
                         "finding_id": step.finding_id,
                         "severity": step.severity,
                     }
@@ -527,14 +584,36 @@ class ReActRunner:
         if task.mode != "plan":
             return None
         executable_steps = _executable_plan_steps(task.steps)
+        repair_steps = [
+            step
+            for step in task.steps
+            if _plan_step_repair_match(step, name, args)
+        ]
+        if repair_steps:
+            next_step = repair_steps[0]
+            next_step.status = "running"
+            next_step.repair_attempts += 1
+            next_step.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist_task_state(task)
+            return None
         if not executable_steps:
+            remaining = _remaining_step_ids(task.steps)
+            if remaining:
+                failed = [step.step_id for step in task.steps if step.status == "failed"]
+                detail = f" Failed steps: {', '.join(failed)}." if failed else ""
+                return (
+                    "No frozen plan step is currently executable. "
+                    f"Remaining steps: {', '.join(remaining)}.{detail}"
+                )
             return "All frozen plan steps are already completed. Finish with finish_task or create a new plan."
         matching = [
             step
             for step in executable_steps
-            if step.tool == name and _normalized_json(step.args) == _normalized_json(args)
+            if step.tool == name and _plan_step_args_match(task.steps, step, args)
         ]
         if not matching:
+            for step in executable_steps:
+                step.last_rejected_args = _safe_result_data(args)
             expected = ", ".join(f"{step.step_id}:{step.tool}" for step in executable_steps)
             return (
                 "Frozen plan deviation rejected. "
@@ -546,6 +625,15 @@ class ReActRunner:
         self._persist_task_state(task)
         return None
 
+    def _detect_no_progress(self, task: TaskRun) -> bool:
+        signature = _progress_signature(task)
+        if signature == task.progress_signature:
+            task.no_progress_turns += 1
+        else:
+            task.progress_signature = signature
+            task.no_progress_turns = 0
+        return task.no_progress_turns >= 8
+
     def _handle_finish_task(self, task: TaskRun, args: dict, tool_use_id: str) -> dict:
         errors = _validate_finish_args(task, args)
         if errors:
@@ -553,6 +641,29 @@ class ReActRunner:
             return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
 
         status = args["status"]
+        if status == "completed" and (task.changed_state or args.get("changed_state")):
+            judgement = self._completion_verification_judgement(task, args)
+            task.verification_judgement = judgement
+            self._trace_verification_judge(
+                task,
+                "ok" if judgement.get("sufficient") else "rejected",
+                judgement.get("reason", "") or "; ".join(judgement.get("missing_requirements") or []),
+                judgement,
+            )
+            if not judgement.get("sufficient"):
+                errors = [
+                    "Changed-state tasks require LLM verification approval before completed.",
+                    "Missing verification: " + "; ".join(judgement.get("missing_requirements") or ["unknown"]),
+                ]
+                recommended = judgement.get("recommended_next_verification") or []
+                if recommended:
+                    errors.append("Recommended next verification: " + "; ".join(str(item) for item in recommended))
+                self._emit_correction(task, "finish_task rejected by LLM verification judge.", {"errors": errors, "judgement": judgement})
+                self._persist_task_state(task)
+                return _tool_result(tool_use_id, "\n".join(errors), is_error=True)
+            task.verified = True
+            task.last_verification_step = _latest_post_mutation_candidate_step(task)
+
         task.final_status = status
         task.changed_state = task.changed_state or bool(args.get("changed_state"))
         task.current_phase = "finish"
@@ -585,6 +696,7 @@ class ReActRunner:
         task.tool_steps += 1
         success = not result_block.get("is_error")
         payload = _parse_tool_result_json(result_block)
+        task._last_tool_payload = payload
 
         if name == META_SET_EXECUTION_MODE:
             mode = args.get("mode")
@@ -603,12 +715,36 @@ class ReActRunner:
                     task.acted = True
                     task.changed_state = True
                     task.last_action_step = task.tool_steps
-                    if workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
-                        task.verified = True
-                        task.last_verification_step = task.tool_steps + 1
+                if success and workflow_name in WORKFLOWS_WITH_INTERNAL_VERIFICATION:
+                    task.last_verification_step = task.tool_steps + 1
+                    task.verification_candidates.append(
+                        {
+                            "tool": META_SET_EXECUTION_MODE,
+                            "action_key": f"workflow:{workflow_name}",
+                            "args": _safe_result_data(args),
+                            "data": _safe_result_data(payload),
+                            "step": task.tool_steps + 1,
+                            "after_last_action": True,
+                        }
+                    )
+                    task.verification_candidates = task.verification_candidates[-20:]
+                    task.verification_judgement = {
+                        "sufficient": True,
+                        "confidence": "high",
+                        "covered_requirements": [f"{workflow_name} internal verification"],
+                        "missing_requirements": [],
+                        "recommended_next_verification": [],
+                    }
                 if success and workflow_name in READ_ONLY_WORKFLOWS:
                     task.verified = True
                     task.last_verification_step = task.tool_steps
+                    task.verification_judgement = {
+                        "sufficient": True,
+                        "confidence": "medium",
+                        "covered_requirements": [f"{workflow_name} read-only evidence"],
+                        "missing_requirements": [],
+                        "recommended_next_verification": [],
+                    }
                 if self.controller.task_store is not None:
                     record = self.controller.task_store.load(task.task_id)
                     if record is not None:
@@ -647,6 +783,7 @@ class ReActRunner:
             else:
                 task.current_phase = "observe"
             self._update_plan_step(task, name, args, success=True)
+            self._record_verification_candidate(task, name, args, payload)
             self._persist_task_state(task)
             return
 
@@ -669,11 +806,10 @@ class ReActRunner:
             task.current_phase = "observe"
 
         if _is_verification_tool(name, args):
-            task.verified = True
-            task.last_verification_step = task.tool_steps
             task.current_phase = "verify"
 
         task.observed = True
+        self._record_verification_candidate(task, name, args, payload)
         self._update_plan_step(task, name, args, success=True)
         self._persist_task_state(task)
 
@@ -683,11 +819,98 @@ class ReActRunner:
         next_step = _next_step_for_tool(task.steps, name, args)
         if next_step is None:
             return
-        next_step.status = "completed" if success else "failed"
+        if success:
+            next_step.status = "completed"
+            if next_step.repair_attempts:
+                next_step.repaired_from_failure = True
+        elif next_step.continue_on_failure and not _is_mutating_tool(name, args):
+            next_step.status = "skipped"
+        else:
+            next_step.status = "failed"
         next_step.error = _truncate(str(error), 600) if error else ""
+        if success:
+            payload = getattr(task, "_last_tool_payload", None)
+            if isinstance(payload, dict):
+                next_step.result_data = _safe_result_data(payload.get("data", payload))
+                next_step.result_summary = _result_summary(payload)
+                data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                if isinstance(data, dict):
+                    next_step.read_only_reason = str(data.get("read_only_reason") or "")
+                    attempts = data.get("attempts")
+                    if isinstance(attempts, list):
+                        next_step.attempts = len(attempts)
+                    elif isinstance(attempts, int):
+                        next_step.attempts = attempts
         next_step.updated_at = datetime.now(timezone.utc).isoformat()
         if success:
             task.current_phase = "act"
+
+    def _record_verification_candidate(self, task: TaskRun, name: str, args: dict, payload: dict) -> None:
+        candidate = {
+            "tool": name,
+            "action_key": _tool_action_key(name, args),
+            "args": _safe_result_data(args),
+            "data": _safe_result_data(payload.get("data", payload)),
+            "step": task.tool_steps,
+            "after_last_action": task.tool_steps > task.last_action_step,
+        }
+        task.verification_candidates.append(candidate)
+        task.verification_candidates = task.verification_candidates[-20:]
+        rule_judgement = VerificationJudge().judge(task)
+        task.verification_judgement = rule_judgement
+        self._emit(
+            task,
+            "verification",
+            "Verification evidence recorded.",
+            rule_judgement,
+        )
+
+    def _completion_verification_judgement(self, task: TaskRun, finish_args: dict[str, Any]) -> dict[str, Any]:
+        rule_judgement = VerificationJudge().judge(task)
+        if not rule_judgement.get("sufficient"):
+            return {**rule_judgement, "judge": "rules"}
+        llm_client = getattr(self.controller, "llm_client", None)
+        if llm_client is None or llm_client.__class__.__name__ in {"NullLLMClient", "NoLLM"}:
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm_unavailable",
+                "missing_requirements": ["verification judge unavailable"],
+                "recommended_next_verification": ["retry with an LLM-capable runtime or finish blocked/partial"],
+            }
+        judge = LLMVerificationJudge(llm_client)
+        try:
+            judgement = judge.judge(task, rule_judgement, finish_args=finish_args)
+        except Exception as exc:
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm",
+                "llm_judge_error": sanitize_text(str(exc), limit=300),
+                "missing_requirements": [f"verification judge error: {type(exc).__name__}"],
+                "recommended_next_verification": ["finish blocked/partial or retry verification judge"],
+            }
+        return judgement
+
+    def _trace_verification_judge(
+        self,
+        task: TaskRun,
+        status: str,
+        summary: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        trace_store = getattr(self.controller, "trace_store", None)
+        if trace_store is None:
+            return
+        trace_store.log_span(
+            session_id=self.controller.session_id,
+            task_id=task.task_id,
+            span_type="verification_judge",
+            name="llm_evidence_judge",
+            status=status,
+            summary=sanitize_text(summary, limit=500),
+            data=sanitize_value(data or {}),
+        )
 
     def _emit_tool_started(self, task: TaskRun, name: str, args: dict) -> None:
         if name == META_SET_EXECUTION_MODE and args.get("mode") == "workflow":
@@ -852,11 +1075,116 @@ def _next_step_for_tool(steps: list[TaskStepRecord], name: str, args: dict) -> T
         if step.status not in {"pending", "running"}:
             continue
         if step.tool != name:
-            return None
-        if _normalized_json(step.args) != _normalized_json(args):
-            return None
-        return step
+            continue
+        if _plan_step_args_match(steps, step, args):
+            return step
     return None
+
+
+def _plan_step_args_match(steps: list[TaskStepRecord], step: TaskStepRecord, actual: dict) -> bool:
+    expected, unresolved = _resolve_value(step.args, steps)
+    if unresolved:
+        return False
+    return _plan_args_match(step.tool, expected if isinstance(expected, dict) else step.args, actual)
+
+
+def _plan_step_repair_match(step: TaskStepRecord, name: str, actual: dict) -> bool:
+    if step.status != "failed" or step.repair_attempts >= 3 or step.tool != name:
+        return False
+    if _plan_args_match(step.tool, step.args, actual):
+        return True
+    if name == META_EXECUTE_DYNAMIC_TOOL:
+        return _execute_dynamic_tool_repair_match(step.args, actual)
+    if name == "manage_container":
+        return _manage_container_repair_match(step.args, actual)
+    return False
+
+
+def _resolve_runtime_args_for_tool(task: TaskRun, name: str, args: Any) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(args, dict):
+        return {}, f"{name} arguments must be an object."
+    if name == META_EXECUTE_DYNAMIC_TOOL:
+        args = normalize_execute_dynamic_tool_args(args)
+    if task.mode != "plan":
+        return args, None
+    resolved, unresolved = _resolve_value(args, task.steps)
+    if unresolved:
+        return {}, (
+            "Frozen plan argument binding failed. "
+            f"Unresolved placeholder(s): {', '.join(sorted(unresolved))}."
+        )
+    return resolved if isinstance(resolved, dict) else {}, None
+
+
+_PLACEHOLDER_RE = re.compile(r"^\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}$")
+_SENSITIVE_KEY_RE = re.compile(r"(password|passwd|secret|token|api[_-]?key|private[_-]?key)", re.I)
+_UNRESOLVED = object()
+
+
+def _resolve_value(value: Any, steps: list[TaskStepRecord]) -> tuple[Any, set[str]]:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        unresolved: set[str] = set()
+        for key, item in value.items():
+            resolved, missing = _resolve_value(item, steps)
+            out[key] = resolved
+            unresolved.update(missing)
+        return out, unresolved
+    if isinstance(value, list):
+        out_list: list[Any] = []
+        unresolved: set[str] = set()
+        for item in value:
+            resolved, missing = _resolve_value(item, steps)
+            out_list.append(resolved)
+            unresolved.update(missing)
+        return out_list, unresolved
+    if isinstance(value, str):
+        match = _PLACEHOLDER_RE.match(value.strip())
+        if not match:
+            return value, set()
+        expr = match.group(1)
+        resolved = _lookup_step_expr(expr, steps)
+        if resolved is _UNRESOLVED:
+            return value, {expr}
+        return resolved, set()
+    return value, set()
+
+
+def _lookup_step_expr(expr: str, steps: list[TaskStepRecord]) -> Any:
+    parts = [part for part in expr.split(".") if part]
+    if len(parts) < 2:
+        return _UNRESOLVED
+    step = next((item for item in steps if item.step_id == parts[0]), None)
+    if step is None:
+        return _UNRESOLVED
+    if parts[1] == "args":
+        current: Any = step.args
+        rest = parts[2:]
+    elif parts[1] in {"data", "result"}:
+        current = step.result_data
+        rest = parts[2:]
+        if parts[1] == "result" and rest and rest[0] == "data":
+            rest = rest[1:]
+    else:
+        return _UNRESOLVED
+    for part in rest:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            return _UNRESOLVED
+    return current
+
+
+def _safe_result_data(value: Any, *, depth: int = 0) -> Any:
+    return sanitize_value(value, limit=2000, depth=depth)
+
+
+def _result_summary(payload: dict) -> str:
+    if "data" in payload:
+        return _truncate(_normalized_json(_safe_result_data(payload["data"])), 600)
+    return _truncate(_normalized_json(_safe_result_data(payload)), 600)
 
 
 def _normalized_json(value: Any) -> str:
@@ -864,6 +1192,419 @@ def _normalized_json(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
         return str(value)
+
+
+def _plan_args_match(tool: str, expected: dict, actual: dict) -> bool:
+    if _normalized_json(expected) == _normalized_json(actual):
+        return True
+    if tool == META_EXECUTE_DYNAMIC_TOOL:
+        expected_cmd = expected.get("cmd_template") if isinstance(expected, dict) else None
+        actual_cmd = actual.get("cmd_template") if isinstance(actual, dict) else None
+        if expected_cmd and actual_cmd and expected_cmd == actual_cmd:
+            expected_cwd = expected.get("cwd") if isinstance(expected, dict) else None
+            actual_cwd = actual.get("cwd") if isinstance(actual, dict) else None
+            return not expected_cwd or expected_cwd == actual_cwd
+    if _has_deferred_value(expected):
+        return True
+    expected_norm = _normalize_plan_args(tool, expected)
+    actual_norm = _normalize_plan_args(tool, actual)
+    return _dict_subset(expected_norm, actual_norm)
+
+
+def _execute_dynamic_tool_repair_match(expected: dict, actual: dict) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    expected_cmd = expected.get("cmd_template")
+    actual_cmd = actual.get("cmd_template")
+    if expected_cmd and actual_cmd and expected_cmd == actual_cmd:
+        return bool(actual.get("cwd")) or bool(actual.get("cmd_template"))
+    if _is_maven_project_repair(expected_cmd, actual_cmd):
+        return True
+    return False
+
+
+def _is_maven_project_repair(expected_cmd: Any, actual_cmd: Any) -> bool:
+    if not isinstance(expected_cmd, list) or not isinstance(actual_cmd, list):
+        return False
+    if not expected_cmd or not actual_cmd:
+        return False
+    if expected_cmd[0] != "mvn" or actual_cmd[0] != "mvn":
+        return False
+    return len(actual_cmd) >= 4 and actual_cmd[1] == "-f" and str(actual_cmd[2]).endswith("pom.xml")
+
+
+def _manage_container_repair_match(expected: dict, actual: dict) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    if expected.get("name") != actual.get("name"):
+        return False
+    expected_action = str(expected.get("action") or "")
+    actual_action = str(actual.get("action") or "")
+    if expected_action != "exec" or actual_action not in {"exec", "wait_exec"}:
+        return False
+    expected_text = " ".join(str(part).lower() for part in expected.get("command") or [])
+    actual_text = " ".join(str(part).lower() for part in actual.get("command") or [])
+    return "mysqladmin" in expected_text and "ping" in expected_text and "mysqladmin" in actual_text and "ping" in actual_text
+
+
+def _normalize_plan_args(tool: str, args: Any) -> Any:
+    if not isinstance(args, dict):
+        return args
+    normalized = {k: _normalize_plan_args(tool, v) for k, v in args.items()}
+    if tool == "manage_container":
+        action = str(normalized.get("action") or "").lower()
+        if action not in {"exec", "wait_exec"}:
+            normalized.pop("command", None)
+            normalized.pop("success_contains", None)
+            normalized.pop("retries", None)
+            normalized.pop("interval_sec", None)
+        if normalized.get("backend") in ("auto", "docker"):
+            normalized.pop("backend", None)
+        if normalized.get("restart_policy") == "no":
+            normalized.pop("restart_policy", None)
+    if tool == "create_user":
+        if normalized.get("groups") == []:
+            normalized.pop("groups", None)
+        if normalized.get("shell") == "/bin/bash":
+            normalized.pop("shell", None)
+        if normalized.get("create_home") is True:
+            normalized.pop("create_home", None)
+    if "ports" in normalized and isinstance(normalized["ports"], list):
+        normalized["ports"] = [
+            {k: v for k, v in port.items() if not (k == "protocol" and v == "tcp")}
+            if isinstance(port, dict)
+            else port
+            for port in normalized["ports"]
+        ]
+    return normalized
+
+
+def _has_deferred_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(str(k).endswith("_from_file") or _has_deferred_value(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_deferred_value(v) for v in value)
+    if isinstance(value, str):
+        return bool(_PLACEHOLDER_RE.match(value.strip()))
+    return False
+
+
+def _dict_subset(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for key, value in expected.items():
+            if key not in actual:
+                return False
+            if not _dict_subset(value, actual[key]):
+                return False
+        return True
+    if isinstance(expected, list) and isinstance(actual, list):
+        return len(expected) == len(actual) and all(
+            _dict_subset(e, a) for e, a in zip(expected, actual)
+        )
+    return expected == actual
+
+
+class VerificationJudge:
+    """Minimal hard gate before LLM evidence sufficiency judgement.
+
+    This class no longer decides whether evidence is semantically enough. It
+    only enforces the non-negotiable fact constraints: real successful tool
+    output must exist, and for changed-state tasks it must occur after the last
+    successful mutation. The LLM judge decides coverage and target match.
+    """
+
+    def judge(self, task: TaskRun) -> dict[str, Any]:
+        if not task.verification_candidates:
+            return self._missing("no post-mutation tool evidence")
+        if not task.changed_state:
+            latest = task.verification_candidates[-1]
+            return {
+                "sufficient": True,
+                "covered_requirements": [f"{latest['action_key']} returned evidence"],
+                "missing_requirements": [],
+                "confidence": "medium",
+                "recommended_next_verification": [],
+            }
+
+        after_action = [
+            item for item in task.verification_candidates
+            if int(item.get("step") or 0) > int(task.last_action_step or 0)
+        ]
+        if not after_action:
+            return self._missing("verification must run after the last mutation")
+        return {
+            "sufficient": True,
+            "covered_requirements": [
+                f"{item.get('action_key')} produced post-mutation evidence" for item in after_action[-3:]
+            ],
+            "missing_requirements": [],
+            "confidence": "low",
+            "recommended_next_verification": [],
+            "judge": "hard_gate",
+        }
+
+    @staticmethod
+    def _missing(reason: str) -> dict[str, Any]:
+        return {
+            "sufficient": False,
+            "covered_requirements": [],
+            "missing_requirements": [reason],
+            "confidence": "low",
+            "recommended_next_verification": ["run a targeted read-only verification tool"],
+        }
+
+
+class LLMVerificationJudge:
+    """LLM evidence sufficiency judge with minimal fact hard-gates."""
+
+    TOOL_SCHEMA = {
+        "name": "submit_verification_judgement",
+        "description": "Return the structured verification judgement.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sufficient": {"type": "boolean"},
+                "covered_requirements": {"type": "array", "items": {"type": "string"}},
+                "missing_requirements": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                "recommended_next_verification": {"type": "array", "items": {"type": "string"}},
+                "reason": {"type": "string"},
+            },
+            "required": [
+                "sufficient",
+                "covered_requirements",
+                "missing_requirements",
+                "confidence",
+                "recommended_next_verification",
+                "reason",
+            ],
+        },
+    }
+
+    def __init__(self, llm_client: Any):
+        self.llm_client = llm_client
+
+    def judge(
+        self,
+        task: TaskRun,
+        rule_judgement: dict[str, Any],
+        *,
+        finish_args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not rule_judgement.get("sufficient"):
+            return {**rule_judgement, "judge": "rules"}
+        payload = sanitize_value(
+            {
+                "user_goal": task.goal,
+                "mode": task.mode,
+                "last_action_step": task.last_action_step,
+                "current_tool_step": task.tool_steps,
+                "hard_gate": rule_judgement,
+                "finish_request": finish_args or {},
+                "plan_steps": [
+                    {
+                        "step_id": step.step_id,
+                        "status": step.status,
+                        "tool": step.tool,
+                        "purpose": step.purpose,
+                        "args": step.args,
+                    }
+                    for step in task.steps[-20:]
+                ],
+                "verification_candidates": task.verification_candidates[-8:],
+            },
+            limit=6000,
+        )
+        response = self.llm_client.messages_create(
+            system=(
+                "You are a verification evidence judge for a Linux operations agent. "
+                "You are the only semantic sufficiency judge: decide whether real post-change "
+                "tool evidence proves the user's requested change. The system already checked "
+                "that at least one real tool result exists after the last mutation. Never treat "
+                "model reasoning, plans, or promises as evidence. Return only the required "
+                "structured judgement."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Assess this verification payload. Return sufficient=true only when the "
+                                "post-mutation tool evidence covers the concrete objects and requirements "
+                                "in the user goal. If evidence is generic, before the relevant mutation, "
+                                "failed, or missing an important target, return sufficient=false and "
+                                "recommend the next verification tool.\n"
+                                + json.dumps(payload, ensure_ascii=False)
+                            ),
+                        }
+                    ],
+                }
+            ],
+            tools=[self.TOOL_SCHEMA],
+        )
+        parsed = _parse_llm_verification_response(response.content)
+        if parsed is None:
+            return {
+                **rule_judgement,
+                "sufficient": False,
+                "judge": "llm",
+                "llm_judge_error": "invalid llm judgement",
+                "missing_requirements": ["verification judge returned invalid JSON"],
+                "recommended_next_verification": ["retry verification judge or finish blocked/partial"],
+            }
+        judgement = _normalize_llm_judgement(parsed)
+        if not judgement.get("sufficient"):
+            return judgement
+        return {
+            **judgement,
+            "sufficient": True,
+            "judge": "llm",
+        }
+
+
+def _needs_llm_verification_judge(task: TaskRun) -> bool:
+    if not task.changed_state:
+        return False
+    action_count = len([event for event in task.events if event.stage == "tool_finished"])
+    text = (task.goal or "").lower()
+    complex_terms = (
+        "mysql",
+        "database",
+        "table",
+        "user",
+        "ssh key",
+        "authorized",
+        "cron",
+        "container",
+        "docker",
+        "podman",
+        "service",
+        "rollback",
+        "systemd",
+    )
+    return task.mode in {"plan", "workflow"} or action_count >= 3 or any(term in text for term in complex_terms)
+
+
+def _parse_llm_verification_response(content: Any) -> dict[str, Any] | None:
+    blocks = content if isinstance(content, list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and block.get("name") == "submit_verification_judgement":
+            payload = block.get("input")
+            return payload if isinstance(payload, dict) else None
+    text_parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text_parts.append(str(block.get("text") or ""))
+    if not text_parts and isinstance(content, str):
+        text_parts.append(content)
+    text = "\n".join(text_parts).strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_llm_judgement(value: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_value(
+        {
+            "sufficient": bool(value.get("sufficient")),
+            "covered_requirements": _string_list(value.get("covered_requirements")),
+            "missing_requirements": _string_list(value.get("missing_requirements")),
+            "confidence": str(value.get("confidence") or "low").lower()
+            if str(value.get("confidence") or "").lower() in {"low", "medium", "high"}
+            else "low",
+            "recommended_next_verification": _string_list(value.get("recommended_next_verification")),
+            "reason": str(value.get("reason") or ""),
+            "judge": "llm",
+        },
+        limit=4000,
+    )
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [sanitize_text(str(item), limit=300) for item in value[:10] if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [sanitize_text(value, limit=300)]
+    return []
+
+
+def _progress_signature(task: TaskRun) -> str:
+    completed = sorted(step.step_id for step in task.steps if step.status in {"completed", "skipped", "rolled_back"})
+    failed = sorted(step.step_id for step in task.steps if step.status == "failed")
+    return _normalized_json(
+        {
+            "tool_steps": task.tool_steps,
+            "completed": completed,
+            "failed": failed,
+            "verified": task.verified,
+            "verification_candidates": len(task.verification_candidates),
+        }
+    )
+
+
+def _remaining_step_ids(steps: list[TaskStepRecord]) -> list[str]:
+    return [step.step_id for step in steps if step.status not in {"completed", "skipped", "rolled_back"}]
+
+
+def _blocked_no_progress_reply(task: TaskRun) -> str:
+    remaining = ", ".join(_remaining_step_ids(task.steps)) or "none"
+    missing = ", ".join(task.verification_judgement.get("missing_requirements") or [])
+    if not missing:
+        missing = "no tool or plan progress was made in repeated turns"
+    frontier = ", ".join(f"{step.step_id}:{step.tool}" for step in _executable_plan_steps(task.steps)) or "none"
+    failed = [step for step in task.steps if step.status == "failed"]
+    failed_detail = ", ".join(
+        f"{step.step_id}:{step.tool} error={step.error or '<none>'}" for step in failed[-3:]
+    ) or "none"
+    rejected = next((step.last_rejected_args for step in task.steps if step.last_rejected_args), {})
+    suggestions = _repair_suggestions(failed)
+    return (
+        "Task blocked after repeated no-progress ReAct turns.\n"
+        f"Remaining plan steps: {remaining}.\n"
+        f"Executable frontier: {frontier}.\n"
+        f"Failed steps: {failed_detail}.\n"
+        f"Last rejected args: {_preview_json(rejected, limit=600) if rejected else 'none'}.\n"
+        f"Suggested repair args: {suggestions or 'none'}.\n"
+        f"Blocking reason: {missing}."
+    )
+
+
+def _latest_post_mutation_candidate_step(task: TaskRun) -> int:
+    steps = [
+        int(item.get("step") or 0)
+        for item in task.verification_candidates
+        if int(item.get("step") or 0) > int(task.last_action_step or 0)
+    ]
+    return max(steps) if steps else 0
+
+
+def _repair_suggestions(failed_steps: list[TaskStepRecord]) -> str:
+    suggestions: list[str] = []
+    for step in failed_steps[-3:]:
+        if step.tool == META_EXECUTE_DYNAMIC_TOOL:
+            cmd = step.args.get("cmd_template") if isinstance(step.args, dict) else None
+            if isinstance(cmd, list) and cmd and cmd[0] in {"mvn", "gradle", "npm"}:
+                suggestions.append(f"{step.step_id}: retry execute_dynamic_tool with the same cmd_template and cwd=<observed project dir>")
+        if step.tool == "manage_container":
+            command = step.args.get("command") if isinstance(step.args, dict) else None
+            text = " ".join(str(part).lower() for part in command or [])
+            if "mysqladmin" in text and "ping" in text:
+                suggestions.append(f"{step.step_id}: retry manage_container wait_exec using mysqladmin --protocol=TCP -h127.0.0.1 ... ping")
+    return "; ".join(suggestions)
 
 
 def _final_task_store_status(status: str) -> str:
@@ -1030,8 +1771,6 @@ def _validate_finish_args(task: TaskRun, args: dict) -> list[str]:
         if task.changed_state or args.get("changed_state"):
             if not task.acted:
                 errors.append("Changed-state completions require an executed mutation before completed.")
-            if not task.verified or task.last_verification_step <= task.last_action_step:
-                errors.append("Changed-state tasks require a verification tool/workflow after the mutation before completed.")
         if task.failed_mutations and not task.acted:
             errors.append(
                 "Failed mutation attempts cannot be reported as completed before a later successful mutation and verification."
@@ -1159,10 +1898,10 @@ def _friendly_tool_error(parsed: dict, raw_preview: str) -> str:
 
 def _preview_json(value, limit: int = 1000) -> str:
     try:
-        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        text = json.dumps(sanitize_value(value, limit=limit), ensure_ascii=False, indent=2, default=str)
     except Exception:
-        text = str(value)
-    return _truncate(text, limit)
+        text = sanitize_text(str(value), limit=limit)
+    return sanitize_text(_truncate(text, limit), limit=limit)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -1172,6 +1911,8 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _is_mutating_tool(name: str, args: dict) -> bool:
+    if name == "manage_container" and _tool_action_key(name, args) in {"manage_container:exec", "manage_container:wait_exec"}:
+        return not _is_read_only_container_exec_args(args)
     key = _tool_action_key(name, args)
     if key in READ_ONLY_TOOLS:
         return False
@@ -1182,7 +1923,37 @@ def _is_mutating_tool(name: str, args: dict) -> bool:
 
 
 def _is_verification_tool(name: str, args: dict) -> bool:
-    return name in VERIFICATION_TOOLS or _tool_action_key(name, args) in VERIFICATION_TOOLS
+    if name == "manage_container" and _tool_action_key(name, args) in {"manage_container:exec", "manage_container:wait_exec"}:
+        return _is_read_only_container_exec_args(args)
+    return name in VERIFICATION_CANDIDATE_TOOLS or _tool_action_key(name, args) in VERIFICATION_CANDIDATE_TOOLS
+
+
+def _is_read_only_container_exec_args(args: dict) -> bool:
+    if not isinstance(args, dict):
+        return False
+    command = args.get("command") or []
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        return False
+    text = " ".join(command).strip().lower()
+    if not text:
+        return False
+    write_markers = (
+        " create ", " alter ", " drop ", " insert ", " update ", " delete ", " truncate ",
+        " grant ", " revoke ", " replace ", " set password", " flush privileges",
+    )
+    padded = f" {text} "
+    if any(marker in padded for marker in write_markers):
+        return False
+    read_markers = (
+        " select ", " show ", " describe ", " desc ", " explain ",
+        " pg_isready",
+        " curl ", " wget ", " nc ", " true",
+    )
+    return (
+        any(marker in padded for marker in read_markers)
+        or (" mysqladmin " in padded and " ping " in padded)
+        or (" redis-cli " in padded and " ping " in padded)
+    )
 
 
 def _tool_action_key(name: str, args: dict) -> str:

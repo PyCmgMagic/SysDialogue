@@ -19,7 +19,10 @@ class EnvProfile(TypedDict):
     kernel_version: str
     architecture: str
     current_user: str
+    uid: int
+    is_root: bool
     has_sudo: bool
+    sudo_passwordless: bool
     is_container: bool
     remote_mode: bool
     init_system: str           # "systemd" | "sysvinit" | "unknown"
@@ -36,6 +39,7 @@ class EnvProfile(TypedDict):
     config_validators: list    # 可用配置校验器列表
     supports_journalctl: bool
     supports_system_cron: bool
+    cron_writable: bool
     mount_capable: bool
     dns_tools: list            # ["dig", "nslookup", "getent"]
     selinux_mode: str          # "enforcing" | "permissive" | "disabled" | "unknown"
@@ -52,7 +56,10 @@ def _unknown_profile(remote_mode: bool = False, ssh_port: int = 22) -> EnvProfil
         kernel_version="unknown",
         architecture="unknown",
         current_user="unknown",
+        uid=-1,
+        is_root=False,
         has_sudo=False,
+        sudo_passwordless=False,
         is_container=False,
         remote_mode=remote_mode,
         init_system="unknown",
@@ -65,6 +72,7 @@ def _unknown_profile(remote_mode: bool = False, ssh_port: int = 22) -> EnvProfil
         config_validators=[],
         supports_journalctl=False,
         supports_system_cron=False,
+        cron_writable=False,
         mount_capable=False,
         dns_tools=[],
         selinux_mode="unknown",
@@ -167,8 +175,21 @@ class CapabilityProbe:
         if code == 0 and out:
             p["current_user"] = out
 
+        out, code = self._run(["id", "-u"])
+        if code == 0 and out.isdigit():
+            p["uid"] = int(out)
+            p["is_root"] = p["uid"] == 0
+        else:
+            p["is_root"] = p["current_user"] == "root"
+
         _, code = self._run(["sudo", "-n", "true"])
-        p["has_sudo"] = (code == 0) or p["current_user"] == "root"
+        p["sudo_passwordless"] = code == 0
+        p["has_sudo"] = p["sudo_passwordless"] or p["is_root"]
+        run_privileged = getattr(self._exec, "run_privileged", None)
+        has_sudo_password = bool(getattr(self._exec, "has_sudo_password", False))
+        if not p["has_sudo"] and has_sudo_password and callable(run_privileged):
+            _, priv_code = run_privileged(["true"], timeout=5)
+            p["has_sudo"] = priv_code == 0
 
     def _probe_cmds(self, p: EnvProfile) -> None:
         avail: dict[str, bool] = {}
@@ -254,6 +275,13 @@ class CapabilityProbe:
 
         avail = p.get("available_cmds", {})
         p["supports_system_cron"] = bool(avail.get("crontab"))
+        if p["is_root"]:
+            p["cron_writable"] = True
+        elif p["has_sudo"]:
+            p["cron_writable"] = True
+        else:
+            _, code = self._run(["test", "-w", "/etc/cron.d"])
+            p["cron_writable"] = code == 0
         p["mount_capable"] = bool(avail.get("mount"))
 
     def _probe_dns_tools(self, p: EnvProfile) -> None:
@@ -324,7 +352,10 @@ class EnvProfileSanitizer:
             "kernel": profile.get("kernel_version", "unknown"),
             "arch": profile.get("architecture", "unknown"),
             "user": profile.get("current_user", "unknown"),
+            "uid": profile.get("uid", -1),
+            "is_root": profile.get("is_root", False),
             "has_sudo": profile.get("has_sudo", False),
+            "sudo_passwordless": profile.get("sudo_passwordless", False),
             "is_container": profile.get("is_container", False),
             "remote_mode": profile.get("remote_mode", False),
             "init_system": profile.get("init_system", "unknown"),
@@ -333,6 +364,7 @@ class EnvProfileSanitizer:
             "container_backend": profile.get("container_backend", "unknown"),
             "config_validators": profile.get("config_validators", []),
             "supports_journalctl": profile.get("supports_journalctl", False),
+            "cron_writable": profile.get("cron_writable", False),
             "dns_tools": profile.get("dns_tools", []),
             "selinux_mode": profile.get("selinux_mode", "unknown"),
             "apparmor_mode": profile.get("apparmor_mode", "unknown"),

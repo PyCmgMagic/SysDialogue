@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.conversation import ConversationManager
+from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
 from sysdialogue.agent.hooks import HookEvent, HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy
@@ -28,6 +29,7 @@ from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
 from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_ACTIVATE_SKILL,
     META_EXECUTE_DYNAMIC_TOOL,
@@ -541,6 +543,7 @@ class AgentController:
                             actual_risk=s.actual_risk,
                             rule_ids=list(s.rule_ids),
                             depends_on=list(s.depends_on),
+                            continue_on_failure=bool(getattr(s, "continue_on_failure", False)),
                             finding_id=s.finding_id,
                             severity=s.severity,
                             blocking=s.blocking,
@@ -873,6 +876,7 @@ class AgentController:
                 description=args.get("intent_summary", ""),
                 cmd_template=args.get("cmd_template") or [],
                 params=args.get("params") or {},
+                cwd=args.get("cwd") or None,
                 consequences=args.get("consequences", ""),
                 risk_assessment=args.get("risk_assessment", ""),
                 estimated_risk=args.get("estimated_risk", "UNKNOWN"),
@@ -929,6 +933,7 @@ class AgentController:
                 is_error=True,
             )
 
+        args = normalize_execute_dynamic_tool_args(args)
         raw_tool_id = args.get("tool_id", "")
         has_tool_id = isinstance(raw_tool_id, str) and bool(raw_tool_id.strip())
         cmd_template = args.get("cmd_template")
@@ -960,6 +965,7 @@ class AgentController:
                 is_error=True,
             )
         raw_timeout = args.get("timeout", 30)
+        cwd = args.get("cwd") or None
         try:
             timeout = int(raw_timeout)
         except (TypeError, ValueError):
@@ -1095,6 +1101,7 @@ class AgentController:
                     env_profile=self.env_profile,
                     confirm_fn=confirm_dynamic,
                     timeout=timeout,
+                    cwd=cwd,
                 )
             else:
                 result = self.dynamic_registry.execute_inline(
@@ -1102,6 +1109,7 @@ class AgentController:
                     description=str(args.get("intent_summary") or ""),
                     cmd_template=list(cmd_template),
                     params=inline_params if isinstance(inline_params, dict) else {},
+                    cwd=cwd,
                     args=dyn_args,
                     consequences=str(args.get("consequences") or "未说明"),
                     risk_assessment=str(args.get("risk_assessment") or "未提供风险评估"),
@@ -1136,6 +1144,7 @@ class AgentController:
             "exit_code": result.exit_code,
             "reason": result.reason,
             "cmd": result.cmd,
+            "cwd": result.cwd,
             "final_risk": result.final_risk,
             "declared_changes_state": result.declared_changes_state,
             "changes_state": result.changes_state,
@@ -1157,6 +1166,7 @@ class AgentController:
                 "dynamic_mode": "registered" if has_tool_id else "inline",
                 "tool_id": raw_tool_id.strip() if has_tool_id else "",
                 "exit_code": result.exit_code,
+                "cwd": result.cwd,
                 "changes_state": result.changes_state,
             },
         )
@@ -1644,11 +1654,11 @@ def _tool_result_block(tool_use_id: str, content: str, *, is_error: bool) -> dic
 
 def _preview(result: ToolResult) -> str:
     if result.success:
-        data = result.data
+        data = sanitize_value(result.data)
         if isinstance(data, (dict, list)):
             try:
-                return json.dumps(data, ensure_ascii=False)[:1024]
+                return sanitize_text(json.dumps(data, ensure_ascii=False), limit=1024)
             except Exception:
-                return str(data)[:1024]
-        return str(data or "")[:1024]
-    return (result.error or "")[:1024]
+                return sanitize_text(str(data), limit=1024)
+        return sanitize_text(str(data or ""), limit=1024)
+    return sanitize_text(result.error or "", limit=1024)
