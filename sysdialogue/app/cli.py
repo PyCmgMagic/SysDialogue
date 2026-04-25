@@ -5,6 +5,7 @@
   sysdialogue --verify               系统自检（不调 API）
   sysdialogue --demo                 演示 security_audit 工作流（不调 API）
   sysdialogue --remote user@host     远程模式（SSH）
+  sysdialogue --simple               启动 stdin/stdout 轻量 CLI
 """
 
 from __future__ import annotations
@@ -44,11 +45,6 @@ from sysdialogue.audit.trace_store import AuditLog
 @click.option("--export-dir", "export_dir", type=click.Path(file_okay=False),
               help="Directory for audit/replay exports")
 @click.option("--simple", is_flag=True, help="启动 stdin/stdout 轻量 CLI")
-@click.option("--web", "web_mode", is_flag=True, help="启动轻量 Web 控制台")
-@click.option("--host", "web_host", default="127.0.0.1", show_default=True,
-              help="Web 控制台监听地址")
-@click.option("--port", "web_port", default=8000, show_default=True, type=int,
-              help="Web 控制台监听端口")
 @click.option("--break-glass", "break_glass", is_flag=True,
               help="Enable the explicit break_glass safety profile for DynTool shell execution.")
 def main(verify: bool, demo: bool, remote: str | None,
@@ -57,7 +53,7 @@ def main(verify: bool, demo: bool, remote: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
          export_audit_session: str | None, export_replay_session: str | None,
          export_dir: str | None,
-         simple: bool, web_mode: bool, web_host: str, web_port: int,
+         simple: bool,
          break_glass: bool) -> None:
     """SysDialogue v9 — Linux 服务器运维智能代理。"""
 
@@ -106,11 +102,6 @@ def main(verify: bool, demo: bool, remote: str | None,
     if simple:
         _require_api_config(config, "Simple CLI")
         sys.exit(run_simple_cli(config))
-    if web_mode:
-        _require_api_config(config, "Web 控制台")
-        from sysdialogue.web.app import run_web_server
-        run_web_server(config, host=web_host, port=web_port)
-        return
 
     # 启动 TUI
     _require_api_config(config, "TUI")

@@ -21,7 +21,6 @@ from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.security.output_sanitizer import sanitize_command, sanitize_text, sanitize_value
 from sysdialogue.tools.base import ToolResult
 from sysdialogue.tools.registry import ToolDef, ToolRegistry
-from sysdialogue.web.app import create_web_app
 
 
 class NoLLM:
@@ -319,31 +318,6 @@ def test_tui_facing_slash_commands_render_readable_summaries(tmp_path: Path) -> 
     assert "Matched rule: `ask-service`" in why
     assert "Updated target" in target
     assert controller.conversation_manager.context["target:service"] == "nginx"
-
-
-def test_web_app_exposes_command_trace_and_memory_routes() -> None:
-    app = create_web_app(type("Config", (), {})())
-    paths = {route.path for route in app.routes}
-
-    assert "/api/session/{session_id}/command" in paths
-    assert "/api/session/{session_id}/traces" in paths
-    assert "/api/session/{session_id}/memory" in paths
-    assert "/api/session/{session_id}/skills" in paths
-    assert "/api/session/{session_id}/skill" in paths
-    assert "/api/session/{session_id}/hooks" in paths
-    assert "/api/session/{session_id}/permissions/explain" in paths
-    assert "/api/session/{session_id}/target" in paths
-    assert "/api/sessions" in paths
-    assert "/api/session/{session_id}/tasks" in paths
-    assert "/api/session/{session_id}/tasks/{task_id}" in paths
-    assert "/api/session/{session_id}/audit" in paths
-    assert "/api/session/{session_id}/audit/export" in paths
-    assert "/api/locks" in paths
-    assert "/api/targets" in paths
-    assert "/api/targets/{target_id}" in paths
-    assert "/api/targets/test" in paths
-    assert "/api/session/{session_id}/export/audit" in paths
-    assert "/api/session/{session_id}/export/replay" in paths
 
 
 def test_skill_manager_project_skill_overrides_user_skill(tmp_path: Path) -> None:
