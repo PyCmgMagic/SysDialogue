@@ -26,8 +26,8 @@ SysDialogue 是「提示词 + 工具编排」为主的运维 Agent。用户用�
 
 ```dotenv
 OPENAI_API_KEY=<redacted>
-OPENAI_BASE_URL=https://newapi.sduonline.cn/v1
-OPENAI_MODEL=Ali-dashscope/Qwen3.5-Plus
+OPENAI_BASE_URL=
+OPENAI_MODEL=
 SYSDIALOGUE_MAX_ITER=160
 ```
 
