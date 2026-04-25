@@ -10,7 +10,7 @@
 
 - Python `>= 3.11`
 - 运行环境：Linux 优先
-- Windows 可作为控制端运行 TUI、Simple CLI 和 `--verify`
+- Windows 可作为控制端运行 TUI 和 `--verify`
 - 远程目标主机需支持 SSH 访问，优先使用 Linux 服务器
 
 ## 3. 安装
@@ -177,13 +177,7 @@ python -m sysdialogue.app.cli --demo
 python -m sysdialogue.app.cli
 ```
 
-### 8.4 Simple CLI
-
-```powershell
-python -m sysdialogue.app.cli --simple
-```
-
-### 8.5 定时任务回调
+### 8.4 定时任务回调
 
 ```powershell
 python -m sysdialogue.app.cli --run-scheduled-job <job_id>
@@ -204,15 +198,10 @@ $env:SYSDIALOGUE_SSH_PASSWORD="your_ssh_password"
 python -m sysdialogue.app.cli --remote user@example.com:22
 ```
 
-本地临时测试也可直接传入密码：
-
-```powershell
-python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-password your_ssh_password
-```
-
 说明：
 
 - `--remote` 只改变工具执行目标。
+- 密码认证优先使用环境变量，避免密码进入 shell 历史。
 - 首次连接的 SSH 主机会写入 `known_hosts`。
 - 主机密钥发生变化时，连接会被拒绝。
 
@@ -239,7 +228,7 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-password your_s
 - `commands/`
 - `targets/`
 
-这些数据由 TUI 和 Simple CLI 共享。重启后，已过期的活跃任务会标记为 `interrupted`；待确认和待输入内容不会自动重放。
+这些数据由 TUI 和计划任务回调共享。重启后，已过期的活跃任务会标记为 `interrupted`；待确认和待输入内容不会自动重放。
 
 ## 12. 控制命令
 
@@ -320,18 +309,13 @@ DynTool 支持两种执行模式：
 - 完成门禁
 - 变更后验证
 
-## 16. TUI / Simple CLI 差异
+## 16. TUI 交互
 
 ### 16.1 TUI
 
 - 终端交互界面
 - 提供任务卡片、审计面板、环境面板
 - 支持折叠技术细节
-
-### 16.2 Simple CLI
-
-- 轻量终端模式
-- 与 TUI 共享安全策略和持久化存储
 
 ## 17. 验证命令
 

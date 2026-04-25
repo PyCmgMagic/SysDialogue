@@ -84,7 +84,7 @@ SysDialogue v9 - Self-check (--verify)
 
 ## 5. 现场演示证据路径
 
-TUI 或 Simple CLI 演示完成后，可收集以下路径作为运行证据：
+TUI 演示完成后，可收集以下路径作为运行证据：
 
 ```powershell
 Get-ChildItem $env:USERPROFILE\.sysdialogue\sessions

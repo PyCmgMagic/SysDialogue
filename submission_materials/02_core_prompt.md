@@ -1,6 +1,6 @@
-# 02. 核心 Prompt 文本
+# 02. 核心 Prompt 结构
 
-核心 Prompt 由 `sysdialogue/agent/prompt.py` 的 `build_system_prompt()` 生成。它由固定规则与动态上下文拼接而成。
+核心 Prompt 由 `sysdialogue/agent/prompt.py` 的 `build_system_prompt()` 生成。本文保留运行时提示词的关键结构和主要片段；动态注入内容会随目标环境、权限策略、Skills、Hooks 和目标画像变化。
 
 ## 1. 顶层身份
 
@@ -72,7 +72,7 @@ Before using OS-facing tools, call set_execution_mode when one of these applies:
 - The request matches a built-in workflow: mode="workflow" with workflow_name and workflow_params.
 - The request is a single direct action: mode="direct" or proceed directly when obvious.
 
-- DynTool is always available, but it is a last resort in standard mode. If static tools or built-in workflows can express the task, do not call propose_dynamic_tool.
+DynTool is always available, but it is a last resort in standard mode. If static tools or built-in workflows can express the task, do not call propose_dynamic_tool.
 - For one-off ad-hoc commands, call execute_dynamic_tool directly with cmd_template/command/argv + args; do not register a persistent tool first.
 - Only use execute_dynamic_tool(tool_id=..., args=...) when the tool_id is a concrete dyn_* ID returned by propose_dynamic_tool or listed under [Reusable DynTools].
 - Never build password-pipe or shell-elevation commands such as echo password | su ... . If a command needs privileges, use argv form with a sudo prefix; SysDialogue will route it through the controlled privileged executor.
