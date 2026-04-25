@@ -37,11 +37,11 @@ flowchart TD
 选择依据：
 
 - 任务是否只读。
-- 是否需要 3 步以上计划。
+- 是否超过 3 个操作步骤。
 - 是否命中安全内置流程。
 - 是否涉及关键文件、服务、网络、用户、权限。
 - 是否处于远程模式。
-- 是否需要回滚和后置验证。
+- 是否涉及回滚和后置验证。
 
 ## 3. 场景 A：只读系统巡检
 
@@ -77,14 +77,14 @@ flowchart TD
 
 - 先观察：`manage_service(name="nginx", action="status")` 或 `read_log`。
 - 动作：`manage_service(name="nginx", action="restart")`。
-- 风险：通常 `WARN-HIGH`，需要审批。
+- 风险：通常为 `WARN-HIGH`，进入审批流程。
 - 验证：再次 `status`，必要时 `check_endpoint`。
 - 完成门：必须满足 observe -> act -> verify -> finish。
 
 失败处理：
 
-- 若 restart 失败，不能直接 completed。
-- 需要读取日志、降级为 failed/partial，或提示下一步。
+- restart 失败时不能直接 completed。
+- 失败后读取日志，降级为 failed/partial，或提示下一步。
 
 ## 5. 场景 C：安全修改配置
 
@@ -140,9 +140,9 @@ flowchart TD
 决策：
 
 - 先尝试静态信息工具。
-- 若确实没有工具覆盖，可使用 `execute_dynamic_tool` inline。
+- 静态工具无法覆盖时，使用 `execute_dynamic_tool` inline。
 - 如果只是一次性命令，不注册 persistent DynTool。
-- 若模型错误声明 `changes_state=false`，系统仍按保守规则重新判定。
+- 模型错误声明 `changes_state=false` 时，系统仍按保守规则重新判定。
 
 ## 8. 场景 F：信息不足
 

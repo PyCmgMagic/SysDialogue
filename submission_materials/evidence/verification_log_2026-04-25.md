@@ -82,7 +82,7 @@ SysDialogue v9 - Self-check (--verify)
 
 结论：runtime 能识别静态工具、元工具、workflow、安全规则和模型接口配置。
 
-## 5. 现场演示证据路径
+## 5. 演示证据路径
 
 TUI 演示完成后，可收集以下路径作为运行证据：
 
@@ -94,7 +94,7 @@ Get-ChildItem $env:USERPROFILE\.sysdialogue\audit
 Get-ChildItem $env:USERPROFILE\.sysdialogue\traces
 ```
 
-提交前需脱敏：
+脱敏要求：
 
 - API Key
 - SSH 私钥和密码

@@ -2,7 +2,7 @@
 
 ## 1. 总体能力
 
-当前运行时注册：
+运行时注册：
 
 - 37 个静态工具
 - 6 个元工具
@@ -69,7 +69,7 @@
 | `propose_dynamic_tool` | 注册可复用 DynTool | 不执行命令，只注册能力；最后手段。 |
 | `execute_dynamic_tool` | 执行已注册或 inline DynTool | 支持 `argv` 与 `shell` 两种模式，走命令安全、风险、权限、审批、审计、ReAct 门。 |
 | `activate_skill` | 激活 Markdown Skill | 只注入说明，不执行 OS 操作。 |
-| `handoff_to_role` | 向内置角色请求结构化建议 | 串行、建议性，不转移执行所有权。 |
+| `handoff_to_role` | 向内置角色请求结构化意见 | 串行、辅助决策，不转移执行所有权。 |
 | `finish_task` | ReAct 任务收口 | 所有 turn 必须以此结束。 |
 
 ## 4. 内置 workflows
@@ -143,4 +143,4 @@ Role Handoff：
 - `risk_reviewer`
 - `toolsmith`
 
-角色给出结构化建议，主 ReAct loop 仍负责执行与安全。
+角色输出结构化意见，主 ReAct loop 仍负责执行与安全。

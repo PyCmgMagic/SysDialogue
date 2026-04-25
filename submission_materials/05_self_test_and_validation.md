@@ -16,11 +16,11 @@ python -m sysdialogue.app.cli --verify
 - compileall 无语法错误。
 - `--verify` 不调用模型 API，输出工具数、workflow 数、安全规则和 OpenAI-compatible 配置状态。
 
-本次执行记录见：`evidence/verification_log_2026-04-25.md`。
+执行记录见：`evidence/verification_log_2026-04-25.md`。
 
 ## 2. 评测指令合集
 
-本节集中放置评测与演示时可直接输入的自然语言指令。基础指令用于展示核心交互闭环，复杂运维指令用于展示安装、部署、配置变更、回滚、Break-glass 和负向安全拦截能力。
+本节集中放置评测与演示使用的自然语言指令。基础指令覆盖核心交互闭环，复杂运维指令覆盖安装、部署、配置变更、回滚、Break-glass 和负向安全拦截能力。
 
 ### 2.1 基础评测指令
 
@@ -101,7 +101,7 @@ tail -n 20 ~/.sysdialogue/audit/<session_id>.jsonl
 
 ## 4. 视频录制脚本
 
-录制 4 段，每段 1-3 分钟。已录制视频放置在 `video/演示视频.mp4`。
+录制 4 段，每段 1-3 分钟。视频文件路径为 `video/演示视频.mp4`。
 
 ### 视频 1：自检与工具清单
 
@@ -109,7 +109,7 @@ tail -n 20 ~/.sysdialogue/audit/<session_id>.jsonl
 python -m sysdialogue.app.cli --verify
 ```
 
-需要展示：
+展示内容：
 
 - 37 static + 6 meta tools。
 - 10 workflows。
@@ -128,7 +128,7 @@ python -m sysdialogue.app.cli
 检查系统版本、负载、磁盘和端口。
 ```
 
-需要展示：
+展示内容：
 
 - 任务卡片分组。
 - 工具执行摘要。
@@ -145,7 +145,7 @@ python -m sysdialogue.app.cli
 
 在 Linux 测试机或远程 SSH 靶机录制。
 
-需要展示：
+展示内容：
 
 - 确认弹窗。
 - `批准本次 / 本会话总是允许 / 拒绝` 三种按钮。
@@ -160,7 +160,7 @@ python -m sysdialogue.app.cli
 把测试配置文件中的 timeout 改成 65，先预览，再备份、修改和验证。
 ```
 
-需要展示：
+展示内容：
 
 - dry-run diff。
 - backup id。
@@ -168,7 +168,7 @@ python -m sysdialogue.app.cli
 - 如果制造失败，展示 rollback。
 
 
-## 5. 预测评测关注点与验证方式
+## 5. 评测关注点与验证方式
 
 | 关注点 | 验证方式 |
 | --- | --- |

@@ -58,7 +58,7 @@ flowchart LR
 - Skills、Hooks、Role Handoff、TargetProfile。
 - TUI 友好错误包装与技术详情折叠。
 
-需要真实环境继续验收：
+真实环境验收项：
 
 - Linux 目标机上的 `safe_config_patch` 端到端。
 - 真实服务 rollback 链路。
@@ -72,10 +72,10 @@ flowchart LR
 
 运维任务通常不是单次调用能完成：
 
-- 需要先观察环境。
-- 需要按结果调整计划。
-- 需要失败后修复或回滚。
-- 需要变更后验证。
+- 先观察环境。
+- 按结果调整计划。
+- 失败后修复或回滚。
+- 变更后验证。
 
 因此系统将每轮用户请求建模为 task：
 
@@ -130,5 +130,5 @@ task_started -> plan/observe -> act -> observe -> repair/continue -> verify -> f
 | 状态存储 | JSON + filelock | 轻量、可审计、易复现。 |
 | 动态工具 | 分配置档控制能力边界 | `standard` 保持保守，`break_glass` 提升复杂任务执行能力，同时保留硬拦截和审计。 |
 | Memory | Markdown + JSON | 第一版不引入向量库，降低复杂度。 |
-| Role Handoff | 串行建议 | 避免并发执行放大锁和审批复杂度。 |
+| Role Handoff | 串行辅助决策 | 避免并发执行放大锁和审批复杂度。 |
 
