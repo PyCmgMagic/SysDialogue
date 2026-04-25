@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import codecs
+import os
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
 try:
     import paramiko
@@ -43,9 +46,9 @@ class RemoteExecutor(SafeExecutor):
         import paramiko
         client = paramiko.SSHClient()
         if self._config.known_hosts_file:
-            client.load_host_keys(self._config.known_hosts_file)
+            _load_host_keys(client, self._config.known_hosts_file, system=False)
         else:
-            client.load_system_host_keys()
+            _load_host_keys(client, None, system=True)
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client.connect(
             hostname=self._config.host,
@@ -96,3 +99,84 @@ class RemoteExecutor(SafeExecutor):
             exit_code=exit_code,
             truncated=truncated,
         )
+
+
+def _load_host_keys(client: "paramiko.SSHClient", filename: str | None, *, system: bool) -> None:
+    path = Path(os.path.expanduser(filename or "~/.ssh/known_hosts"))
+    if not path.exists():
+        if filename is None:
+            return
+        raise FileNotFoundError(str(path))
+
+    target = client._system_host_keys if system else client._host_keys  # noqa: SLF001
+    if not system:
+        client._host_keys_filename = str(path)  # noqa: SLF001
+    _load_known_hosts_file(target, path)
+
+
+def _load_known_hosts_file(host_keys, path: Path) -> None:
+    import paramiko
+    from paramiko.hostkeys import HostKeyEntry
+
+    raw = path.read_bytes()
+    if not raw:
+        return
+
+    for text in _known_hosts_text_candidates(raw):
+        if "\x00" in text[:512]:
+            continue
+        parsed = paramiko.HostKeys()
+        saw_entry_line = False
+        loaded = 0
+        for lineno, line in enumerate(text.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            saw_entry_line = True
+            try:
+                entry = HostKeyEntry.from_line(line, lineno)
+            except paramiko.SSHException:
+                continue
+            if entry is None:
+                continue
+            for hostname in entry.hostnames:
+                parsed.add(hostname, entry.key.get_name(), entry.key)
+                loaded += 1
+        if loaded or not saw_entry_line:
+            _merge_host_keys(host_keys, parsed)
+            return
+
+    raise RuntimeError(
+        f"known_hosts 文件无法解析：{path}。请确认它是 OpenSSH known_hosts 格式。"
+    )
+
+
+def _known_hosts_text_candidates(raw: bytes) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(text: str) -> None:
+        text = text.lstrip("\ufeff")
+        if text not in seen:
+            seen.add(text)
+            candidates.append(text)
+
+    for encoding in ("utf-8-sig", "utf-16", "utf-8"):
+        try:
+            add(raw.decode(encoding))
+        except UnicodeDecodeError:
+            pass
+
+    stripped = raw
+    for bom in (codecs.BOM_UTF8, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
+        if stripped.startswith(bom):
+            stripped = stripped[len(bom):]
+            break
+    add(stripped.decode("utf-8", errors="replace"))
+    return candidates
+
+
+def _merge_host_keys(target, source) -> None:
+    for entry in source._entries:  # noqa: SLF001
+        for hostname in entry.hostnames:
+            target.add(hostname, entry.key.get_name(), entry.key)

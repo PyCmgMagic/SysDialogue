@@ -207,14 +207,19 @@ class WebSession:
                 raise RuntimeError("当前存在待确认/待输入请求，不能切换目标机器")
             new_config = _target_config_from_payload(self.config, payload)
             old_runtime = self.runtime
-            new_runtime = create_runtime(
-                new_config,
-                session_id=self.session_id,
-                require_api=True,
-                confirm_callback=self._confirm_callback,
-                input_callback=self._input_callback,
-                surface="web",
-            )
+            try:
+                new_runtime = create_runtime(
+                    new_config,
+                    session_id=self.session_id,
+                    require_api=True,
+                    confirm_callback=self._confirm_callback,
+                    input_callback=self._input_callback,
+                    surface="web",
+                )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"SSH 连接失败：{exc}") from exc
             new_runtime.controller.event_callback = self._event_callback
             self.runtime = new_runtime
             self.config = new_config
