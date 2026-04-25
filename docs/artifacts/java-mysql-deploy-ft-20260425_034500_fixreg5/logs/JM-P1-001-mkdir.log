@@ -1,7 +1,0 @@
-$ rm -rf '/tmp/sdft_20260425_034500_fixreg5_java_mysql'; mkdir -p '/tmp/sdft_20260425_034500_fixreg5_java_mysql/source'
-exit=0
-
-STDOUT:
-
-
-STDERR:

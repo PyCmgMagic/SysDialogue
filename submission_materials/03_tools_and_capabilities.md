@@ -67,7 +67,7 @@
 | --- | --- | --- |
 | `set_execution_mode` | 声明 direct / plan / workflow | 多步任务和命中 workflow 时使用。 |
 | `propose_dynamic_tool` | 注册可复用 DynTool | 不执行命令，只注册能力；最后手段。 |
-| `execute_dynamic_tool` | 执行已注册或 inline DynTool | 走命令安全、风险、权限、审批、审计、ReAct 门。 |
+| `execute_dynamic_tool` | 执行已注册或 inline DynTool | 支持 `argv` 与 `shell` 两种模式，走命令安全、风险、权限、审批、审计、ReAct 门。 |
 | `activate_skill` | 激活 Markdown Skill | 只注入说明，不执行 OS 操作。 |
 | `handoff_to_role` | 向内置角色请求结构化建议 | 串行、建议性，不转移执行所有权。 |
 | `finish_task` | ReAct 任务收口 | 所有 turn 必须以此结束。 |
@@ -89,7 +89,22 @@
 
 ## 5. DynTool 策略
 
-DynTool 始终开启，但只能作为最后手段：
+DynTool 始终开启，用于覆盖静态工具和 workflow 之外的命令执行需求。
+
+执行模式：
+
+- `argv`：参数数组模式，默认模式，适合结构化命令。
+- `shell`：shell 字符串模式，适合管道、重定向和复合命令；由安全配置档控制。
+
+安全配置档：
+
+| 配置档 | 行为 |
+| --- | --- |
+| `standard` | 静态工具和 workflow 优先；DynTool 默认需要确认。 |
+| `operator` | 允许受控 shell DynTool；SAFE/WARN-LOW 可直接执行，WARN-HIGH 仍需确认。 |
+| `break_glass` | DynTool 可作为复杂任务的高能力执行通道；非 HARD-BLOCK 风险自动放行。 |
+
+使用原则：
 
 - 静态工具能覆盖时，优先静态工具。
 - workflow 能覆盖时，优先 workflow。
@@ -97,6 +112,15 @@ DynTool 始终开启，但只能作为最后手段：
 - 可复用命令族才使用 `propose_dynamic_tool`。
 - 未能证明只读的动态命令，按可能变更状态处理。
 - 变更型 DynTool 必须完成后置验证才能 `completed`。
+
+硬拦截不随配置档关闭：
+
+- 密码管道或凭证泄露式提权。
+- 交互式 `su` / `runuser`。
+- 凭证文件读取。
+- 明显毁盘命令。
+- 根目录或核心系统目录删除。
+- 远程 SSH 自锁操作。
 
 ## 6. Skills / Hooks / Role Handoff
 
@@ -120,4 +144,3 @@ Role Handoff：
 - `toolsmith`
 
 角色给出结构化建议，主 ReAct loop 仍负责执行与安全。
-

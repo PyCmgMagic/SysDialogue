@@ -1,4 +1,4 @@
-# 07. Review Findings 闭环说明
+# 07. 审查问题闭环说明
 
 本文件用于解释用户列出的 review findings 在当前提交材料中的处理口径。代码证据以当前 `main` 为准。
 
@@ -25,7 +25,7 @@
 | 19 | Trace 脱敏漏 generic string | TraceStore 复用敏感字符串脱敏，对 output/error/summary 生效。 | `sysdialogue/agent/trace_store.py`；`tests/test_agent_upgrade_features.py` |
 | 20 | `/resume` 记录合成用户输入 | transcript 保留用户显式 `/resume`，恢复目标作为 internal metadata。 | `sysdialogue/agent/controller.py`；`tests/test_react_runner.py` |
 
-## 提交材料中的说明建议
+## 提交材料说明口径
 
 - 不把 `framework/claudeplan6.md` 作为当前实现依据；只说明它是历史文档。
 - 若评委问到 review findings，应展示本文件和对应测试。

@@ -27,3 +27,7 @@ _test_*.py
 *.log
 .DS_Store
 Thumbs.db
+
+# Local demo videos
+video/*.mp4
+*.mp4

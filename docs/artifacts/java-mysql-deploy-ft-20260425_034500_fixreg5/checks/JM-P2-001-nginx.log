@@ -1,7 +1,0 @@
-$ command -v nginx && nginx -t 2>&1 || true
-exit=0
-
-STDOUT:
-
-
-STDERR:

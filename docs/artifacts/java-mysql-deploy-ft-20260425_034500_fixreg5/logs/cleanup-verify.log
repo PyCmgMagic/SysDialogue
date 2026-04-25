@@ -1,8 +1,0 @@
-$ set +e; systemctl status sdft_20260425_034500_fixreg5_java.service --no-pager >/dev/null 2>&1; echo service_status=$?; docker ps -a --filter name=sdft_20260425_034500_fixreg5_mysql --format '{{.Names}}'; id sdft_0260425034500fixreg5u 2>/dev/null || true; find /tmp /opt -maxdepth 1 -name 'sdft_20260425_034500_fixreg5*' -print 2>/dev/null; ss -ltnp | grep -E ':18082|:13382' || true
-exit=0
-
-STDOUT:
-service_status=4
-
-
-STDERR:

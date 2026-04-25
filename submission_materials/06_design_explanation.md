@@ -51,6 +51,8 @@ flowchart LR
 - 动态迭代预算。
 - TUI / Simple CLI。
 - 远程 SSH 执行。
+- `standard` / `operator` / `break_glass` 三档安全配置。
+- DynTool `argv` / `shell` 双执行模式。
 - SessionStore / TaskStore / LockStore。
 - PermissionPolicy、MemoryManager、TraceStore。
 - Skills、Hooks、Role Handoff、TargetProfile。
@@ -97,10 +99,12 @@ task_started -> plan/observe -> act -> observe -> repair/continue -> verify -> f
 
 设计取舍：
 
-- 始终开启，保证复杂任务可完成。
+- `standard` 模式下静态工具和 workflow 优先。
+- `break_glass` 模式下面向应急复杂任务，DynTool 可作为高能力执行通道。
 - 优先 inline one-shot，避免同一任务创建几十个参数不同的动态工具。
 - 可复用命令族才注册。
 - 未证明只读时按变更处理。
+- 硬拦截规则始终有效。
 
 ### 4.4 为什么使用 JSON + filelock
 
@@ -124,7 +128,7 @@ task_started -> plan/observe -> act -> observe -> repair/continue -> verify -> f
 | Agent 框架 | 自研轻量 runtime | 保持安全门、OpenAI-compatible、workflow 与持久化状态可控。 |
 | 前端 | Textual | 避免引入复杂前端构建系统，便于演示和部署。 |
 | 状态存储 | JSON + filelock | 轻量、可审计、易复现。 |
-| 动态工具 | 始终开启但最后手段 | 保证能力上限，同时用安全链限制风险。 |
+| 动态工具 | 分配置档控制能力边界 | `standard` 保持保守，`break_glass` 提升复杂任务执行能力，同时保留硬拦截和审计。 |
 | Memory | Markdown + JSON | 第一版不引入向量库，降低复杂度。 |
 | Role Handoff | 串行建议 | 避免并发执行放大锁和审批复杂度。 |
 

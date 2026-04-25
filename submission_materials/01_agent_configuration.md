@@ -29,6 +29,7 @@ OPENAI_API_KEY=<redacted>
 OPENAI_BASE_URL=
 OPENAI_MODEL=
 SYSDIALOGUE_MAX_ITER=160
+SYSDIALOGUE_SAFETY_PROFILE=standard
 ```
 
 说明：
@@ -36,6 +37,7 @@ SYSDIALOGUE_MAX_ITER=160
 - `OPENAI_API_KEY` 不应写入提交材料；所有文档只保留 `<redacted>`。
 - `OPENAI_BASE_URL` 可为空；为空时使用 SDK 默认地址。
 - `SYSDIALOGUE_MAX_ITER` 是 ReAct 硬上限，任务级预算会动态裁剪。
+- `SYSDIALOGUE_SAFETY_PROFILE` 支持 `standard`、`operator`、`break_glass`。
 
 ## 3. 运行入口
 
@@ -51,6 +53,9 @@ python -m sysdialogue.app.cli
 
 # Simple CLI
 python -m sysdialogue.app.cli --simple
+
+# Break-glass 模式
+python -m sysdialogue.app.cli --break-glass
 
 # 计划任务回调
 python -m sysdialogue.app.cli --run-scheduled-job <job_id>
@@ -108,7 +113,15 @@ python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\AS
 - `SAFE`：只读或元数据操作，自动执行并审计。
 - `WARN-LOW`：低风险，记录风险提示和审计。
 - `WARN-HIGH`：高风险，必须用户审批。
-- `BLOCK`：不可覆盖，直接拒绝。
+- `HARD-BLOCK`：不可覆盖，直接拒绝。
+
+安全配置档：
+
+| 配置档 | 用途 |
+| --- | --- |
+| `standard` | 默认模式，动态命令确认和阻断策略最保守。 |
+| `operator` | 受控运维模式，放宽部分低风险动态命令。 |
+| `break_glass` | 应急高能力模式，允许 DynTool shell 字符串、管道、重定向和复合命令；HARD-BLOCK 仍直接拒绝。 |
 
 审批返回值：
 
