@@ -1,28 +1,27 @@
-# SysDialogue Running Guide
+# SysDialogue 部署运行说明
 
-## Baseline
+## 1. 说明
 
-- Active design baseline: `framework/claudeplan9.md`
-- Historical reference only: `framework/claudeplan6.md`, `framework/claudeplan7.md`, and `framework/claudeplan8.md`
+本文档用于说明 SysDialogue 的安装、配置、启动、远程连接、权限模式和验证方法。
 
-This guide explains how to install, configure, run, and verify the current SysDialogue runtime.
+实现以 `framework/claudeplan9.md` 为设计基线。`framework/claudeplan6.md`、`framework/claudeplan7.md`、`framework/claudeplan8.md` 仅作为历史参考。
 
-## 1. Requirements
+## 2. 环境要求
 
 - Python `>= 3.11`
-- Recommended host: Linux
-- Windows is supported as a control plane for TUI / `--verify`
-- Remote target host should be Linux and reachable over SSH
+- 运行环境：Linux 优先
+- Windows 可作为控制端运行 TUI 和 `--verify`
+- 远程目标主机需支持 SSH 访问，优先使用 Linux 服务器
 
-## 2. Install
+## 3. 安装
 
-From the repository root:
+进入项目根目录：
 
 ```powershell
 cd D:\项目\Nexus
 ```
 
-### Windows PowerShell
+### 3.1 Windows PowerShell
 
 ```powershell
 py -3.11 -m venv .venv
@@ -32,14 +31,14 @@ python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ```
 
-If PowerShell blocks activation:
+如 PowerShell 限制脚本执行，可在当前进程临时放开：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-### Linux / macOS
+### 3.2 Linux / macOS
 
 ```bash
 python3.11 -m venv .venv
@@ -49,18 +48,18 @@ python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ```
 
-## 3. API Configuration
+## 4. 接口配置
 
-Interactive entrypoints require:
+交互式入口需要以下配置：
 
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
 
-Optional:
+可选配置：
 
 - `OPENAI_BASE_URL`
 
-### Environment variables
+### 4.1 环境变量
 
 ```powershell
 $env:OPENAI_API_KEY="your_api_key"
@@ -68,9 +67,9 @@ $env:OPENAI_BASE_URL="https://your-openai-compatible-endpoint/v1"
 $env:OPENAI_MODEL="your-model-name"
 ```
 
-### `.env`
+### 4.2 `.env` 文件
 
-Create `.env` in the repo root:
+在项目根目录创建 `.env`：
 
 ```dotenv
 OPENAI_API_KEY=your_api_key
@@ -79,113 +78,151 @@ OPENAI_MODEL=your-model-name
 SYSDIALOGUE_MAX_ITER=160
 ```
 
-`SYSDIALOGUE_MAX_ITER` is the hard upper bound for ReAct iteration budgets.
-Per-task budgets are dynamic:
+`SYSDIALOGUE_MAX_ITER` 用于限制单个任务的最大迭代次数。任务预算会按场景动态调整：
 
-- casual / explanatory tasks: about `20`
-- normal operational tasks: about `80`
-- complex mutation / workflow / DynTool tasks: about `140`
+- 问答、说明类任务：约 `20`
+- 常规运维任务：约 `80`
+- 复杂变更、工作流、DynTool 任务：约 `140`
 
-All of them are clamped to `20..300`.
+最终取值限制在 `20..300`。
 
-## 3.1 Skills, Hooks, And Profiles
+## 5. 扩展配置
 
-Optional local extensions:
+SysDialogue 支持项目级和用户级扩展：
 
-- Project skills: `.sysdialogue/skills/<name>/SKILL.md`
-- User skills: `~/.sysdialogue/skills/<name>/SKILL.md`
-- Project hooks: `.sysdialogue/hooks.json`
-- User hooks: `~/.sysdialogue/hooks.json`
-- Target profiles: `~/.sysdialogue/targets/`
+- 项目 Skill：`.sysdialogue/skills/<name>/SKILL.md`
+- 用户 Skill：`~/.sysdialogue/skills/<name>/SKILL.md`
+- 项目 Hook：`.sysdialogue/hooks.json`
+- 用户 Hook：`~/.sysdialogue/hooks.json`
+- 目标机器配置：`~/.sysdialogue/targets/`
 
-Skills inject playbook instructions only. Hooks can notify, inject read-only context, or run a bounded command through the DynTool safety chain.
+Skill 用于补充操作流程和领域规则。Hook 可用于通知、上下文注入或受控命令执行。
 
-## 4. Git Preflight
+## 6. 安全配置档
 
-Before a development round:
+安全配置由 `SYSDIALOGUE_SAFETY_PROFILE` 控制：
+
+```powershell
+$env:SYSDIALOGUE_SAFETY_PROFILE="standard"
+```
+
+可选值：
+
+- `standard`：默认配置，执行限制最严格。
+- `operator`：面向受控运维场景，适度放宽操作能力。
+- `break_glass`：应急高能力模式，允许 DynTool 执行 shell 字符串、管道、重定向和复合命令，并默认跳过动态命令确认。
+
+也可通过命令行启用 break-glass：
+
+```powershell
+python -m sysdialogue.app.cli --break-glass
+```
+
+兼容旧配置：
+
+```powershell
+$env:SYSDIALOGUE_OPERATOR_MODE="1"
+```
+
+该配置等价于 `operator`。
+
+以下操作始终拦截：
+
+- 凭证、密码泄露式提权
+- 交互式 `su` / `runuser`
+- 明显毁盘命令
+- 删除根目录或核心系统目录
+- 远端 SSH 自锁操作
+- 远端防火墙断开 SSH
+- 关闭审计或绕过审计链路
+
+## 7. Git 预检
+
+开发或演示前可执行：
 
 ```powershell
 python scripts\git_preflight.py
 ```
 
-This checks:
+检查内容：
 
-- current branch and worktree state
-- `git fetch --all --prune`
-- safe `git pull --rebase` only when allowed
+- 当前分支
+- 工作区状态
+- 远端同步状态
+- 条件允许时执行安全的 `git pull --rebase`
 
-## 5. Main Entrypoints
+## 8. 启动方式
 
-### Verify
+### 8.1 安装检查
 
-No LLM call. Safe to run without API credentials.
+不调用模型接口，可直接用于环境验证：
 
 ```powershell
 python -m sysdialogue.app.cli --verify
 ```
 
-### Demo
+### 8.2 内置演示
 
-Runs the built-in `security_audit` workflow without using the model API.
+运行内置 `security_audit` 工作流：
 
 ```powershell
 python -m sysdialogue.app.cli --demo
 ```
 
-Notes:
+本地 demo 面向 Linux。Windows 环境下会返回不支持提示。
 
-- local demo is intended for Linux
-- on Windows, `--demo` should return an unsupported-host message instead of a crash
-
-### TUI
+### 8.3 TUI
 
 ```powershell
 python -m sysdialogue.app.cli
 ```
 
-### Scheduled Job Callback
+### 8.4 定时任务回调
 
 ```powershell
 python -m sysdialogue.app.cli --run-scheduled-job <job_id>
 ```
 
-## 6. Remote SSH Mode
+## 9. 远程 SSH 模式
 
-Run the control plane locally, but execute tools against a remote Linux host:
+控制端在本机运行，命令执行目标切换到远程 Linux 主机：
 
 ```powershell
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key C:\Users\ASUS\.ssh\id_ed25519
 ```
 
-Password authentication is also supported. Prefer the environment variable so the
-password is not stored in shell history:
+密码认证：
 
 ```powershell
 $env:SYSDIALOGUE_SSH_PASSWORD="your_ssh_password"
 python -m sysdialogue.app.cli --remote user@example.com:22
 ```
 
-For quick local testing you can also pass `--ssh-password your_ssh_password`.
+本地临时测试也可直接传入密码：
 
-Important:
+```powershell
+python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-password your_ssh_password
+```
 
-- `--remote` changes the execution target
-- first-time SSH hosts are automatically trusted and appended to `known_hosts`;
-  changed host keys are still rejected
+说明：
 
-## 7. TUI Shortcuts
+- `--remote` 只改变工具执行目标。
+- 首次连接的 SSH 主机会写入 `known_hosts`。
+- 主机密钥发生变化时，连接会被拒绝。
 
-- `F2`: open conversation history
-- `F3`: audit panel
-- `F4`: environment panel
-- `Ctrl+C`: cancel the current task / workflow
-- `Ctrl+D`: exit
+## 10. TUI 快捷键
 
-TUI history restores reusable context only. It does not replay historical tool execution.
+- `F2`：会话历史
+- `F3`：审计面板
+- `F4`：环境面板
+- `Ctrl+C`：取消当前任务或工作流
+- `Ctrl+D`：退出
 
-## 8. Shared Durable State
+历史会话只恢复上下文，不重放历史命令。
 
-SysDialogue now persists shared state under `~/.sysdialogue/`:
+## 11. 持久化数据
+
+运行状态保存在 `~/.sysdialogue/`：
 
 - `sessions/`
 - `tasks/`
@@ -196,17 +233,11 @@ SysDialogue now persists shared state under `~/.sysdialogue/`:
 - `commands/`
 - `targets/`
 
-What this means:
+这些数据在 TUI 与定时任务之间共享。重启后，已过期的活跃任务会标记为 `interrupted`；待确认和待输入内容不会自动重放。
 
-- sessions survive restart at the persisted state layer
-- stale active tasks become `interrupted`
-- cross-process resource locks are durable leases
-- pending confirmations / input are not replayed after restart
-- permission policy, memory, and trace spans are shared across TUI / scheduled jobs
+## 12. 控制命令
 
-## 9. Slash Commands
-
-The interactive entrypoints support shared control-plane commands:
+交互式入口支持以下命令：
 
 ```text
 /status
@@ -227,7 +258,7 @@ The interactive entrypoints support shared control-plane commands:
 /why [tool]
 ```
 
-Examples:
+示例：
 
 ```text
 /status
@@ -238,48 +269,60 @@ Examples:
 /target set maintenance_window=Sunday 02:00
 ```
 
-## 10. ReAct Runtime Rules
+## 13. 执行规则
 
-Every task now runs through task-level ReAct.
+每个任务均通过 ReAct runtime 执行。核心规则如下：
 
-Key rules:
+- 任务完成必须调用 `finish_task`。
+- 运维任务完成前必须读取环境状态。
+- 变更任务完成前必须执行后置验证。
+- 失败的变更不会记录为成功变更。
 
-- plain natural-language completion is invalid
-- final closure must use `finish_task`
-- operational tasks must observe environment state before `completed`
-- mutation tasks must verify after change before `completed`
-- failed mutations do not count as successful changes
+## 14. 权限、记忆与 Trace
 
-## 11. Permission / Memory / Trace
+- 权限策略文件：`~/.sysdialogue/policy.json`
+- 记忆文件目录：`~/.sysdialogue/memory/`
+- Trace 文件目录：`~/.sysdialogue/traces/`
 
-- `PermissionPolicy` supports `allow / ask / deny` rules in `~/.sysdialogue/policy.json`.
-- Static tools keep the existing RiskClassifier behavior unless a stricter policy rule matches.
-- DynTool commands still ask by default and cannot bypass `BLOCK`.
-- `MemoryManager` stores layered reusable facts under `~/.sysdialogue/memory/` and redacts obvious secrets.
-- `TraceStore` writes JSONL spans under `~/.sysdialogue/traces/` for observability and replay support.
+`PermissionPolicy` 支持 `allow / ask / deny`。静态工具保留默认风险分类行为，除非命中更严格的策略规则。记忆写入前会对明显敏感信息做脱敏处理。Trace 以 JSONL 形式记录执行过程，便于审计和复盘。
 
-## 12. DynTool
+## 15. DynTool
 
-DynTool is always enabled, but still last-resort.
+DynTool 支持两种执行模式：
 
-Use order:
+- `argv`：参数数组模式，适合结构化命令。
+- `shell`：shell 字符串模式，适合复合命令、管道和重定向。
 
-1. static tools
-2. built-in workflows
-3. inline `execute_dynamic_tool` for one-off commands
-4. `propose_dynamic_tool` only for reusable command families
+执行顺序：
 
-DynTool execution still passes through:
+1. 静态工具
+2. 内置 workflow
+3. inline `execute_dynamic_tool`
+4. `propose_dynamic_tool`
 
-- command safety
-- semantic risk mapping
-- user confirmation
-- audit
-- ReAct completion gates
+不同安全配置档的 DynTool 行为：
 
-## 13. Validation Commands
+- `standard`：默认确认，高风险命令严格限制。
+- `operator`：允许更多受控运维操作，保留较强确认和阻断。
+- `break_glass`：允许 shell 字符串、管道、重定向、复合命令和受控 sudo；多数语义阻断降级为高风险告警。
 
-Recommended regression commands:
+所有模式均保留：
+
+- 命令安全判断
+- 语义风险映射
+- 审计记录
+- 完成门禁
+- 变更后验证
+
+## 16. TUI
+
+- 终端交互界面
+- 提供任务卡片、审计面板、环境面板
+- 支持折叠技术细节
+
+## 17. 验证命令
+
+回归命令：
 
 ```powershell
 python -m pytest -q
@@ -287,60 +330,72 @@ python -m compileall -q sysdialogue tests
 python -m sysdialogue.app.cli --verify
 ```
 
-## 14. Known Real-Host Validation Gaps
+Break-glass 回归：
 
-Still worth validating on a real Linux machine:
+```powershell
+$env:SYSDIALOGUE_SAFETY_PROFILE="break_glass"
+python -m pytest -q
+python -m sysdialogue.app.cli --verify
+```
+
+真实 Linux 主机补充验证：
 
 - `safe_config_patch`
-- rollback chains on real services
-- remote mutation + verify flows
-- system cron execution
-- lock contention between TUI / scheduled jobs
+- 真实服务回滚链路
+- 远程变更与后置验证
+- 系统 cron 执行
+- TUI / scheduled job 锁竞争
+- shell DynTool、远程 shell DynTool、受控 sudo shell
 
-## 16. Troubleshooting
+## 18. 故障排查
 
-### Missing API config
+### 18.1 缺少接口配置
 
-If TUI refuses to start:
+检查：
 
-- check `OPENAI_API_KEY`
-- check `OPENAI_MODEL`
-- if using a compatible proxy, check `OPENAI_BASE_URL`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `OPENAI_BASE_URL`
 
-### Model does not use tools
+### 18.2 工具调用失败
 
-If the task fails with a ReAct protocol error:
+检查：
 
-- confirm the model supports Chat Completions `tool_calls`
-- try a smaller operational request
+- 当前模型是否支持 `tool_calls`
+- 任务描述是否过于宽泛
+- 是否命中权限策略或安全拦截
 
-### Local demo unsupported
+### 18.3 本地 demo 不支持
 
-If `--demo` says unsupported on Windows:
+Windows 本地运行 `--demo` 返回不支持提示属于预期行为。请在 Linux 上运行，或连接远程 Linux 目标机。
 
-- that is expected
-- run the demo on Linux or against a remote Linux host
+### 18.4 远程 SSH 无法连接
 
-### Remote SSH cannot connect
-
-Check:
+检查：
 
 - host / port / user
-- SSH private key path
-- host trust in `known_hosts`
+- SSH 私钥路径
+- `known_hosts`
+- 密码或密钥权限
+- 目标机 SSH 服务状态
 
-## 15. Quick Start
+## 19. 快速开始
 
-### Local verify
+### 19.1 本地验证
 
 ```powershell
 python scripts\git_preflight.py
 python -m sysdialogue.app.cli --verify
 ```
 
-### Local TUI
+### 19.2 本地 TUI
 
 ```powershell
 python -m sysdialogue.app.cli
 ```
 
+### 19.3 本地 Break-glass TUI
+
+```powershell
+python -m sysdialogue.app.cli --break-glass
+```
