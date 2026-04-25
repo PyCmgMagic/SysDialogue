@@ -1,4 +1,4 @@
-"""Slash command layer shared by TUI, Web, and Simple CLI."""
+"""Slash command layer shared by TUI and Web."""
 
 from __future__ import annotations
 

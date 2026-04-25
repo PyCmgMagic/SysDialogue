@@ -118,7 +118,7 @@ Target profiles record reusable facts about the current local or SSH target unde
 
 ## 8. Slash Commands
 
-Shared commands across TUI, Web, and Simple CLI:
+Shared commands across TUI and Web:
 
 - `/status`
 - `/resume`

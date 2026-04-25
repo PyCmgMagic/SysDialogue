@@ -26,7 +26,6 @@ This document is now a historical baseline. The current design baseline is `clau
 Supported entrypoints:
 
 - TUI
-- Simple CLI
 - Web console
 - scheduled jobs / cron callback
 - verify / demo helper entrypoints
@@ -237,7 +236,7 @@ User-facing errors must use a shared presentation model:
 
 Requirements:
 
-- TUI / Web / Simple CLI show friendly summaries by default
+- TUI / Web show friendly summaries by default
 - tracebacks and raw API errors stay in technical details
 - ReAct protocol failures must not expose internal correction chatter directly
 
@@ -256,11 +255,6 @@ Requirements:
 - session state must survive process restarts at the persisted layer
 - transcript must not dump raw tracebacks into the visible chat stream
 
-### Simple CLI
-
-- lightweight surface
-- no dedicated history UI
-- still writes to shared session/task stores
 
 ### Scheduled Jobs
 

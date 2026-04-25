@@ -5,7 +5,6 @@
   sysdialogue --verify               系统自检（不调 API）
   sysdialogue --demo                 演示 security_audit 工作流（不调 API）
   sysdialogue --remote user@host     远程模式（SSH）
-  sysdialogue --simple               启动 stdin/stdout 轻量 CLI
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ import click
 from sysdialogue.app.config import load_config
 from sysdialogue.app.jobs import run_scheduled_job
 from sysdialogue.app.runtime_factory import create_runtime
-from sysdialogue.app.simple_cli import run_simple_cli
 from sysdialogue.app.verify import run_demo, run_verify
 from sysdialogue.audit.serializers import export_audit_jsonl, export_replay_package
 from sysdialogue.audit.trace_store import AuditLog
@@ -44,7 +42,6 @@ from sysdialogue.audit.trace_store import AuditLog
               help="Export sanitized replay ZIP for a session id")
 @click.option("--export-dir", "export_dir", type=click.Path(file_okay=False),
               help="Directory for audit/replay exports")
-@click.option("--simple", is_flag=True, help="启动 stdin/stdout 轻量 CLI")
 @click.option("--break-glass", "break_glass", is_flag=True,
               help="Enable the explicit break_glass safety profile for DynTool shell execution.")
 def main(verify: bool, demo: bool, remote: str | None,
@@ -53,7 +50,6 @@ def main(verify: bool, demo: bool, remote: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
          export_audit_session: str | None, export_replay_session: str | None,
          export_dir: str | None,
-         simple: bool,
          break_glass: bool) -> None:
     """SysDialogue v9 — Linux 服务器运维智能代理。"""
 
@@ -99,9 +95,6 @@ def main(verify: bool, demo: bool, remote: str | None,
         sys.exit(run_demo(config))
     if scheduled_job_id:
         sys.exit(run_scheduled_job(config, scheduled_job_id))
-    if simple:
-        _require_api_config(config, "Simple CLI")
-        sys.exit(run_simple_cli(config))
 
     # 启动 TUI
     _require_api_config(config, "TUI")

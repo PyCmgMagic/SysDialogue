@@ -120,7 +120,7 @@ These profiles constrain prompt intent and tool choice. They are not permission 
 
 ## 10. Surfaces
 
-TUI, Web, Simple CLI, and scheduled jobs share the same controller services:
+TUI, Web, and scheduled jobs share the same controller services:
 
 - same session/task/lock semantics
 - same permission policy

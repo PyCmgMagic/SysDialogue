@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    UI["TUI / Simple CLI / Cron"] --> Runtime["runtime_factory"]
+    UI["TUI / Cron"] --> Runtime["runtime_factory"]
     Runtime --> Controller["AgentController"]
     Controller --> ReAct["ReActRunner"]
     ReAct --> LLM["OpenAI-compatible Chat Completions"]
@@ -49,7 +49,7 @@ flowchart LR
 - 10 个 workflow。
 - ReAct 任务级闭环。
 - 动态迭代预算。
-- TUI / Simple CLI。
+- TUI。
 - 远程 SSH 执行。
 - SessionStore / TaskStore / LockStore。
 - PermissionPolicy、MemoryManager、TraceStore。

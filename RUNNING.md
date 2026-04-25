@@ -11,7 +11,7 @@ This guide explains how to install, configure, run, and verify the current SysDi
 
 - Python `>= 3.11`
 - Recommended host: Linux
-- Windows is supported as a control plane for TUI / Simple CLI / `--verify`
+- Windows is supported as a control plane for TUI / `--verify`
 - Remote target host should be Linux and reachable over SSH
 
 ## 2. Install
@@ -143,12 +143,6 @@ Notes:
 python -m sysdialogue.app.cli
 ```
 
-### Simple CLI
-
-```powershell
-python -m sysdialogue.app.cli --simple
-```
-
 ### Scheduled Job Callback
 
 ```powershell
@@ -208,7 +202,7 @@ What this means:
 - stale active tasks become `interrupted`
 - cross-process resource locks are durable leases
 - pending confirmations / input are not replayed after restart
-- permission policy, memory, and trace spans are shared across TUI / Simple CLI
+- permission policy, memory, and trace spans are shared across TUI / scheduled jobs
 
 ## 9. Slash Commands
 
@@ -283,21 +277,7 @@ DynTool execution still passes through:
 - audit
 - ReAct completion gates
 
-## 13. TUI / Simple CLI Differences
-
-### TUI
-
-- richest interaction model
-- task cards for `thinking / tools / verification / result / errors`
-- collapsible technical details
-
-### Simple CLI
-
-- lightweight terminal mode
-- same safety/runtime semantics
-- writes to the same shared stores
-
-## 14. Validation Commands
+## 13. Validation Commands
 
 Recommended regression commands:
 
@@ -307,7 +287,7 @@ python -m compileall -q sysdialogue tests
 python -m sysdialogue.app.cli --verify
 ```
 
-## 15. Known Real-Host Validation Gaps
+## 14. Known Real-Host Validation Gaps
 
 Still worth validating on a real Linux machine:
 
@@ -321,7 +301,7 @@ Still worth validating on a real Linux machine:
 
 ### Missing API config
 
-If TUI / Simple CLI refuses to start:
+If TUI refuses to start:
 
 - check `OPENAI_API_KEY`
 - check `OPENAI_MODEL`
