@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.state_store import SessionStore, TaskStore
-from sysdialogue.web.service import WebSession, _process_alive, _target_config_from_payload
+from sysdialogue.web.service import WebSession, _process_alive, _target_config_from_payload, _target_payload
 
 
 def _fake_web_session(session_id: str, session_store: SessionStore, task_store: TaskStore) -> WebSession:
@@ -146,6 +146,7 @@ def test_web_target_config_payload_supports_local_and_ssh(tmp_path) -> None:
             "host": "example.com",
             "user": "root",
             "port": "2222",
+            "password": "secret",
             "ssh_key_file": str(key),
         },
     )
@@ -155,9 +156,11 @@ def test_web_target_config_payload_supports_local_and_ssh(tmp_path) -> None:
     assert remote.ssh_host == "example.com"
     assert remote.ssh_port == 2222
     assert remote.ssh_user == "root"
+    assert remote.ssh_password == "secret"
     assert remote.ssh_key_file == str(key)
     assert local.remote_mode is False
     assert local.ssh_host == ""
+    assert local.ssh_password == ""
 
 
 def test_web_target_config_rejects_incomplete_ssh_payload() -> None:
@@ -169,3 +172,19 @@ def test_web_target_config_rejects_incomplete_ssh_payload() -> None:
         assert "SSH 用户名不能为空" in str(exc)
     else:
         raise AssertionError("expected incomplete SSH target to fail")
+
+
+def test_web_target_payload_does_not_expose_ssh_password() -> None:
+    config = AppConfig(
+        remote_mode=True,
+        ssh_host="example.com",
+        ssh_port=22,
+        ssh_user="root",
+        ssh_password="secret",
+    )
+
+    payload = _target_payload(config, {"os": "linux"})
+
+    assert payload["password_configured"] is True
+    assert "password" not in payload
+    assert "secret" not in str(payload)

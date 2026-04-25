@@ -481,11 +481,13 @@ def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> A
         new_config.ssh_port = 22
         new_config.ssh_user = ""
         new_config.ssh_key_file = ""
+        new_config.ssh_password = ""
         return new_config
 
     host = str(payload.get("host") or "").strip()
     user = str(payload.get("user") or "").strip()
     key_file = str(payload.get("ssh_key_file") or payload.get("key_file") or "").strip()
+    password = str(payload.get("password") or "").strip()
     raw_port = payload.get("port") or 22
     try:
         port = int(raw_port)
@@ -504,6 +506,7 @@ def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> A
     new_config.ssh_port = port
     new_config.ssh_user = user
     new_config.ssh_key_file = os.path.expanduser(key_file) if key_file else ""
+    new_config.ssh_password = password
     return new_config
 
 
@@ -521,6 +524,7 @@ def _target_payload(config: AppConfig, env_profile: dict[str, Any]) -> dict[str,
         "port": config.ssh_port if config.remote_mode else 22,
         "user": config.ssh_user if config.remote_mode else "",
         "ssh_key_file": config.ssh_key_file if config.remote_mode else "",
+        "password_configured": bool(config.remote_mode and config.ssh_password),
         "remote_mode": bool(config.remote_mode),
         "env": {
             "os": env_profile.get("os", "unknown"),

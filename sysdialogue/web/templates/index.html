@@ -80,7 +80,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 .target-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .target-mode { display: flex; gap: 10px; align-items: center; font-size: 11px; }
-.target-form input[type="text"], .target-form input[type="number"] {
+.target-form input[type="text"], .target-form input[type="number"], .target-form input[type="password"] {
   width: 100%; border: 1px solid var(--border); border-radius: 5px;
   padding: 5px 7px; font-size: 11px; font-family: var(--mono);
 }
@@ -273,6 +273,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
           <input id="target-host" type="text" placeholder="host，例如 192.168.1.10">
           <input id="target-user" type="text" placeholder="user，例如 root">
           <input id="target-port" type="number" min="1" max="65535" value="22" placeholder="port">
+          <input id="target-password" type="password" placeholder="password，可留空使用 key/agent">
           <input id="target-key" type="text" placeholder="ssh key path，可留空使用 ssh-agent">
           <button id="btn-target-save" onclick="saveTargetConfig()">应用目标机器</button>
           <div class="target-help">切换目标前请确保当前任务已结束；SSH 目标会先连接成功再替换当前 runtime。</div>
@@ -397,10 +398,11 @@ const targetSummary = document.getElementById("target-summary");
 const targetHost = document.getElementById("target-host");
 const targetUser = document.getElementById("target-user");
 const targetPort = document.getElementById("target-port");
+const targetPassword = document.getElementById("target-password");
 const targetKey = document.getElementById("target-key");
 let targetFormTouched = false;
 
-document.querySelectorAll('input[name="target-mode"], #target-host, #target-user, #target-port, #target-key')
+document.querySelectorAll('input[name="target-mode"], #target-host, #target-user, #target-port, #target-password, #target-key')
   .forEach(el => {
     el.addEventListener("input", () => { targetFormTouched = true; });
     el.addEventListener("change", () => { targetFormTouched = true; });
@@ -566,6 +568,7 @@ function renderState(s) {
 function renderTargetConfig(target) {
   targetSummary.textContent = [
     target.summary || "local control machine",
+    target.password_configured ? "password=已配置（不回显）" : "",
     target.env ? `os=${target.env.os || "unknown"} distro=${target.env.distro || "unknown"}` : "",
     target.env ? `init=${target.env.init_system || "unknown"} pkg=${target.env.package_manager || "unknown"}` : ""
   ].filter(Boolean).join("\n");
@@ -576,6 +579,7 @@ function renderTargetConfig(target) {
   targetHost.value = target.host || "";
   targetUser.value = target.user || "";
   targetPort.value = target.port || 22;
+  targetPassword.value = "";
   targetKey.value = target.ssh_key_file || "";
 }
 
@@ -657,6 +661,7 @@ async function saveTargetConfig() {
     host: targetHost.value.trim(),
     user: targetUser.value.trim(),
     port: Number(targetPort.value || 22),
+    password: targetPassword.value,
     ssh_key_file: targetKey.value.trim()
   };
   try {

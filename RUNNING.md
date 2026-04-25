@@ -164,9 +164,10 @@ http://127.0.0.1:8000
 The Web console includes a **目标机器** panel in the sidebar. You can choose:
 
 - `本机`: run tools against the local control machine
-- `SSH`: enter host / user / port / optional SSH key path and switch the current Web session to that remote target
+- `SSH`: enter host / user / port / optional password / optional SSH key path and switch the current Web session to that remote target
 
 The switch is transactional: SysDialogue first creates and probes a new runtime. If SSH connection fails, the current session keeps using the previous target.
+The password is used only for the in-memory runtime switch; it is not returned by the Web state API and is not written into session history.
 
 ### Scheduled Job Callback
 
