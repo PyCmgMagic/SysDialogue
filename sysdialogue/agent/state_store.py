@@ -271,10 +271,16 @@ class SessionStore:
             record.status = status
             if user_message:
                 record.user_messages.append(_truncate(user_message, 500))
-                record.entries.append({"role": "user", "text": user_message})
+                entry: dict[str, Any] = {"role": "user", "text": user_message}
+                if record.active_task_id:
+                    entry["task_id"] = record.active_task_id
+                record.entries.append(entry)
             if final_reply:
                 record.final_replies.append(_truncate(final_reply, 2000))
-                record.entries.append({"role": entry_role, "text": final_reply})
+                entry = {"role": entry_role, "text": final_reply}
+                if record.active_task_id:
+                    entry["task_id"] = record.active_task_id
+                record.entries.append(entry)
             record.entries = record.entries[-200:]
             record.context = _json_safe_dict(manager.context)
             record.history = _sanitize_history(manager.history)
@@ -296,10 +302,17 @@ class SessionStore:
         *,
         surface: str = "unknown",
         technical_details: str = "",
+        task_id: str = "",
     ) -> SessionRecord:
         def mutate(record: SessionRecord) -> None:
             record.surface = surface or record.surface
-            record.entries.append({"role": role, "text": text})
+            entry: dict[str, Any] = {"role": role, "text": text}
+            effective_task_id = task_id or record.active_task_id
+            if effective_task_id:
+                entry["task_id"] = effective_task_id
+            if technical_details:
+                entry["technical_details"] = technical_details
+            record.entries.append(entry)
             record.entries = record.entries[-200:]
             if role == "user" and text.strip():
                 record.user_messages.append(_truncate(text, 500))
@@ -329,7 +342,10 @@ class SessionStore:
                 record.active_task_id = active_task_id
             if clean:
                 record.user_messages.append(_truncate(clean, 500))
-                record.entries.append({"role": "user", "text": clean})
+                entry: dict[str, Any] = {"role": "user", "text": clean}
+                if active_task_id:
+                    entry["task_id"] = active_task_id
+                record.entries.append(entry)
                 record.entries = record.entries[-200:]
                 if not record.title or record.title == "Untitled conversation":
                     record.title = _title_from_message(clean)

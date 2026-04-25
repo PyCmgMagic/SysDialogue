@@ -55,6 +55,18 @@ def test_session_store_restores_manager_context(tmp_path: Path) -> None:
     assert restored.history[-1]["content"] == [{"type": "text", "text": "检查完成。"}]
 
 
+def test_session_store_tags_entries_with_active_task_id(tmp_path: Path) -> None:
+    store = SessionStore(str(tmp_path / "sessions"))
+
+    store.append_user_turn("session_a", "check load", surface="web", active_task_id="task_a")
+    store.append_entry("session_a", "assistant", "done", surface="web", task_id="task_a")
+    record = store.load("session_a")
+
+    assert record is not None
+    assert record.entries[-2]["task_id"] == "task_a"
+    assert record.entries[-1]["task_id"] == "task_a"
+
+
 def test_conversation_store_defaults_to_shared_sessions_root(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))

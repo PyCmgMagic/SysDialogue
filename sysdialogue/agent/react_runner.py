@@ -756,6 +756,7 @@ class ReActRunner:
                     task.final_reply,
                     surface=self.controller.surface,
                     technical_details=task.technical_details,
+                    task_id=task.task_id,
                 )
             self.controller.session_store.set_status(
                 self.controller.session_id,

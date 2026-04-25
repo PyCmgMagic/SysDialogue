@@ -746,6 +746,9 @@ class AgentController:
             "message": getattr(event, "message", ""),
             "data": getattr(event, "data", {}) or {},
         }
+        if self.current_task_id:
+            item["task_id"] = self.current_task_id
+            item.setdefault("data", {})["task_id"] = self.current_task_id
         if self.current_task_id and self.task_store is not None:
             try:
                 self.task_store.append_event(

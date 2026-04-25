@@ -218,7 +218,9 @@ def test_resume_command_persists_original_user_command(tmp_path: Path) -> None:
     record = controller.session_store.load(controller.session_id)
 
     assert record is not None
-    assert record.entries[0] == {"role": "user", "text": "/resume"}
+    assert record.entries[0]["role"] == "user"
+    assert record.entries[0]["text"] == "/resume"
+    assert record.entries[0]["task_id"] == task.task_id
     assert all("continue task:" not in str(entry.get("text", "")) for entry in record.entries)
 
 

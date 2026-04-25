@@ -25,13 +25,15 @@ class SSHConfig:
     password: str | None = None
     key_filename: str | None = None
     known_hosts_file: str | None = None  # None = ~/.ssh/known_hosts
+    auto_add_host_keys: bool = True
 
 
 class RemoteExecutor(SafeExecutor):
     """通过 SSH 连接远程 Linux 执行命令。
 
     安全约束：
-    - 强制 known_hosts 校验（RejectPolicy），防止中间人攻击
+    - 校验已知 known_hosts；首次连接默认采用 TOFU 写入 known_hosts
+    - 已知主机 key 变化时仍由 Paramiko 拒绝，防止静默覆盖
     - 每条命令独立 exec_command（不复用 shell 会话）
     - 不开放 PTY（避免交互式 shell 逃逸）
     """
@@ -45,11 +47,15 @@ class RemoteExecutor(SafeExecutor):
     def connect(self) -> None:
         import paramiko
         client = paramiko.SSHClient()
+        known_hosts_path = _known_hosts_path(self._config.known_hosts_file)
         if self._config.known_hosts_file:
             _load_host_keys(client, self._config.known_hosts_file, system=False)
         else:
             _load_host_keys(client, None, system=True)
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        if self._config.auto_add_host_keys:
+            client.set_missing_host_key_policy(_AutoAddKnownHostPolicy(known_hosts_path))
+        else:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client.connect(
             hostname=self._config.host,
             port=self._config.port,
@@ -102,7 +108,7 @@ class RemoteExecutor(SafeExecutor):
 
 
 def _load_host_keys(client: "paramiko.SSHClient", filename: str | None, *, system: bool) -> None:
-    path = Path(os.path.expanduser(filename or "~/.ssh/known_hosts"))
+    path = _known_hosts_path(filename)
     if not path.exists():
         if filename is None:
             return
@@ -180,3 +186,24 @@ def _merge_host_keys(target, source) -> None:
     for entry in source._entries:  # noqa: SLF001
         for hostname in entry.hostnames:
             target.add(hostname, entry.key.get_name(), entry.key)
+
+
+def _known_hosts_path(filename: str | None) -> Path:
+    return Path(os.path.expanduser(filename or "~/.ssh/known_hosts"))
+
+
+class _AutoAddKnownHostPolicy:
+    def __init__(self, path: Path):
+        self._path = path
+
+    def missing_host_key(self, client, hostname, key) -> None:
+        client._host_keys.add(hostname, key.get_name(), key)  # noqa: SLF001
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        line = f"{hostname} {key.get_name()} {key.get_base64()}\n"
+        if self._path.exists() and self._path.stat().st_size:
+            raw = self._path.read_bytes()
+            prefix = b"" if raw.endswith((b"\n", b"\r")) else b"\n"
+        else:
+            prefix = b""
+        with self._path.open("ab") as handle:
+            handle.write(prefix + line.encode("utf-8"))

@@ -257,6 +257,7 @@ def test_web_app_exposes_command_trace_and_memory_routes() -> None:
     assert "/api/session/{session_id}/audit/export" in paths
     assert "/api/locks" in paths
     assert "/api/targets" in paths
+    assert "/api/targets/{target_id}" in paths
     assert "/api/targets/test" in paths
 
 

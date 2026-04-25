@@ -14,7 +14,9 @@
           <strong>SysDialogue</strong>
           <span>Web 运维控制台</span>
         </div>
-        <button id="btn-new-session" class="ghost-btn">新建会话</button>
+        <div class="brand-actions">
+          <button id="btn-new-session" class="ghost-btn">新建会话</button>
+        </div>
       </header>
 
       <section class="panel session-panel">
@@ -24,7 +26,33 @@
         </div>
         <div id="session-list" class="session-list"></div>
       </section>
+    </aside>
 
+    <div id="settings-modal" class="settings-modal hidden" role="dialog" aria-modal="true" aria-label="目标与快捷配置">
+      <div class="settings-backdrop" data-close-settings></div>
+      <aside class="settings-panel">
+      <header class="settings-header">
+        <div>
+          <strong>设置</strong>
+          <span>模型、目标机器与快捷场景</span>
+        </div>
+        <button id="btn-close-settings" class="ghost-btn">关闭</button>
+      </header>
+      <section class="panel api-panel">
+        <div class="panel-head">
+          <h2>模型配置</h2>
+          <span id="api-key-pill" class="pill">未配置</span>
+        </div>
+        <div class="api-form" id="api-config">
+          <input id="api-base-url" type="url" placeholder="OpenAI-compatible base_url，例如 https://newapi.sduonline.cn">
+          <input id="api-model" type="text" placeholder="模型名，例如 Ali-dashscope/Qwen3.5-Plus">
+          <input id="api-key" type="text" autocomplete="off" placeholder="API Key">
+          <div class="button-row">
+            <button id="btn-api-apply" class="primary-btn">应用模型配置</button>
+          </div>
+          <p class="hint">API Key 会直接显示在此设置页，便于演示和切换；base_url 为空时使用 SDK 默认地址。</p>
+        </div>
+      </section>
       <section class="panel target-panel">
         <div class="panel-head">
           <h2>目标机器</h2>
@@ -32,11 +60,14 @@
         </div>
         <pre id="target-summary" class="summary-box">本机控制端</pre>
         <div class="target-form" id="target-config">
+          <select id="saved-targets" class="target-select">
+            <option value="">选择已保存的 SSH 目标</option>
+          </select>
           <div class="segmented">
             <label><input type="radio" name="target-mode" value="local" checked> 本机</label>
             <label><input type="radio" name="target-mode" value="ssh"> SSH</label>
           </div>
-          <input id="target-label" type="text" placeholder="目标标签，可选">
+          <input id="target-label" type="text" placeholder="SSH 名称，例如 生产机 / 课程服务器">
           <input id="target-host" type="text" placeholder="SSH host，例如 192.168.1.10">
           <input id="target-user" type="text" placeholder="SSH user，例如 root">
           <input id="target-port" type="number" min="1" max="65535" value="22" placeholder="SSH port">
@@ -44,9 +75,11 @@
           <input id="target-key" type="text" placeholder="SSH key path，可留空使用 ssh-agent">
           <div class="button-row">
             <button id="btn-target-test" class="soft-btn">测试连接</button>
+            <button id="btn-target-save" class="soft-btn">保存目标</button>
+            <button id="btn-target-delete" class="danger-btn">删除保存</button>
             <button id="btn-target-apply" class="primary-btn">应用目标</button>
           </div>
-          <p class="hint">密码只用于当前连接，不回显、不持久化。远程目标机不需要启动 Web 服务。</p>
+          <p class="hint">密码只用于当前连接，不回显、不持久化。首次 SSH 会自动信任并记住主机 key。</p>
         </div>
       </section>
 
@@ -61,7 +94,8 @@
           <button data-fill="准备修改配置文件：请先预览、备份、修改、验证并提供回滚方案">配置变更模板</button>
         </div>
       </section>
-    </aside>
+      </aside>
+    </div>
 
     <main class="workspace">
       <header class="topbar">
@@ -70,6 +104,7 @@
           <p id="session-subtitle">当前会话：{{ session_id }}</p>
         </div>
         <div class="status-strip">
+          <button id="btn-open-settings" class="soft-btn">设置</button>
           <span id="status-pill" class="status-pill ready">就绪</span>
           <button id="btn-resume" class="soft-btn hidden">恢复任务</button>
           <button id="btn-cancel" class="danger-btn hidden">取消执行</button>

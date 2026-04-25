@@ -65,6 +65,15 @@ class TargetProfileStore:
             os.replace(tmp, path)
         return profile
 
+    def delete(self, target_id: str) -> bool:
+        path = self._path(target_id)
+        lock = FileLock(str(path) + ".lock", timeout=10)
+        with lock:
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def remember_fact(self, target_id: str, key: str, value: Any) -> TargetProfile:
         profile = self.load(target_id) or TargetProfile(target_id=target_id)
         profile.facts[str(key)] = value

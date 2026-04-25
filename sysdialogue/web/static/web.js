@@ -3,7 +3,10 @@ const POLL_MS = 1200;
 let activeSessionId = window.SYSDIALOGUE_INITIAL_SESSION || "default";
 let activeTab = "tasks";
 let lastState = null;
+let apiConfigTouched = false;
 let targetFormTouched = false;
+let targetProfiles = [];
+const collapsedSessionGroups = new Set();
 
 const $ = (id) => document.getElementById(id);
 
@@ -77,6 +80,7 @@ function fmtTime(value) {
 
 function setActiveSession(sessionId) {
   activeSessionId = sessionId || "default";
+  apiConfigTouched = false;
   targetFormTouched = false;
   $("session-subtitle").textContent = `当前会话：${activeSessionId}`;
   refreshAll();
@@ -97,21 +101,60 @@ function renderSessions(sessions) {
     list.innerHTML = `<div class="session-item active"><span class="session-dot ready"></span><span class="session-title">默认 Web 会话</span><span class="session-meta">ready</span></div>`;
     return;
   }
-  list.innerHTML = sessions.map((session) => {
-    const active = session.session_id === activeSessionId ? " active" : "";
-    const title = esc(session.title || session.session_id);
-    const status = esc(STATUS_LABEL[session.status] || session.status || "unknown");
-    const last = esc(trimText(session.last_user_message || session.session_id, 42));
-    return `
-      <div class="session-item${active}" data-session="${esc(session.session_id)}">
-        <span class="session-dot ${esc(session.status || "ready")}"></span>
-        <span class="session-title" title="${last}">${title}</span>
-        <span class="session-meta">${status}</span>
-      </div>`;
-  }).join("");
+  const groups = groupSessionsByTarget(sessions);
+  list.innerHTML = groups.map((group) => `
+    <div class="session-group${collapsedSessionGroups.has(group.key) ? " collapsed" : ""}">
+      <button class="session-group-title" type="button" data-session-group="${esc(group.key)}">
+        <span>${esc(group.label)}</span>
+        <small>${group.sessions.length}</small>
+      </button>
+      <div class="session-group-items">${group.sessions.map(renderSessionItem).join("")}</div>
+    </div>
+  `).join("");
+  list.querySelectorAll("[data-session-group]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const key = item.dataset.sessionGroup || "";
+      if (collapsedSessionGroups.has(key)) collapsedSessionGroups.delete(key);
+      else collapsedSessionGroups.add(key);
+      renderSessions(sessions);
+    });
+  });
   list.querySelectorAll("[data-session]").forEach((item) => {
     item.addEventListener("click", () => setActiveSession(item.dataset.session));
   });
+}
+
+function groupSessionsByTarget(sessions) {
+  const buckets = new Map();
+  sessions.forEach((session) => {
+    const mode = session.target_mode === "ssh" ? "ssh" : "local";
+    const label = mode === "ssh"
+      ? (session.target_group || session.target_summary || "SSH 目标")
+      : "本机会话";
+    const key = `${mode}:${label}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, { key, mode, label, sessions: [] });
+    }
+    buckets.get(key).sessions.push(session);
+  });
+  return Array.from(buckets.values()).sort((a, b) => {
+    if (a.mode !== b.mode) return a.mode === "local" ? -1 : 1;
+    return a.label.localeCompare(b.label, "zh-CN");
+  });
+}
+
+function renderSessionItem(session) {
+  const active = session.session_id === activeSessionId ? " active" : "";
+  const title = esc(session.title || session.session_id);
+  const status = esc(STATUS_LABEL[session.status] || session.status || "unknown");
+  const last = esc(trimText(session.last_user_message || session.session_id, 42));
+  const target = esc(session.target_summary || "");
+  return `
+    <div class="session-item${active}" data-session="${esc(session.session_id)}">
+      <span class="session-dot ${esc(session.status || "ready")}"></span>
+      <span class="session-title" title="${last}${target ? ` · ${target}` : ""}">${title}</span>
+      <span class="session-meta">${status}</span>
+    </div>`;
 }
 
 async function createSession() {
@@ -137,6 +180,9 @@ function renderState(state) {
   $("session-subtitle").textContent = `当前会话：${state.session_id}`;
   renderStatus(state);
   renderWarnings(state.ui_warnings || []);
+  targetProfiles = state.target_profiles || targetProfiles;
+  renderSavedTargets(targetProfiles);
+  renderApiConfig(state.api_config || {});
   renderTargetConfig(state.target_config || {});
   renderTaskCards(state);
   renderInteractions(state);
@@ -192,6 +238,14 @@ function renderInteractions(state) {
   }
 }
 
+function renderApiConfig(config) {
+  $("api-key-pill").textContent = config.api_key_configured ? "已配置" : "未配置";
+  if (apiConfigTouched) return;
+  $("api-base-url").value = config.base_url || "";
+  $("api-model").value = config.model || "";
+  $("api-key").value = config.api_key || "";
+}
+
 function renderTargetConfig(target) {
   $("target-mode-pill").textContent = target.mode === "ssh" ? "SSH" : "本机";
   $("target-summary").textContent = [
@@ -212,6 +266,45 @@ function renderTargetConfig(target) {
   $("target-key").value = target.ssh_key_file || "";
 }
 
+function renderSavedTargets(targets) {
+  const select = $("saved-targets");
+  if (!select) return;
+  const current = select.value;
+  const sshTargets = (targets || []).filter((target) => (target.facts || {}).mode === "ssh");
+  select.innerHTML = `<option value="">选择已保存的 SSH 目标</option>` + sshTargets.map((target) => {
+    const facts = target.facts || {};
+    const label = target.label || facts.summary || target.target_id;
+    const detail = facts.host ? `${facts.host}:${facts.port || 22}` : target.target_id;
+    const password = facts.password_configured ? " · 含密码" : "";
+    return `<option value="${esc(target.target_id)}">${esc(label)} · ${esc(detail)}${password}</option>`;
+  }).join("");
+  if ([...select.options].some((option) => option.value === current)) {
+    select.value = current;
+  }
+}
+
+function selectedTargetProfile() {
+  const targetId = $("saved-targets")?.value || "";
+  return (targetProfiles || []).find((target) => target.target_id === targetId) || null;
+}
+
+function fillTargetFromProfile(profile) {
+  if (!profile) return;
+  const facts = profile.facts || {};
+  const radio = document.querySelector('input[name="target-mode"][value="ssh"]');
+  if (radio) radio.checked = true;
+  $("target-label").value = profile.label || facts.summary || "";
+  $("target-host").value = facts.host || "";
+  $("target-user").value = facts.user || "";
+  $("target-port").value = facts.port || 22;
+  $("target-key").value = facts.ssh_key_file || "";
+  $("target-password").value = "";
+  $("target-password").placeholder = facts.password_configured
+    ? "已保存密码，留空沿用"
+    : "SSH password，可留空使用 key/agent";
+  targetFormTouched = true;
+}
+
 function renderTaskCards(state) {
   const cards = $("cards");
   const entries = state.entries || [];
@@ -226,10 +319,14 @@ function renderTaskCards(state) {
   }
 
   const turns = splitTurns(entries);
-  if (!turns.length) turns.push({ user: state.active_task?.goal || "系统任务", replies: [] });
-  const latest = turns[turns.length - 1];
-  latest.events = events;
-  latest.activeTask = state.active_task;
+  if (!turns.length) turns.push({ user: state.active_task?.goal || "系统任务", taskId: state.active_task?.task_id || "", replies: [] });
+  const eventsByTask = groupEventsByTask(events);
+  turns.forEach((turn, index) => {
+    const isLatest = index === turns.length - 1;
+    const taskId = turn.taskId || (isLatest ? state.active_task?.task_id : "");
+    turn.events = taskId ? (eventsByTask.get(taskId) || []) : (turns.length === 1 ? (eventsByTask.get("") || []) : []);
+    turn.activeTask = isLatest ? state.active_task : null;
+  });
 
   cards.innerHTML = turns.map((turn, index) => renderTaskCard(turn, index === turns.length - 1)).join("");
   cards.scrollTop = cards.scrollHeight;
@@ -239,13 +336,30 @@ function splitTurns(entries) {
   const turns = [];
   for (const entry of entries) {
     if (entry.role === "user" || !turns.length) {
-      turns.push({ user: entry.role === "user" ? entry.text : "系统事件", replies: [] });
+      turns.push({
+        user: entry.role === "user" ? entry.text : "系统事件",
+        taskId: entry.task_id || "",
+        replies: [],
+      });
       if (entry.role !== "user") turns[turns.length - 1].replies.push(entry);
       continue;
+    }
+    if (!turns[turns.length - 1].taskId && entry.task_id) {
+      turns[turns.length - 1].taskId = entry.task_id;
     }
     turns[turns.length - 1].replies.push(entry);
   }
   return turns;
+}
+
+function groupEventsByTask(events) {
+  const grouped = new Map();
+  for (const event of events || []) {
+    const taskId = event.task_id || event.data?.task_id || "";
+    if (!grouped.has(taskId)) grouped.set(taskId, []);
+    grouped.get(taskId).push(event);
+  }
+  return grouped;
 }
 
 function renderTaskCard(turn, isLatest) {
@@ -254,6 +368,8 @@ function renderTaskCard(turn, isLatest) {
   const task = turn.activeTask;
   const result = replies.filter((entry) => entry.role === "assistant" || entry.role === "error").slice(-2);
   const tech = replies.filter((entry) => entry.technical_details).map((entry) => entry.technical_details);
+  const processCount = grouped.plan.length + grouped.tool.length + grouped.approval.length + grouped.verification.length;
+  const errorCount = grouped.error.length + tech.length;
   return `
     <article class="task-card">
       <header>
@@ -265,29 +381,24 @@ function renderTaskCard(turn, isLatest) {
           <h4>请求</h4>
           <div class="message user">${esc(turn.user || "")}</div>
         </section>
-        <section class="task-section">
-          <h4>计划/思考摘要</h4>
-          ${renderEventList(grouped.plan)}
-        </section>
-        <section class="task-section">
-          <h4>工具</h4>
-          ${renderEventList(grouped.tool)}
-        </section>
-        <section class="task-section">
-          <h4>审批</h4>
-          ${renderEventList(grouped.approval)}
-        </section>
-        <section class="task-section">
-          <h4>验证</h4>
-          ${renderEventList(grouped.verification)}
-        </section>
         <section class="task-section full">
           <h4>结果</h4>
           ${result.length ? result.map(renderMessage).join("") : renderEventList(grouped.result)}
         </section>
-        <section class="task-section full">
-          <h4>错误详情</h4>
-          ${renderErrorDetails(grouped.error, tech)}
+        <section class="task-section full compact-details">
+          <details ${isLatest && processCount ? "open" : ""}>
+            <summary>执行过程 ${processCount ? `(${processCount})` : ""}</summary>
+            <div class="task-detail-grid">
+              <div><h4>计划/思考摘要</h4>${renderEventList(grouped.plan, 4)}</div>
+              <div><h4>工具</h4>${renderEventList(grouped.tool, 4)}</div>
+              <div><h4>审批</h4>${renderEventList(grouped.approval, 4)}</div>
+              <div><h4>验证</h4>${renderEventList(grouped.verification, 4)}</div>
+            </div>
+          </details>
+          <details class="error-details" ${errorCount ? "open" : ""}>
+            <summary>错误详情 ${errorCount ? `(${errorCount})` : ""}</summary>
+            ${renderErrorDetails(grouped.error, tech)}
+          </details>
         </section>
       </div>
     </article>`;
@@ -308,9 +419,9 @@ function groupEvents(events) {
   return grouped;
 }
 
-function renderEventList(events) {
+function renderEventList(events, limit = 6) {
   if (!events || !events.length) return `<p class="hint">暂无记录</p>`;
-  return `<div class="event-list">${events.slice(-8).map((event) => `
+  return `<div class="event-list">${events.slice(-limit).map((event) => `
     <div class="event">
       <span class="event-stage">${esc(event.stage || "event")}</span>
       <span>${esc(event.message || event.data?.summary || "")}</span>
@@ -505,6 +616,7 @@ async function doResume() {
 
 function targetPayload() {
   return {
+    target_id: $("saved-targets")?.value || "",
     mode: document.querySelector('input[name="target-mode"]:checked')?.value || "local",
     label: $("target-label").value.trim(),
     host: $("target-host").value.trim(),
@@ -513,6 +625,26 @@ function targetPayload() {
     password: $("target-password").value,
     ssh_key_file: $("target-key").value.trim(),
   };
+}
+
+function apiConfigPayload() {
+  return {
+    base_url: $("api-base-url").value.trim(),
+    model: $("api-model").value.trim(),
+    api_key: $("api-key").value.trim(),
+  };
+}
+
+async function applyApiConfig() {
+  try {
+    const result = await api("/api-config", "POST", apiConfigPayload());
+    apiConfigTouched = false;
+    $("api-key").value = result.api_config?.api_key || "";
+    showLocalSystem(`模型配置已更新：${result.api_config?.model || "current model"}`);
+    await poll();
+  } catch (error) {
+    showLocalError(`模型配置失败：${error.message}`);
+  }
 }
 
 async function testTarget() {
@@ -537,6 +669,36 @@ async function applyTarget() {
     await poll();
   } catch (error) {
     showLocalError(`目标机器配置失败：${error.message}`);
+  }
+}
+
+async function saveTarget() {
+  try {
+    const result = await rootApi("/targets", "POST", targetPayload());
+    targetProfiles = [result.target, ...targetProfiles.filter((item) => item.target_id !== result.target.target_id)];
+    renderSavedTargets(targetProfiles);
+    $("saved-targets").value = result.target.target_id;
+    showLocalSystem(`SSH 目标已保存：${result.target.label || result.target.target_id}`);
+    await poll();
+  } catch (error) {
+    showLocalError(`保存目标失败：${error.message}`);
+  }
+}
+
+async function deleteSavedTarget() {
+  const profile = selectedTargetProfile();
+  if (!profile) {
+    showLocalError("请先选择一个已保存的 SSH 目标。");
+    return;
+  }
+  try {
+    await rootApi(`/targets/${encodeURIComponent(profile.target_id)}`, "DELETE");
+    targetProfiles = targetProfiles.filter((item) => item.target_id !== profile.target_id);
+    renderSavedTargets(targetProfiles);
+    showLocalSystem(`已删除保存目标：${profile.label || profile.target_id}`);
+    await poll();
+  } catch (error) {
+    showLocalError(`删除目标失败：${error.message}`);
   }
 }
 
@@ -572,7 +734,23 @@ function showLocalSystem(text) {
   cards.scrollTop = cards.scrollHeight;
 }
 
+function openSettings() {
+  $("settings-modal")?.classList.remove("hidden");
+}
+
+function closeSettings() {
+  $("settings-modal")?.classList.add("hidden");
+}
+
 function bindEvents() {
+  $("btn-open-settings").addEventListener("click", openSettings);
+  $("btn-close-settings").addEventListener("click", closeSettings);
+  document.querySelectorAll("[data-close-settings]").forEach((el) => {
+    el.addEventListener("click", closeSettings);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSettings();
+  });
   $("btn-new-session").addEventListener("click", createSession);
   $("btn-refresh-sessions").addEventListener("click", refreshSessions);
   $("btn-refresh-all").addEventListener("click", refreshAll);
@@ -582,8 +760,16 @@ function bindEvents() {
   $("btn-confirm-once").addEventListener("click", () => doConfirm(true, "once"));
   $("btn-confirm-always").addEventListener("click", () => doConfirm(true, "always_this_session"));
   $("btn-confirm-deny").addEventListener("click", () => doConfirm(false, "deny"));
+  $("btn-api-apply").addEventListener("click", applyApiConfig);
   $("btn-target-test").addEventListener("click", testTarget);
+  $("btn-target-save").addEventListener("click", saveTarget);
+  $("btn-target-delete").addEventListener("click", deleteSavedTarget);
   $("btn-target-apply").addEventListener("click", applyTarget);
+  $("saved-targets").addEventListener("change", () => fillTargetFromProfile(selectedTargetProfile()));
+  document.querySelectorAll("#api-config input").forEach((el) => {
+    el.addEventListener("input", () => { apiConfigTouched = true; });
+    el.addEventListener("change", () => { apiConfigTouched = true; });
+  });
   $("msg-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();

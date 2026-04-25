@@ -10,7 +10,15 @@ from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.state_store import SessionStore, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.web.app import create_web_app
-from sysdialogue.web.service import WebSession, WebSessionStore, _process_alive, _target_config_from_payload, _target_payload
+from sysdialogue.web.service import (
+    WebSession,
+    WebSessionStore,
+    _api_config_from_payload,
+    _api_config_payload,
+    _process_alive,
+    _target_config_from_payload,
+    _target_payload,
+)
 
 
 def _fake_web_session(session_id: str, session_store: SessionStore, task_store: TaskStore) -> WebSession:
@@ -194,6 +202,44 @@ def test_web_target_payload_does_not_expose_ssh_password() -> None:
     assert "secret" not in str(payload)
 
 
+def test_web_api_config_payload_preserves_secret_and_updates_model() -> None:
+    base = AppConfig(api_key="old-key", base_url="https://old.example/v1", model="old-model")
+
+    updated = _api_config_from_payload(
+        base,
+        {"base_url": "https://new.example/v1", "model": "new-model", "api_key": ""},
+    )
+    with_key = _api_config_from_payload(updated, {"api_key": "new-secret"})
+    payload = _api_config_payload(with_key)
+
+    assert updated.api_key == "old-key"
+    assert updated.base_url == "https://new.example/v1"
+    assert updated.model == "new-model"
+    assert with_key.api_key == "new-secret"
+    assert payload == {
+        "base_url": "https://new.example/v1",
+        "model": "new-model",
+        "api_key": "new-secret",
+        "api_key_configured": True,
+    }
+
+
+def test_web_api_config_rejects_missing_key_or_model() -> None:
+    try:
+        _api_config_from_payload(AppConfig(api_key="", model="m"), {"api_key": ""})
+    except RuntimeError as exc:
+        assert "API Key" in str(exc)
+    else:
+        raise AssertionError("expected missing API key to fail")
+
+    try:
+        _api_config_from_payload(AppConfig(api_key="key", model="m"), {"model": ""})
+    except RuntimeError as exc:
+        assert "模型" in str(exc)
+    else:
+        raise AssertionError("expected missing model to fail")
+
+
 def test_web_session_store_can_create_and_list_sessions(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -206,6 +252,27 @@ def test_web_session_store_can_create_and_list_sessions(monkeypatch, tmp_path) -
     assert any(item["session_id"] == created["session_id"] for item in sessions)
 
 
+def test_web_session_list_includes_target_group_metadata(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = WebSessionStore(AppConfig(api_key="key", model="model"))
+    store.session_store.ensure("local_session", surface="web")
+    store.session_store.mutate(
+        "ssh_session",
+        lambda record: record.context.update(
+            {"target": "ssh://root@example.com:10022", "target_mode": "remote"}
+        ),
+        surface="web",
+    )
+
+    sessions = {item["session_id"]: item for item in store.list_sessions()}
+
+    assert sessions["local_session"]["target_mode"] == "local"
+    assert sessions["local_session"]["target_group"]
+    assert sessions["ssh_session"]["target_mode"] == "ssh"
+    assert sessions["ssh_session"]["target_group"] == "SSH root@example.com:10022"
+
+
 def test_web_target_test_rejects_bad_payload_without_switching_runtime(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -215,6 +282,52 @@ def test_web_target_test_rejects_bad_payload_without_switching_runtime(monkeypat
 
     assert result["ok"] is False
     assert "SSH 用户名不能为空" in result["message"]
+
+
+def test_web_target_management_saves_password_without_api_echo(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    key = tmp_path / "id_ed25519"
+    key.write_text("not-a-real-key", encoding="utf-8")
+    store = WebSessionStore(AppConfig(api_key="key", model="model"))
+
+    profile = store.save_target(
+        {
+            "mode": "ssh",
+            "label": "prod",
+            "host": "example.com",
+            "user": "root",
+            "port": "2222",
+            "password": "secret",
+            "ssh_key_file": str(key),
+        }
+    )
+
+    assert profile["label"] == "prod"
+    assert profile["facts"]["host"] == "example.com"
+    assert profile["facts"]["port"] == 2222
+    assert profile["facts"]["user"] == "root"
+    assert profile["facts"]["ssh_key_file"] == str(key)
+    assert profile["facts"]["password_configured"] is True
+    assert "secret" not in str(profile)
+    stored = store.target_profile_store.load(profile["target_id"])
+    assert stored is not None
+    assert stored.facts["ssh_password"] == "secret"
+    restored = _target_config_from_payload(
+        AppConfig(api_key="key", model="model"),
+        {
+            "mode": "ssh",
+            "target_id": profile["target_id"],
+            "host": "example.com",
+            "user": "root",
+            "port": "2222",
+        },
+        store.target_profile_store,
+    )
+    assert restored.ssh_password == "secret"
+    assert any(item["target_id"] == profile["target_id"] for item in store.list_targets())
+    assert store.delete_target(profile["target_id"]) is True
+    assert all(item["target_id"] != profile["target_id"] for item in store.list_targets())
 
 
 def test_task_and_audit_serializers_use_session_id(monkeypatch, tmp_path) -> None:
@@ -248,7 +361,15 @@ def test_web_app_exposes_console_routes_without_requiring_target_switch(monkeypa
     root = client.get("/")
     sessions = client.get("/api/sessions")
     created = client.post("/api/sessions", json={})
+    api_config = client.post(
+        "/api/session/default/api-config",
+        json={"base_url": "https://new.example/v1", "model": "new-model", "api_key": ""},
+    )
     locks = client.get("/api/locks")
+    target_save = client.post(
+        "/api/targets",
+        json={"mode": "ssh", "label": "prod", "host": "example.com", "user": "root", "port": 22, "password": "secret"},
+    )
     target_test = client.post("/api/targets/test", json={"mode": "ssh", "host": "example.com"})
 
     assert root.status_code == 200
@@ -256,7 +377,14 @@ def test_web_app_exposes_console_routes_without_requiring_target_switch(monkeypa
     assert sessions.status_code == 200
     assert created.status_code == 200
     assert created.json()["session"]["session_id"].startswith("web_")
+    assert api_config.status_code == 200
+    assert api_config.json()["api_config"]["model"] == "new-model"
     assert locks.status_code == 200
+    assert target_save.status_code == 200
+    saved_id = target_save.json()["target"]["target_id"]
+    assert target_save.json()["target"]["facts"]["password_configured"] is True
+    assert "secret" not in str(target_save.json())
+    assert client.delete(f"/api/targets/{saved_id}").status_code == 200
     assert target_test.status_code == 200
     assert target_test.json()["ok"] is False
     assert "SSH 用户名不能为空" in target_test.json()["message"]

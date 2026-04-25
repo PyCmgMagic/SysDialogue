@@ -139,6 +139,14 @@ def create_web_app(config) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "summary": summary}
 
+    @app.post("/api/session/{session_id}/api-config")
+    async def configure_api(session_id: str, payload: dict):
+        try:
+            api_config = store.get(session_id).configure_api(payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "api_config": api_config}
+
     @app.get("/api/locks")
     async def list_locks():
         return {"locks": store.list_locks()}
@@ -146,6 +154,20 @@ def create_web_app(config) -> FastAPI:
     @app.get("/api/targets")
     async def list_targets():
         return {"targets": store.list_targets()}
+
+    @app.post("/api/targets")
+    async def save_target(payload: dict):
+        try:
+            return {"ok": True, "target": store.save_target(payload)}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/targets/{target_id}")
+    async def delete_target(target_id: str):
+        deleted = store.delete_target(target_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="target not found")
+        return {"ok": True}
 
     @app.post("/api/targets/test")
     async def test_target(payload: dict):

@@ -97,6 +97,7 @@ class WebSession:
                 "permission_policy": self.runtime.permission_policy.render_summary(),
                 "skills": [skill.__dict__ for skill in self.runtime.skill_manager.list_skills()],
                 "hooks": [hook.__dict__ for hook in self.runtime.hook_manager.list_rules()],
+                "api_config": _api_config_payload(self.config),
                 "target_config": _target_payload(self.config, self.runtime.env_profile),
                 "permission_explain": self.runtime.permission_policy.explain_tool(
                     tool="*",
@@ -216,7 +217,7 @@ class WebSession:
                 raise RuntimeError("当前会话仍在执行中，不能切换目标机器")
             if self.pending_confirmation is not None or self.pending_input is not None:
                 raise RuntimeError("当前存在待确认/待输入请求，不能切换目标机器")
-            new_config = _target_config_from_payload(self.config, payload)
+            new_config = _target_config_from_payload(self.config, payload, self.runtime.target_profile_store)
             old_runtime = self.runtime
             try:
                 new_runtime = create_runtime(
@@ -263,6 +264,54 @@ class WebSession:
         except Exception:
             pass
         return summary
+
+    def configure_api(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._worker and self._worker.is_alive():
+                raise RuntimeError("当前会话仍在执行中，不能切换模型配置")
+            if self.pending_confirmation is not None or self.pending_input is not None:
+                raise RuntimeError("当前存在待确认/待输入请求，不能切换模型配置")
+            new_config = _api_config_from_payload(self.config, payload)
+            old_runtime = self.runtime
+            try:
+                new_runtime = create_runtime(
+                    new_config,
+                    session_id=self.session_id,
+                    require_api=True,
+                    confirm_callback=self._confirm_callback,
+                    input_callback=self._input_callback,
+                    surface="web",
+                )
+            except Exception as exc:
+                raise RuntimeError(f"模型配置失败：{exc}") from exc
+            new_runtime.controller.event_callback = self._event_callback
+            self.runtime = new_runtime
+            self.config = new_config
+            self.runtime.session_store.recover_interrupted(
+                self.session_id,
+                self.runtime.task_store,
+                surface="web",
+            )
+            self.runtime.controller.conversation_manager.context["api_model"] = self.config.model
+            if self.config.base_url:
+                self.runtime.controller.conversation_manager.context["api_base_url"] = self.config.base_url
+            self.runtime.session_store.sync_manager(
+                self.session_id,
+                self.runtime.controller.conversation_manager,
+                surface="web",
+            )
+            self.runtime.session_store.append_entry(
+                self.session_id,
+                "system",
+                f"模型配置已更新：{self.config.model}",
+                surface="web",
+            )
+            self.runtime.session_store.set_status(self.session_id, "ready", surface="web")
+        try:
+            old_runtime.close()
+        except Exception:
+            pass
+        return _api_config_payload(self.config)
 
     def list_tasks(self, *, limit: int = 50) -> list[dict[str, Any]]:
         return [_task_payload(task) for task in self.runtime.task_store.list_records(session_id=self.session_id, limit=limit)]
@@ -507,7 +556,7 @@ class WebSession:
             }
         )
         profile = self.runtime.target_profile_store.load(target_id) or TargetProfile(target_id=target_id)
-        profile.label = str(payload.get("label") or target.get("summary") or profile.label)
+        profile.label = str(payload.get("label") or profile.label or target.get("summary") or "")
         profile.facts.update(
             {
                 "mode": target.get("mode"),
@@ -519,6 +568,8 @@ class WebSession:
                 "summary": target.get("summary"),
             }
         )
+        if self.config.ssh_password:
+            profile.facts["ssh_password"] = self.config.ssh_password
         env = target.get("env") or {}
         if env:
             profile.facts["env"] = env
@@ -549,7 +600,13 @@ class WebSessionStore:
         return record.summary().__dict__
 
     def list_sessions(self, *, limit: int = 30) -> list[dict[str, Any]]:
-        return [summary.__dict__ for summary in self.session_store.list_summaries(limit=limit)]
+        records = [
+            record
+            for record in (self.session_store.load(path.stem) for path in self.session_store.storage_dir.glob("*.json"))
+            if record
+        ]
+        records.sort(key=lambda item: item.updated_at, reverse=True)
+        return [_session_summary_payload(record) for record in records[:limit]]
 
     def list_locks(self) -> list[dict[str, Any]]:
         return [_lease_payload(lease) for lease in self.lock_store.list_leases()]
@@ -557,9 +614,43 @@ class WebSessionStore:
     def list_targets(self) -> list[dict[str, Any]]:
         return [_target_profile_payload(profile) for profile in self.target_profile_store.list_profiles(limit=50)]
 
+    def save_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = _target_config_from_payload(self.config, payload or {}, self.target_profile_store)
+        target = _target_payload(config, {
+            "os": "unknown",
+            "distro": "unknown",
+            "hostname": config.ssh_host if config.remote_mode else "local",
+        })
+        target_id = self.target_profile_store.target_id_from_env(
+            {
+                "remote_mode": target["remote_mode"],
+                "host": target["host"],
+                "ssh_port": target["port"],
+            }
+        )
+        profile = self.target_profile_store.load(target_id) or TargetProfile(target_id=target_id)
+        profile.label = str((payload or {}).get("label") or profile.label or target["summary"])
+        profile.facts.update(
+            {
+                "mode": target["mode"],
+                "host": target["host"],
+                "port": target["port"],
+                "user": target["user"],
+                "ssh_key_file": target["ssh_key_file"],
+                "password_configured": bool(config.ssh_password),
+                "summary": target["summary"],
+            }
+        )
+        if config.ssh_password:
+            profile.facts["ssh_password"] = config.ssh_password
+        return _target_profile_payload(self.target_profile_store.save(profile))
+
+    def delete_target(self, target_id: str) -> bool:
+        return self.target_profile_store.delete(target_id)
+
     def test_target(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            probe_config = _target_config_from_payload(self.config, payload)
+            probe_config = _target_config_from_payload(self.config, payload, self.target_profile_store)
             runtime = create_runtime(probe_config, session_id=f"target_test_{uuid.uuid4().hex[:8]}", require_api=False, surface="web")
             target = _target_payload(probe_config, runtime.env_profile)
             runtime.close()
@@ -570,7 +661,11 @@ class WebSessionStore:
             return {"ok": False, "category": _target_error_category(exc), "message": _friendly_target_error(exc)}
 
 
-def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> AppConfig:
+def _target_config_from_payload(
+    config: AppConfig,
+    payload: dict[str, Any],
+    target_store: TargetProfileStore | None = None,
+) -> AppConfig:
     payload = payload or {}
     mode = str(payload.get("mode") or "local").strip().lower()
     if mode not in {"local", "ssh", "remote"}:
@@ -585,10 +680,21 @@ def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> A
         new_config.ssh_password = ""
         return new_config
 
-    host = str(payload.get("host") or "").strip()
-    user = str(payload.get("user") or "").strip()
-    key_file = str(payload.get("ssh_key_file") or payload.get("key_file") or "").strip()
-    password = str(payload.get("password") or "")
+    saved_facts: dict[str, Any] = {}
+    target_id = str(payload.get("target_id") or "").strip()
+    if target_id and target_store is not None:
+        profile = target_store.load(target_id)
+        if profile is not None:
+            saved_facts = dict(profile.facts or {})
+    host = str(payload.get("host") or saved_facts.get("host") or "").strip()
+    user = str(payload.get("user") or saved_facts.get("user") or "").strip()
+    key_file = str(
+        payload.get("ssh_key_file")
+        or payload.get("key_file")
+        or saved_facts.get("ssh_key_file")
+        or ""
+    ).strip()
+    password = str(payload.get("password") or saved_facts.get("ssh_password") or saved_facts.get("password") or "")
     raw_port = payload.get("port") or 22
     try:
         port = int(raw_port)
@@ -608,6 +714,31 @@ def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> A
     new_config.ssh_user = user
     new_config.ssh_key_file = os.path.expanduser(key_file) if key_file else ""
     new_config.ssh_password = password
+    return new_config
+
+
+def _api_config_payload(config: AppConfig) -> dict[str, Any]:
+    return {
+        "base_url": config.base_url,
+        "model": config.model,
+        "api_key": config.api_key,
+        "api_key_configured": bool(config.api_key),
+    }
+
+
+def _api_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> AppConfig:
+    new_config = replace(config)
+    if "base_url" in payload:
+        new_config.base_url = str(payload.get("base_url") or "").strip()
+    if "model" in payload:
+        new_config.model = str(payload.get("model") or "").strip()
+    raw_key = str(payload.get("api_key") or "").strip()
+    if raw_key:
+        new_config.api_key = raw_key
+    if not new_config.api_key:
+        raise RuntimeError("OpenAI API Key 不能为空")
+    if not new_config.model:
+        raise RuntimeError("OpenAI 模型不能为空")
     return new_config
 
 
@@ -635,6 +766,33 @@ def _target_payload(config: AppConfig, env_profile: dict[str, Any]) -> dict[str,
             "package_manager": env_profile.get("package_manager", "unknown"),
         },
     }
+
+
+def _session_summary_payload(record) -> dict[str, Any]:
+    payload = record.summary().__dict__
+    context = dict(getattr(record, "context", {}) or {})
+    target_summary = str(context.get("target") or "").strip()
+    target_mode = str(context.get("target_mode") or "").strip().lower()
+    is_ssh = target_mode in {"remote", "ssh"} or target_summary.startswith("ssh://")
+    if is_ssh:
+        label = target_summary or "SSH target"
+        group = label.replace("ssh://", "SSH ", 1)
+        payload.update(
+            {
+                "target_mode": "ssh",
+                "target_summary": label,
+                "target_group": group,
+            }
+        )
+        return payload
+    payload.update(
+        {
+            "target_mode": "local",
+            "target_summary": target_summary or "本机控制端",
+            "target_group": "本机会话",
+        }
+    )
+    return payload
 
 
 def _task_payload(task: TaskRecord | None) -> dict[str, Any] | None:
@@ -721,10 +879,15 @@ def _lease_payload(lease) -> dict[str, Any]:
 
 
 def _target_profile_payload(profile: TargetProfile) -> dict[str, Any]:
+    facts = dict(profile.facts)
+    password_configured = bool(facts.get("ssh_password") or facts.get("password") or facts.get("password_configured"))
+    facts.pop("ssh_password", None)
+    facts.pop("password", None)
+    facts["password_configured"] = password_configured
     return {
         "target_id": profile.target_id,
         "label": profile.label,
-        "facts": dict(profile.facts),
+        "facts": facts,
         "common_services": list(profile.common_services),
         "risk_preferences": dict(profile.risk_preferences),
         "last_verification": profile.last_verification,
