@@ -33,3 +33,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sysdialogue*"]
+
+[tool.setuptools.package-data]
+sysdialogue = [
+    "web/templates/*.html",
+    "web/static/*",
+    "workflows/*.yaml",
+]

@@ -1,17 +1,20 @@
-"""Persistent web session service."""
+"""Persistent web session service for the SysDialogue operations console."""
 
 from __future__ import annotations
 
 import os
 import threading
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.error_presentation import present_error
-from sysdialogue.audit.serializers import format_audit_table
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskRecord, TaskStore
+from sysdialogue.agent.target_profile import TargetProfile, TargetProfileStore
+from sysdialogue.app.config import AppConfig
 from sysdialogue.app.runtime_factory import create_runtime
+from sysdialogue.audit.serializers import export_replay_package, format_audit_table
+from sysdialogue.audit.trace_store import AuditLog
 
 
 @dataclass
@@ -36,7 +39,7 @@ class _PendingInput:
 
 
 class WebSession:
-    def __init__(self, config, session_id: str):
+    def __init__(self, config: AppConfig, session_id: str):
         self.config = config
         self.runtime = create_runtime(
             config,
@@ -59,12 +62,12 @@ class WebSession:
         )
         self._recover_unowned_pending()
 
-    def state(self) -> dict:
+    def state(self) -> dict[str, Any]:
         with self._lock:
             self._recover_unowned_pending()
             record = self.runtime.session_store.ensure(self.session_id, surface="web")
             task = self.runtime.task_store.load(record.active_task_id) if record.active_task_id else None
-            audit_lines = format_audit_table(self.runtime.audit_log.read_all()).splitlines()[-20:]
+            audit_lines = format_audit_table(AuditLog(self.session_id).read_all()).splitlines()[-20:]
             last_result = next(
                 (
                     entry["text"]
@@ -78,7 +81,10 @@ class WebSession:
                 "status": record.status,
                 "entries": list(record.entries),
                 "task_events": list(record.task_events),
-                "pending_confirmation": _pending_confirmation_payload(self.pending_confirmation, record.pending_confirmation),
+                "pending_confirmation": _pending_confirmation_payload(
+                    self.pending_confirmation,
+                    record.pending_confirmation,
+                ),
                 "pending_input": _pending_input_payload(self.pending_input, record.pending_input),
                 "context": dict(record.context),
                 "result_summary": last_result,
@@ -98,6 +104,11 @@ class WebSession:
                     risk_level="SAFE",
                     target=str(self.runtime.env_profile.get("host") or self.runtime.env_profile.get("hostname") or ""),
                 ),
+                "sessions_hint": [summary.__dict__ for summary in self.runtime.session_store.list_summaries(limit=12)],
+                "task_summary": self.list_tasks(limit=12),
+                "locks": [_lease_payload(lease) for lease in self.runtime.lock_store.list_leases()],
+                "target_profiles": [_target_profile_payload(profile) for profile in self.runtime.target_profile_store.list_profiles(limit=20)],
+                "ui_warnings": _ui_warnings(record, task),
             }
 
     def start_turn(self, text: str) -> None:
@@ -177,7 +188,7 @@ class WebSession:
             self.runtime.session_store.set_status(self.session_id, "running", surface="web")
             self._worker = threading.Thread(
                 target=self._run_turn,
-                args=(f"继续任务：{task.goal}",),
+                args=("/resume",),
                 daemon=True,
             )
             self._worker.start()
@@ -194,10 +205,10 @@ class WebSession:
         )
         self.runtime.controller._emit_task_event(
             "skill_activated",
-            f"Skill activated: {invocation.name}",
+            f"已加载技能：{invocation.name}",
             {"skill": invocation.name, "source": "web", "record_path": invocation.record_path},
         )
-        return f"Activated skill {invocation.name}."
+        return f"已加载技能 {invocation.name}。"
 
     def configure_target(self, payload: dict[str, Any]) -> str:
         with self._lock:
@@ -219,7 +230,7 @@ class WebSession:
             except RuntimeError:
                 raise
             except Exception as exc:
-                raise RuntimeError(f"SSH 连接失败：{exc}") from exc
+                raise RuntimeError(f"SSH 连接失败：{_friendly_target_error(exc)}") from exc
             new_runtime.controller.event_callback = self._event_callback
             self.runtime = new_runtime
             self.config = new_config
@@ -228,7 +239,9 @@ class WebSession:
                 self.runtime.task_store,
                 surface="web",
             )
-            summary = _target_payload(self.config, self.runtime.env_profile)["summary"]
+            target = _target_payload(self.config, self.runtime.env_profile)
+            summary = target["summary"]
+            self._remember_current_target(target, payload)
             self.runtime.controller.conversation_manager.context["target"] = summary
             self.runtime.controller.conversation_manager.context["target_mode"] = (
                 "remote" if self.config.remote_mode else "local"
@@ -250,6 +263,31 @@ class WebSession:
         except Exception:
             pass
         return summary
+
+    def list_tasks(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return [_task_payload(task) for task in self.runtime.task_store.list_records(session_id=self.session_id, limit=limit)]
+
+    def task_detail(self, task_id: str) -> dict[str, Any]:
+        task = self.runtime.task_store.load(task_id)
+        if task is None or task.session_id != self.session_id:
+            raise FileNotFoundError(f"Task not found: {task_id}")
+        payload = asdict(task)
+        payload["summary"] = _task_payload(task)
+        return payload
+
+    def audit_summary(self, *, limit: int = 100) -> dict[str, Any]:
+        audit = AuditLog(self.session_id)
+        records = audit.read_all()
+        return {
+            "session_id": self.session_id,
+            "records": records[-limit:],
+            "table": format_audit_table(records).splitlines()[-limit:],
+            "count": len(records),
+        }
+
+    def export_audit(self) -> dict[str, str]:
+        path = export_replay_package(AuditLog(self.session_id))
+        return {"path": str(path)}
 
     def cancel(self) -> None:
         self.runtime.controller.request_cancel()
@@ -302,7 +340,7 @@ class WebSession:
             with self._lock:
                 self._worker = None
 
-    def _confirm_callback(self, req) -> bool:
+    def _confirm_callback(self, req) -> dict[str, Any]:
         pending = _PendingConfirmation(
             request_id=f"confirm_{uuid.uuid4().hex[:8]}",
             tool=req.tool,
@@ -391,7 +429,7 @@ class WebSession:
         return pending.value
 
     def _event_callback(self, event) -> None:
-        # Persistence is handled inside ReActRunner / SessionStore; keep this callback for in-process wakeups only.
+        # Persistence is handled inside ReActRunner / SessionStore; keep this callback for wakeups only.
         return None
 
     def _recover_unowned_pending(self) -> None:
@@ -434,13 +472,13 @@ class WebSession:
         )
         record = self.runtime.session_store.load(self.session_id)
         if record and record.pending_confirmation:
-            pending = dict(record.pending_confirmation)
-            pending["decision"] = decision if approved else "deny"
+            next_pending = dict(record.pending_confirmation)
+            next_pending["decision"] = decision if approved else "deny"
             self.runtime.session_store.set_status(
                 self.session_id,
                 "running",
                 surface="web",
-                pending_confirmation=pending,
+                pending_confirmation=next_pending,
             )
         return True
 
@@ -459,12 +497,43 @@ class WebSession:
         )
         return True
 
+    def _remember_current_target(self, target: dict[str, Any], payload: dict[str, Any]) -> None:
+        target_id = self.runtime.target_profile_store.target_id_from_env(
+            {
+                **self.runtime.env_profile,
+                "remote_mode": target.get("remote_mode"),
+                "host": target.get("host"),
+                "ssh_port": target.get("port"),
+            }
+        )
+        profile = self.runtime.target_profile_store.load(target_id) or TargetProfile(target_id=target_id)
+        profile.label = str(payload.get("label") or target.get("summary") or profile.label)
+        profile.facts.update(
+            {
+                "mode": target.get("mode"),
+                "host": target.get("host"),
+                "port": target.get("port"),
+                "user": target.get("user"),
+                "ssh_key_file": target.get("ssh_key_file"),
+                "password_configured": bool(target.get("password_configured")),
+                "summary": target.get("summary"),
+            }
+        )
+        env = target.get("env") or {}
+        if env:
+            profile.facts["env"] = env
+        self.runtime.target_profile_store.save(profile)
+
 
 class WebSessionStore:
-    def __init__(self, config):
+    def __init__(self, config: AppConfig):
         self.config = config
         self._sessions: dict[str, WebSession] = {}
         self._lock = threading.Lock()
+        self.session_store = SessionStore()
+        self.task_store = TaskStore()
+        self.lock_store = LockStore()
+        self.target_profile_store = TargetProfileStore()
 
     def get(self, session_id: str) -> WebSession:
         with self._lock:
@@ -474,9 +543,36 @@ class WebSessionStore:
                 self._sessions[session_id] = session
             return session
 
+    def create_session(self) -> dict[str, Any]:
+        session_id = f"web_{uuid.uuid4().hex[:12]}"
+        record = self.session_store.ensure(session_id, surface="web", title="新的 Web 会话")
+        return record.summary().__dict__
+
+    def list_sessions(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        return [summary.__dict__ for summary in self.session_store.list_summaries(limit=limit)]
+
+    def list_locks(self) -> list[dict[str, Any]]:
+        return [_lease_payload(lease) for lease in self.lock_store.list_leases()]
+
+    def list_targets(self) -> list[dict[str, Any]]:
+        return [_target_profile_payload(profile) for profile in self.target_profile_store.list_profiles(limit=50)]
+
+    def test_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            probe_config = _target_config_from_payload(self.config, payload)
+            runtime = create_runtime(probe_config, session_id=f"target_test_{uuid.uuid4().hex[:8]}", require_api=False, surface="web")
+            target = _target_payload(probe_config, runtime.env_profile)
+            runtime.close()
+            return {"ok": True, "summary": target["summary"], "target": target}
+        except RuntimeError as exc:
+            return {"ok": False, "category": _target_error_category(exc), "message": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "category": _target_error_category(exc), "message": _friendly_target_error(exc)}
+
 
 def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> AppConfig:
-    mode = str((payload or {}).get("mode") or "local").strip().lower()
+    payload = payload or {}
+    mode = str(payload.get("mode") or "local").strip().lower()
     if mode not in {"local", "ssh", "remote"}:
         raise RuntimeError("目标模式必须是 local 或 ssh")
     new_config = replace(config)
@@ -492,7 +588,7 @@ def _target_config_from_payload(config: AppConfig, payload: dict[str, Any]) -> A
     host = str(payload.get("host") or "").strip()
     user = str(payload.get("user") or "").strip()
     key_file = str(payload.get("ssh_key_file") or payload.get("key_file") or "").strip()
-    password = str(payload.get("password") or "").strip()
+    password = str(payload.get("password") or "")
     raw_port = payload.get("port") or 22
     try:
         port = int(raw_port)
@@ -520,7 +616,7 @@ def _target_payload(config: AppConfig, env_profile: dict[str, Any]) -> dict[str,
         summary = f"ssh://{config.ssh_user}@{config.ssh_host}:{config.ssh_port}"
         mode = "ssh"
     else:
-        summary = "local control machine"
+        summary = "本机控制端"
         mode = "local"
     return {
         "mode": mode,
@@ -541,7 +637,7 @@ def _target_payload(config: AppConfig, env_profile: dict[str, Any]) -> dict[str,
     }
 
 
-def _task_payload(task) -> dict[str, Any] | None:
+def _task_payload(task: TaskRecord | None) -> dict[str, Any] | None:
     if task is None:
         return None
     return {
@@ -555,6 +651,14 @@ def _task_payload(task) -> dict[str, Any] | None:
         "plan_id": task.plan_id,
         "workflow_name": task.workflow_name,
         "resume_message": task.resume_message,
+        "updated_at": task.updated_at,
+        "observed": task.observed,
+        "acted": task.acted,
+        "verified": task.verified,
+        "changed_state": task.changed_state,
+        "failed_mutations": list(task.failed_mutations),
+        "steps_count": len(task.steps),
+        "events_count": len(task.events),
     }
 
 
@@ -569,10 +673,9 @@ def _pending_confirmation_payload(
             "risk_level": pending.risk_level,
             "rollback_hint": pending.rollback_hint,
             "recoverable": True,
+            "request_id": pending.request_id,
         }
-    if not persisted:
-        return None
-    if persisted.get("resolved"):
+    if not persisted or persisted.get("resolved"):
         return None
     return {
         "tool": persisted.get("tool", ""),
@@ -580,6 +683,7 @@ def _pending_confirmation_payload(
         "risk_level": persisted.get("risk_level", ""),
         "rollback_hint": persisted.get("rollback_hint", ""),
         "recoverable": bool(_process_alive(persisted.get("owner_pid"))),
+        "request_id": persisted.get("request_id", ""),
     }
 
 
@@ -592,16 +696,81 @@ def _pending_input_payload(
             "prompt": pending.prompt,
             "multiline": pending.multiline,
             "recoverable": True,
+            "request_id": pending.request_id,
         }
-    if not persisted:
-        return None
-    if persisted.get("resolved"):
+    if not persisted or persisted.get("resolved"):
         return None
     return {
         "prompt": persisted.get("prompt", ""),
         "multiline": bool(persisted.get("multiline")),
         "recoverable": bool(_process_alive(persisted.get("owner_pid"))),
+        "request_id": persisted.get("request_id", ""),
     }
+
+
+def _lease_payload(lease) -> dict[str, Any]:
+    return {
+        "scope": lease.scope,
+        "scope_hash": lease.scope_hash,
+        "task_id": lease.task_id,
+        "session_id": lease.session_id,
+        "surface": lease.surface,
+        "acquired_at": lease.acquired_at,
+        "heartbeat_ts": lease.heartbeat_ts,
+    }
+
+
+def _target_profile_payload(profile: TargetProfile) -> dict[str, Any]:
+    return {
+        "target_id": profile.target_id,
+        "label": profile.label,
+        "facts": dict(profile.facts),
+        "common_services": list(profile.common_services),
+        "risk_preferences": dict(profile.risk_preferences),
+        "last_verification": profile.last_verification,
+        "updated_at": profile.updated_at,
+    }
+
+
+def _ui_warnings(record, task: TaskRecord | None) -> list[str]:
+    warnings: list[str] = []
+    if record.status == "interrupted":
+        warnings.append("上一轮任务已中断，可以点击恢复或重新发起。")
+    if task and task.status == "interrupted":
+        warnings.append("当前任务心跳已失效，恢复会从安全的阶段边界继续。")
+    return warnings
+
+
+def _friendly_target_error(exc: BaseException) -> str:
+    text = str(exc) or exc.__class__.__name__
+    category = _target_error_category(exc)
+    if category == "auth":
+        return f"SSH 认证失败，请检查用户名、密码、私钥或 ssh-agent。原始信息：{text}"
+    if category == "known_hosts":
+        return f"known_hosts 校验失败，请确认目标主机指纹可信后再连接。原始信息：{text}"
+    if category == "timeout":
+        return f"连接超时，请检查网络、端口和防火墙。原始信息：{text}"
+    if category == "not_found":
+        return f"请求的 Web 路由不存在，请刷新页面或重启 Web 服务。原始信息：{text}"
+    return text
+
+
+def _target_error_category(exc: BaseException) -> str:
+    text = str(exc).lower()
+    name = exc.__class__.__name__.lower()
+    if "not found" in text or "404" in text:
+        return "not_found"
+    if "auth" in text or "authentication" in text or "permission denied" in text:
+        return "auth"
+    if "known_hosts" in text or "host key" in text or "fingerprint" in text:
+        return "known_hosts"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "connection refused" in text or "no route" in text:
+        return "network"
+    if "ssh" in text or "paramiko" in name:
+        return "ssh"
+    return "runtime"
 
 
 def _process_alive(pid: Any) -> bool:

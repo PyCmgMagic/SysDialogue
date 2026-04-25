@@ -4,9 +4,13 @@ import os
 import threading
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
 from sysdialogue.app.config import AppConfig
 from sysdialogue.agent.state_store import SessionStore, TaskStore
-from sysdialogue.web.service import WebSession, _process_alive, _target_config_from_payload, _target_payload
+from sysdialogue.audit.trace_store import AuditLog
+from sysdialogue.web.app import create_web_app
+from sysdialogue.web.service import WebSession, WebSessionStore, _process_alive, _target_config_from_payload, _target_payload
 
 
 def _fake_web_session(session_id: str, session_store: SessionStore, task_store: TaskStore) -> WebSession:
@@ -188,3 +192,96 @@ def test_web_target_payload_does_not_expose_ssh_password() -> None:
     assert payload["password_configured"] is True
     assert "password" not in payload
     assert "secret" not in str(payload)
+
+
+def test_web_session_store_can_create_and_list_sessions(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = WebSessionStore(AppConfig(api_key="key", model="model"))
+
+    created = store.create_session()
+    sessions = store.list_sessions()
+
+    assert created["session_id"].startswith("web_")
+    assert any(item["session_id"] == created["session_id"] for item in sessions)
+
+
+def test_web_target_test_rejects_bad_payload_without_switching_runtime(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = WebSessionStore(AppConfig(api_key="key", model="model"))
+
+    result = store.test_target({"mode": "ssh", "host": "example.com"})
+
+    assert result["ok"] is False
+    assert "SSH 用户名不能为空" in result["message"]
+
+
+def test_task_and_audit_serializers_use_session_id(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_store = SessionStore()
+    task_store = TaskStore()
+    task = task_store.create(
+        task_id="task_web",
+        session_id="web_tasks",
+        surface="web",
+        goal="检查系统",
+        status="running",
+    )
+    session_store.ensure("web_tasks", surface="web")
+    session = _fake_web_session("web_tasks", session_store, task_store)
+
+    tasks = session.list_tasks()
+    detail = session.task_detail(task.task_id)
+
+    assert tasks[0]["task_id"] == "task_web"
+    assert detail["task_id"] == "task_web"
+    assert detail["summary"]["goal"] == "检查系统"
+
+
+def test_web_app_exposes_console_routes_without_requiring_target_switch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    client = TestClient(create_web_app(AppConfig(api_key="key", model="model")))
+
+    root = client.get("/")
+    sessions = client.get("/api/sessions")
+    created = client.post("/api/sessions", json={})
+    locks = client.get("/api/locks")
+    target_test = client.post("/api/targets/test", json={"mode": "ssh", "host": "example.com"})
+
+    assert root.status_code == 200
+    assert "/static/web.css" in root.text
+    assert sessions.status_code == 200
+    assert created.status_code == 200
+    assert created.json()["session"]["session_id"].startswith("web_")
+    assert locks.status_code == 200
+    assert target_test.status_code == 200
+    assert target_test.json()["ok"] is False
+    assert "SSH 用户名不能为空" in target_test.json()["message"]
+
+
+def test_web_app_serializes_tasks_and_audit(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    TaskStore().create(
+        task_id="task_route",
+        session_id="web_route",
+        surface="web",
+        goal="检查负载",
+        status="running",
+    )
+    AuditLog(session_id="web_route").log_final(final_status="completed")
+    client = TestClient(create_web_app(AppConfig(api_key="key", model="model")))
+
+    tasks = client.get("/api/session/web_route/tasks")
+    audit = client.get("/api/session/web_route/audit")
+    exported = client.post("/api/session/web_route/audit/export", json={})
+
+    assert tasks.status_code == 200
+    assert tasks.json()["tasks"][0]["task_id"] == "task_route"
+    assert audit.status_code == 200
+    assert audit.json()["count"] >= 1
+    assert exported.status_code == 200
+    assert exported.json()["path"].endswith(".zip")

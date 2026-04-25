@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
@@ -15,16 +16,26 @@ from sysdialogue.web.service import WebSessionStore
 def create_web_app(config) -> FastAPI:
     app = FastAPI(title="SysDialogue Web Console")
     store = WebSessionStore(config)
-    templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+    base_dir = Path(__file__).parent
+    templates = Jinja2Templates(directory=str(base_dir / "templates"))
+    app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        session = store.get("default")
+        session = store.session_store.ensure("default", surface="web", title="默认 Web 会话")
         return templates.TemplateResponse(
             request=request,
             name="index.html",
             context={"session_id": session.session_id},
         )
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        return {"sessions": store.list_sessions()}
+
+    @app.post("/api/sessions")
+    async def create_session():
+        return {"ok": True, "session": store.create_session()}
 
     @app.get("/api/session/{session_id}/state")
     async def get_state(session_id: str):
@@ -101,6 +112,25 @@ def create_web_app(config) -> FastAPI:
             target=target,
         )
 
+    @app.get("/api/session/{session_id}/tasks")
+    async def list_tasks(session_id: str):
+        return {"tasks": store.get(session_id).list_tasks()}
+
+    @app.get("/api/session/{session_id}/tasks/{task_id}")
+    async def task_detail(session_id: str, task_id: str):
+        try:
+            return store.get(session_id).task_detail(task_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/session/{session_id}/audit")
+    async def get_audit(session_id: str):
+        return store.get(session_id).audit_summary()
+
+    @app.post("/api/session/{session_id}/audit/export")
+    async def export_audit(session_id: str):
+        return {"ok": True, **store.get(session_id).export_audit()}
+
     @app.post("/api/session/{session_id}/target")
     async def configure_target(session_id: str, payload: dict):
         try:
@@ -108,6 +138,18 @@ def create_web_app(config) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "summary": summary}
+
+    @app.get("/api/locks")
+    async def list_locks():
+        return {"locks": store.list_locks()}
+
+    @app.get("/api/targets")
+    async def list_targets():
+        return {"targets": store.list_targets()}
+
+    @app.post("/api/targets/test")
+    async def test_target(payload: dict):
+        return store.test_target(payload)
 
     @app.post("/api/session/{session_id}/confirm")
     async def submit_confirm(session_id: str, payload: dict):

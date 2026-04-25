@@ -544,6 +544,13 @@ class TaskStore:
             audit_refs=list(data.get("audit_refs") or []),
         )
 
+    def list_records(self, *, session_id: str | None = None, limit: int = 50) -> list[TaskRecord]:
+        records = [record for record in (self.load(path.stem) for path in self.storage_dir.glob("*.json")) if record]
+        if session_id:
+            records = [record for record in records if record.session_id == session_id]
+        records.sort(key=lambda item: item.updated_at, reverse=True)
+        return records[:limit]
+
     def save(self, record: TaskRecord) -> TaskRecord:
         record.updated_at = _now_iso()
         _atomic_write_json(self._path(record.task_id), asdict(record))
