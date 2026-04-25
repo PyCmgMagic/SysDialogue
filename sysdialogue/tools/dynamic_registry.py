@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,6 +44,8 @@ class DynamicTool(TypedDict):
     name: str
     description: str
     cmd_template: list[str]
+    execution_mode: str
+    shell_command: str
     cwd: str | None
     params: dict
     risk_level: str          # 永远 "UNKNOWN"
@@ -67,10 +70,17 @@ class DynToolResult:
     exit_code: int = 0
     reason: str = ""
     cmd: list[str] = field(default_factory=list)
+    effective_cmd: list[str] = field(default_factory=list)
+    privileged: bool = False
+    privilege_reason: str = ""
     cwd: str | None = None
     final_risk: str = "UNKNOWN"
     declared_changes_state: bool = True
     changes_state: bool = True
+    safety_profile: str = "standard"
+    execution_mode: str = "argv"
+    shell_command: str = ""
+    hard_blocked: bool = False
 
 
 _READ_ONLY_COMMAND_BASENAMES = {
@@ -254,9 +264,13 @@ class DynamicToolRegistry:
         for tool in tools[:limit]:
             params = ", ".join(list((tool.get("params") or {}).keys())[:4]) or "-"
             mode = "mutating" if tool.get("changes_state", True) else "read-only"
-            template = " ".join((tool.get("cmd_template") or [])[:4])
+            execution_mode = str(tool.get("execution_mode") or "argv")
+            if execution_mode == "shell":
+                template = str(tool.get("shell_command") or "")[:80]
+            else:
+                template = " ".join((tool.get("cmd_template") or [])[:4])
             lines.append(
-                f"  - {tool.get('tool_id')}: {tool.get('name')} | {mode} | params: {params} | template: {template}"
+                f"  - {tool.get('tool_id')}: {tool.get('name')} | {mode} | {execution_mode} | params: {params} | template: {template}"
             )
         return "\n".join(lines)
 
@@ -266,6 +280,8 @@ class DynamicToolRegistry:
         name: str,
         description: str,
         cmd_template: list[str],
+        execution_mode: str = "argv",
+        shell_command: str = "",
         params: dict,
         cwd: str | None = None,
         consequences: str,
@@ -279,11 +295,15 @@ class DynamicToolRegistry:
         _validate_tool_spec(
             name=name,
             cmd_template=cmd_template,
+            execution_mode=execution_mode,
+            shell_command=shell_command,
             cwd=cwd,
             params=params,
         )
         signature = _tool_signature(
             cmd_template=cmd_template,
+            execution_mode=execution_mode,
+            shell_command=shell_command,
             cwd=cwd,
             params=params,
             changes_state=bool(changes_state),
@@ -303,6 +323,8 @@ class DynamicToolRegistry:
                 "name": name,
                 "description": description,
                 "cmd_template": cmd_template,
+                "execution_mode": _normalize_execution_mode(execution_mode),
+                "shell_command": shell_command,
                 "cwd": cwd,
                 "params": params,
                 "risk_level": "UNKNOWN",
@@ -350,6 +372,8 @@ class DynamicToolRegistry:
         env_profile: "EnvProfile",
         confirm_fn: Callable[[dict], bool],
         timeout: int = 30,
+        safety_profile: str = "standard",
+        privileged: bool = False,
         cwd: str | None = None,
     ) -> DynToolResult:
         """Execute a DynTool through the three-layer safety chain."""
@@ -368,6 +392,8 @@ class DynamicToolRegistry:
             confirm_fn=confirm_fn,
             timeout=timeout,
             cwd=cwd,
+            safety_profile=safety_profile,
+            privileged=privileged,
             persist_usage=True,
         )
 
@@ -377,6 +403,8 @@ class DynamicToolRegistry:
         name: str,
         description: str,
         cmd_template: list[str],
+        execution_mode: str = "argv",
+        shell_command: str = "",
         params: dict,
         cwd: str | None = None,
         args: dict,
@@ -389,11 +417,15 @@ class DynamicToolRegistry:
         env_profile: "EnvProfile",
         confirm_fn: Callable[[dict], bool],
         timeout: int = 30,
+        safety_profile: str = "standard",
+        privileged: bool = False,
     ) -> DynToolResult:
         try:
             _validate_tool_spec(
-                name=name or _default_tool_name(cmd_template),
+                name=name or _default_tool_name(cmd_template or [shell_command]),
                 cmd_template=cmd_template,
+                execution_mode=execution_mode,
+                shell_command=shell_command,
                 cwd=cwd,
                 params=params,
             )
@@ -407,9 +439,11 @@ class DynamicToolRegistry:
             )
         tool: DynamicTool = {
             "tool_id": "adhoc_" + uuid.uuid4().hex[:8],
-            "name": name or _default_tool_name(cmd_template),
+            "name": name or _default_tool_name(cmd_template or [shell_command]),
             "description": description or "Ad-hoc dynamic execution",
             "cmd_template": cmd_template,
+            "execution_mode": _normalize_execution_mode(execution_mode),
+            "shell_command": shell_command,
             "cwd": cwd,
             "params": params,
             "risk_level": "UNKNOWN",
@@ -424,6 +458,8 @@ class DynamicToolRegistry:
             "safety_overrides": 0,
             "signature": _tool_signature(
                 cmd_template=cmd_template,
+                execution_mode=execution_mode,
+                shell_command=shell_command,
                 cwd=cwd,
                 params=params,
                 changes_state=bool(changes_state),
@@ -439,6 +475,8 @@ class DynamicToolRegistry:
             confirm_fn=confirm_fn,
             timeout=timeout,
             cwd=cwd,
+            safety_profile=safety_profile,
+            privileged=privileged,
             persist_usage=False,
         )
 
@@ -453,10 +491,15 @@ class DynamicToolRegistry:
         confirm_fn: Callable[[dict], bool],
         timeout: int,
         cwd: str | None,
+        safety_profile: str,
+        privileged: bool,
         persist_usage: bool,
     ) -> DynToolResult:
         declared_changes_state = bool(tool.get("changes_state", True))
         effective_cwd = cwd if cwd is not None else tool.get("cwd")
+        safety_profile = _normalize_safety_profile(safety_profile)
+        execution_mode = _normalize_execution_mode(str(tool.get("execution_mode") or "argv"))
+        shell_template = str(tool.get("shell_command") or "")
 
         missing = _missing_required_args(tool, args)
         if missing:
@@ -468,7 +511,12 @@ class DynamicToolRegistry:
             )
 
         # 渲染 cmd
-        cmd = self._render(tool["cmd_template"], args)
+        shell_command = ""
+        if execution_mode == "shell":
+            shell_command = self._render_shell(shell_template, args)
+            cmd = _shell_command_check_argv(shell_command)
+        else:
+            cmd = self._render(tool["cmd_template"], args)
         cwd_error = _validate_cwd(effective_cwd, executor, env_profile)
         if cwd_error:
             return DynToolResult(
@@ -478,6 +526,9 @@ class DynamicToolRegistry:
                 changes_state=True,
             )
         unresolved = _unresolved_placeholders(cmd)
+        if execution_mode == "shell":
+            unresolved.extend(_unresolved_placeholders_in_text(shell_command))
+            unresolved = sorted(set(unresolved))
         if unresolved:
             return DynToolResult(
                 success=False, blocked=True, cmd=cmd,
@@ -486,15 +537,79 @@ class DynamicToolRegistry:
                 changes_state=True,
             )
 
-        mapped = StaticRuleMapper.map(cmd)
+        if execution_mode == "shell" and safety_profile == "standard":
+            return DynToolResult(
+                success=False,
+                blocked=True,
+                cmd=cmd,
+                cwd=effective_cwd,
+                final_risk="BLOCK",
+                reason="DynTool shell execution requires operator or break_glass safety_profile.",
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
+                safety_profile=safety_profile,
+                execution_mode=execution_mode,
+                shell_command=shell_command,
+                hard_blocked=True,
+            )
+
+        privileged_cmd = _strip_sudo_prefix(cmd)
+        auto_privilege_reason = ""
+        if privileged_cmd is None and execution_mode == "argv":
+            auto_privilege_reason = _auto_privilege_reason(cmd, env_profile)
+        requires_privileged = bool(privileged) or privileged_cmd is not None or bool(auto_privilege_reason)
+        check_cmd = privileged_cmd if privileged_cmd is not None else cmd
+
+        hard_block = _hard_block_reason(
+            cmd=check_cmd,
+            shell_command=shell_command,
+            execution_mode=execution_mode,
+            env_profile=env_profile,
+        )
+        if hard_block:
+            return DynToolResult(
+                success=False,
+                blocked=True,
+                cmd=cmd,
+                effective_cmd=check_cmd,
+                cwd=effective_cwd,
+                final_risk="BLOCK",
+                reason=hard_block,
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
+                safety_profile=safety_profile,
+                execution_mode=execution_mode,
+                shell_command=shell_command,
+                hard_blocked=True,
+            )
+
+        container_block = "" if safety_profile == "break_glass" else _container_command_block_reason(
+            check_cmd,
+            env_profile,
+            privileged=requires_privileged,
+        )
+        if container_block:
+            return DynToolResult(
+                success=False,
+                blocked=True,
+                cmd=cmd,
+                cwd=effective_cwd,
+                final_risk="BLOCK",
+                reason=container_block,
+                declared_changes_state=declared_changes_state,
+                changes_state=True,
+            )
+
+        mapped = StaticRuleMapper.map(check_cmd)
         effective_changes_state = _effective_changes_state(
             declared_changes_state=declared_changes_state,
-            cmd=cmd,
+            cmd=check_cmd,
             mapped=mapped,
         )
 
         # 第一层：形态检查
-        safety = check_command(cmd, env_profile)
+        safety = check_command(check_cmd, env_profile)
+        safety = _profile_adjusted_safety(safety, safety_profile)
         if safety.level == "BLOCK":
             return DynToolResult(
                 success=False, blocked=True, cmd=cmd,
@@ -508,6 +623,22 @@ class DynamicToolRegistry:
         highest = safety.level
         if mapped is not None:
             rc = risk_classify(mapped.tool, mapped.args, env_profile)
+            if rc.level == "BLOCK":
+                if safety_profile in {"operator", "break_glass"} and not _hard_rule_ids(rc.rule_ids):
+                    rc.level = "WARN-HIGH"
+                    rc.requires_confirmation = safety_profile != "break_glass"
+                else:
+                    return DynToolResult(
+                        success=False, blocked=True, cmd=cmd,
+                        final_risk="BLOCK",
+                        reason=f"瀵硅薄璇箟 BLOCK锛堟槧灏勫埌 {mapped.tool}锛夛細{rc.reason}",
+                        declared_changes_state=declared_changes_state,
+                        changes_state=effective_changes_state,
+                        safety_profile=safety_profile,
+                        execution_mode=execution_mode,
+                        shell_command=shell_command,
+                        hard_blocked=True,
+                    )
             if rc.level == "BLOCK":
                 return DynToolResult(
                     success=False, blocked=True, cmd=cmd,
@@ -524,8 +655,15 @@ class DynamicToolRegistry:
             "tool_id": tool_id,
             "tool_name": tool["name"],
             "cmd": cmd,
+            "effective_cmd": check_cmd,
+            "privileged": requires_privileged,
+            "privilege_reason": auto_privilege_reason or ("explicit_sudo_prefix" if privileged_cmd is not None else ""),
             "cwd": effective_cwd,
             "dynamic_mode": "registered" if persist_usage else "inline",
+            "safety_profile": safety_profile,
+            "execution_mode": execution_mode,
+            "shell_command": shell_command,
+            "hard_blocked": False,
             "safety_level": safety.level,
             "safety_rules": safety.rule_ids,
             "mapped_tool": mapped.tool if mapped else None,
@@ -554,9 +692,12 @@ class DynamicToolRegistry:
 
         # Execute sudo-shaped commands through the executor privilege path so
         # password prompts remain centralized, auditable, and cwd-aware.
-        stripped = _strip_sudo_prefix(cmd)
-        if stripped is not None and hasattr(executor, "run_privileged"):
-            output, exit_code = executor.run_privileged(stripped, timeout=timeout, cwd=effective_cwd)
+        if execution_mode == "shell" and requires_privileged:
+            output, exit_code = executor.run_privileged_shell(shell_command, timeout=timeout, cwd=effective_cwd)
+        elif execution_mode == "shell":
+            output, exit_code = executor.run_shell(shell_command, timeout=timeout, cwd=effective_cwd)
+        elif requires_privileged:
+            output, exit_code = executor.run_privileged(check_cmd, timeout=timeout, cwd=effective_cwd)
         else:
             output, exit_code = executor.run(cmd, timeout=timeout, cwd=effective_cwd)
 
@@ -577,11 +718,20 @@ class DynamicToolRegistry:
 
         return DynToolResult(
             success=(exit_code == 0),
-            cmd=cmd, output=output, exit_code=exit_code,
+            cmd=cmd,
+            effective_cmd=check_cmd,
+            privileged=requires_privileged,
+            privilege_reason=auto_privilege_reason or ("explicit_sudo_prefix" if privileged_cmd is not None else ""),
+            output=output,
+            exit_code=exit_code,
             cwd=effective_cwd,
             final_risk=highest,
             declared_changes_state=declared_changes_state,
             changes_state=effective_changes_state,
+            safety_profile=safety_profile,
+            execution_mode=execution_mode,
+            shell_command=shell_command,
+            hard_blocked=False,
         )
 
     # ------------------------------------------------------------------
@@ -599,9 +749,136 @@ class DynamicToolRegistry:
             ))
         return rendered
 
+    @staticmethod
+    def _render_shell(shell_command: str, args: dict) -> str:
+        return re.sub(
+            r"\{(\w+)\}",
+            lambda m: str(args.get(m.group(1), m.group(0))),
+            str(shell_command or ""),
+        )
+
+    @staticmethod
+    def _render_shell(shell_command: str, args: dict) -> str:
+        return re.sub(
+            r"\{(\w+)\}",
+            lambda m: str(args.get(m.group(1), m.group(0))),
+            str(shell_command or ""),
+        )
+
 
 def _level_rank(level: str) -> int:
     return {"SAFE": 0, "WARN-LOW": 1, "WARN-HIGH": 2, "BLOCK": 3}.get(level, 0)
+
+
+_HARD_SAFETY_RULES = {"CS003", "CS004", "CS010", "B010", "B015", "B016", "B017"}
+
+
+def _hard_rule_ids(rule_ids: list[str]) -> bool:
+    return any(str(rule_id) in _HARD_SAFETY_RULES for rule_id in (rule_ids or []))
+
+
+def _profile_adjusted_safety(safety, safety_profile: str):
+    profile = _normalize_safety_profile(safety_profile)
+    if profile in {"operator", "break_glass"} and safety.level == "BLOCK" and not _hard_rule_ids(safety.rule_ids):
+        return type(safety)(
+            level="WARN-HIGH",
+            rule_ids=list(safety.rule_ids),
+            reason=f"soft-block downgraded by {profile}: {safety.reason}",
+        )
+    return safety
+
+
+def _hard_block_reason(
+    *,
+    cmd: list[str],
+    shell_command: str,
+    execution_mode: str,
+    env_profile: "EnvProfile",
+) -> str:
+    rule_ids: list[str] = []
+    base_names = {_command_basename(part).lower() for part in (cmd or [])}
+    if base_names.intersection({"su", "runuser"}):
+        rule_ids.append("CS010")
+    if base_names.intersection({"mkfs", "dd", "shred"}) or any(name.startswith("mkfs.") for name in base_names):
+        rule_ids.append("CS004")
+    if _is_rm_rf_core(cmd):
+        rule_ids.append("CS003")
+    if _references_sensitive_credential(cmd):
+        rule_ids.append("CREDENTIAL_PATH")
+
+    shell_text = str(shell_command or "")
+    if execution_mode == "shell" and shell_text:
+        lowered = shell_text.lower()
+        if re.search(r"(^|[;&|()\s])(su|runuser)(\s|$)", lowered):
+            rule_ids.append("CS010")
+        if re.search(r"\becho\s+\S+\s*\|\s*(sudo|su|runuser)\b", lowered) or re.search(r"\|\s*sudo\s+-s\b", lowered, re.I):
+            rule_ids.append("PASSWORD_PIPE")
+        if re.search(r"(^|[;&|()\s])(mkfs(\.\S+)?|dd|shred)(\s|$)", lowered):
+            rule_ids.append("CS004")
+        if re.search(r"\brm\s+[^;&|]*-[^\s;&|]*r[^\s;&|]*f[^\s;&|]*\s+(/|/etc|/usr|/boot|/lib|/bin|/sbin)(\s|$|[;&|])", lowered):
+            rule_ids.append("CS003")
+        shell_tokens = _shell_command_check_argv(shell_text)
+        if _references_sensitive_credential(shell_tokens):
+            rule_ids.append("CREDENTIAL_PATH")
+
+    if env_profile and (env_profile or {}).get("remote_mode"):
+        from sysdialogue.security.remote_lockout import assess_cmd as lockout_assess_cmd
+        lockout = lockout_assess_cmd(cmd, env_profile)
+        if lockout.level == "BLOCK":
+            rule_ids.extend(lockout.rule_ids)
+            if lockout.reason:
+                return f"CommandSafetyChecker BLOCK: {', '.join(sorted(set(rule_ids)))} {lockout.reason}"
+
+    if rule_ids:
+        return f"CommandSafetyChecker BLOCK: {', '.join(sorted(set(rule_ids)))} hard-blocked unsafe dynamic command"
+    return ""
+
+
+def _is_rm_rf_core(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    try:
+        rm_index = next(
+            index for index, part in enumerate(cmd)
+            if _command_basename(str(part)).lower() in {"rm", "rmdir"}
+        )
+    except StopIteration:
+        return False
+    args = [str(part) for part in cmd[rm_index + 1:]]
+    flags = "".join(arg for arg in args if arg.startswith("-"))
+    has_recursive_force = "r" in flags.lower() and "f" in flags.lower()
+    if not has_recursive_force:
+        return False
+    core_targets = {"/", "/etc", "/usr", "/boot", "/lib", "/bin", "/sbin"}
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        normalized = pp.normalize(arg)
+        if normalized in core_targets:
+            return True
+    return False
+
+
+def _references_sensitive_credential(tokens: list[str]) -> bool:
+    for token in tokens or []:
+        text = str(token).strip("'\"")
+        if not text or text.startswith("-"):
+            continue
+        if pp.matches_sensitive_credential(text):
+            return True
+    return False
+
+
+def _shell_command_check_argv(shell_command: str) -> list[str]:
+    """Parse shell-like text into tokens used for safety analysis."""
+    try:
+        return shlex.split(str(shell_command or ""), posix=True)
+    except ValueError:
+        return [str(shell_command or "")]
+
+
+def _unresolved_placeholders_in_text(text: str) -> list[str]:
+    return sorted(set(re.findall(r"\{(\w+)\}", str(text or ""))))
 
 
 def _validate_cwd(cwd: str | None, executor: "SafeExecutor", env_profile: "EnvProfile") -> str:
@@ -622,6 +899,56 @@ def _validate_cwd(cwd: str | None, executor: "SafeExecutor", env_profile: "EnvPr
             return f"DynTool cwd does not exist or is not a directory: {cwd_text}"
     elif not os.path.isdir(cwd_text):
         return f"DynTool cwd does not exist or is not a directory: {cwd_text}"
+    return ""
+
+
+def _container_command_block_reason(
+    cmd: list[str],
+    env_profile: "EnvProfile",
+    *,
+    privileged: bool = False,
+) -> str:
+    if not cmd:
+        return ""
+    base = str(cmd[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if base not in {"docker", "podman"}:
+        return ""
+    backend = str((env_profile or {}).get("container_backend") or "none").lower()
+    if backend == base:
+        return ""
+    error = str((env_profile or {}).get("container_backend_error") or "")
+    if privileged and base == "docker" and error == "docker_permission_denied":
+        return ""
+    detail = "当前环境未检测到可用 Docker/Podman 后端"
+    if error == "docker_permission_denied":
+        detail = "当前用户没有 Docker socket 访问权限"
+    elif error == "docker_unavailable":
+        detail = "Docker 命令存在但 daemon/API 不可用"
+    elif error == "podman_unavailable":
+        detail = "Podman 命令存在但不可用"
+    return (
+        f"DynTool 拒绝直接执行 {base} 命令：{detail}。"
+        "请先修复容器运行时/权限，或改用非容器静态工具完成当前任务。"
+    )
+
+
+def _auto_privilege_reason(cmd: list[str], env_profile: "EnvProfile") -> str:
+    """Prefer task completion for Docker socket permission errors.
+
+    If Docker is present but the current user cannot read the socket, the safe
+    repair path is the executor's privileged runner. That path keeps passwords
+    out of argv/audit while preserving all DynTool safety, confirmation, and
+    ReAct verification gates.
+    """
+    if not cmd:
+        return ""
+    base = str(cmd[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if base != "docker":
+        return ""
+    backend = str((env_profile or {}).get("container_backend") or "none").lower()
+    error = str((env_profile or {}).get("container_backend_error") or "")
+    if backend == "none" and error == "docker_permission_denied":
+        return "docker_socket_permission_denied"
     return ""
 
 
@@ -659,13 +986,26 @@ def _strip_sudo_prefix(cmd: list[str]) -> list[str] | None:
     return inner
 
 
-def _validate_tool_spec(*, name: str, cmd_template: list[str], cwd: str | None = None, params: dict) -> None:
+def _validate_tool_spec(
+    *,
+    name: str,
+    cmd_template: list[str],
+    execution_mode: str = "argv",
+    shell_command: str = "",
+    cwd: str | None = None,
+    params: dict,
+) -> None:
     if not str(name).strip():
         raise ValueError("DynTool name 不能为空")
-    if not cmd_template:
+    mode = _normalize_execution_mode(execution_mode)
+    if mode == "argv" and not cmd_template:
         raise ValueError("cmd_template 不能为空")
+    if mode == "shell" and not str(shell_command).strip():
+        raise ValueError("shell_command cannot be empty")
     if len(cmd_template) > 10:
         raise ValueError("cmd_template 元素数量超过 10")
+    if len(str(shell_command)) > 8192:
+        raise ValueError("shell_command is too long")
     if not isinstance(params, dict):
         raise ValueError("params 必须是对象")
     for token in cmd_template:
@@ -679,6 +1019,8 @@ def _validate_tool_spec(*, name: str, cmd_template: list[str], cwd: str | None =
 def _tool_signature(
     *,
     cmd_template: list[str],
+    execution_mode: str = "argv",
+    shell_command: str = "",
     cwd: str | None = None,
     params: dict,
     changes_state: bool,
@@ -693,7 +1035,9 @@ def _tool_signature(
     }
     return json.dumps(
         {
+            "execution_mode": _normalize_execution_mode(execution_mode),
             "cmd_template": [str(token) for token in cmd_template],
+            "shell_command": str(shell_command or ""),
             "cwd": cwd or None,
             "params": normalized_params,
             "changes_state": bool(changes_state),
@@ -709,6 +1053,8 @@ def _find_by_signature(data: dict[str, DynamicTool], signature: str) -> DynamicT
     for tool in data.values():
         tool_signature = tool.get("signature") or _tool_signature(
             cmd_template=list(tool.get("cmd_template") or []),
+            execution_mode=str(tool.get("execution_mode") or "argv"),
+            shell_command=str(tool.get("shell_command") or ""),
             cwd=tool.get("cwd"),
             params=dict(tool.get("params") or {}),
             changes_state=bool(tool.get("changes_state", True)),
@@ -762,7 +1108,22 @@ def _legacy_tool_signature(
     )
 
 
-def _default_tool_name(cmd_template: list[str]) -> str:
+def _normalize_execution_mode(value: str) -> str:
+    mode = str(value or "argv").strip().lower()
+    return "shell" if mode == "shell" else "argv"
+
+
+def _normalize_safety_profile(value: str) -> str:
+    profile = str(value or "standard").strip().lower().replace("-", "_")
+    return profile if profile in {"standard", "operator", "break_glass"} else "standard"
+
+
+def _default_tool_name(cmd_template: list[str] | str) -> str:
+    if isinstance(cmd_template, str):
+        try:
+            cmd_template = shlex.split(cmd_template, posix=True)
+        except ValueError:
+            cmd_template = [cmd_template]
     if not cmd_template:
         return "adhoc_command"
     return _command_basename(str(cmd_template[0])) or "adhoc_command"
@@ -794,6 +1155,15 @@ def _is_read_only_dynamic_command(cmd: list[str]) -> bool:
         return any(part in {"-version", "--version", "-v", "version"} for part in lowered[1:])
     if base == "systemctl":
         return len(lowered) >= 2 and lowered[1] in {"status", "is-active", "is-enabled", "show"}
+    if base in {"docker", "podman"}:
+        return len(lowered) >= 2 and lowered[1] in {
+            "ps",
+            "images",
+            "inspect",
+            "logs",
+            "info",
+            "version",
+        }
     if base in {"curl", "wget"}:
         text = " ".join(lowered)
         write_markers = (" -x post", " -x put", " -x patch", " -x delete", " --request post", " --request put", " --request patch", " --request delete", " -d ", " --data")

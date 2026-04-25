@@ -124,6 +124,47 @@ def test_permission_policy_denial_is_returned_as_tool_error(tmp_path: Path) -> N
     assert any(span.span_type == "guardrail" and span.status == "denied" for span in spans)
 
 
+def test_session_always_grant_skips_later_warn_high_tool_confirmation(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.registry.register(
+        ToolDef(
+            name="create_user",
+            fn=lambda executor, username: ToolResult(success=True, data={"username": username}),
+            schema={
+                "name": "create_user",
+                "description": "Create user",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"username": {"type": "string"}},
+                    "required": ["username"],
+                },
+            },
+        )
+    )
+    confirmations: list[str] = []
+    controller.confirm_callback = lambda req: confirmations.append(req.tool) or {
+        "approved": True,
+        "decision": "always_this_session",
+    }
+    controller.bind_task("task_session_grant")
+    controller.task_store.create(
+        task_id="task_session_grant",
+        session_id=controller.session_id,
+        surface="test",
+        goal="create users",
+    )
+
+    try:
+        first = controller._dispatch_tool("create_user", {"username": "alice"}, "tool_1")
+        second = controller._dispatch_tool("create_user", {"username": "bob"}, "tool_2")
+    finally:
+        controller.unbind_task()
+
+    assert first["is_error"] is False
+    assert second["is_error"] is False
+    assert confirmations == ["create_user"]
+
+
 def test_memory_manager_redacts_secret_and_renders_summary(tmp_path: Path) -> None:
     memory = MemoryManager(str(tmp_path / "memory"))
 

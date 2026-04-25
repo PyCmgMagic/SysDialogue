@@ -1,4 +1,4 @@
-"""CommandSafetyChecker — DynTool 通路的命令形态检查（CS001-CS009）。
+"""CommandSafetyChecker — DynTool 通路的命令形态检查（CS001-CS010）。
 
 用于 DynamicToolRegistry 执行前对 argv 做形态级安全校验。
 远程锁门场景委托 `security/remote_lockout.py::assess_cmd` 统一处理。
@@ -53,12 +53,22 @@ _SYSTEM_DIR_PREFIXES_CS = (
 
 
 def check_command(cmd: list[str], env_profile: "EnvProfile | None" = None) -> SafetyDecision:
-    """对 argv 做 CS001-CS009 形态级校验，叠加远程锁门。"""
+    """对 argv 做 CS001-CS010 形态级校验，叠加远程锁门。"""
     if not cmd:
         return SafetyDecision(level="SAFE")
 
     decision = SafetyDecision(level="SAFE")
     base = _base_name(cmd[0])
+
+    # CS010: interactive privilege switching. Use sudo argv routed through
+    # run_privileged() instead; su/runuser can hang on password prompts and
+    # encourages unsafe password handling.
+    if base in {"su", "runuser"}:
+        decision = _elevate(decision, SafetyDecision(
+            level="BLOCK",
+            rule_ids=["CS010"],
+            reason="禁止通过 su/runuser 交互式切换用户；需要提权时请使用 sudo argv，由受控 privileged executor 处理密码",
+        ))
 
     # CS001: shell 元字符
     for tok in cmd:

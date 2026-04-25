@@ -76,6 +76,15 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "maxItems": 10,
                 "description": "subprocess argv，用 {param_name} 表示参数占位符，每元素 ≤ 256 字符",
             },
+            "execution_mode": {
+                "type": "string",
+                "enum": ["argv", "shell"],
+                "default": "argv",
+            },
+            "shell_command": {
+                "type": "string",
+                "description": "Reusable shell template for execution_mode=shell.",
+            },
             "cwd": {
                 "type": "string",
                 "description": "Optional absolute working directory. Use it for project commands instead of shell cd.",
@@ -100,7 +109,6 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
         "required": [
             "intent_summary",
             "proposed_tool_name",
-            "cmd_template",
             "consequences",
             "risk_assessment",
             "estimated_risk",
@@ -112,11 +120,11 @@ PROPOSE_DYNAMIC_TOOL_SCHEMA: dict = {
 EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
     "name": META_EXECUTE_DYNAMIC_TOOL,
     "description": (
-        "Execute DynTool in one of two modes: "
-        "1) registered mode with tool_id + args, for an already registered reusable DynTool; "
-        "2) inline mode with cmd_template + args, for a one-off ad-hoc command without registering a persistent tool. "
+        "Execute a one-off dynamic command by default. Provide cmd_template (argv list) plus optional args/cwd/metadata. "
+        "Aliases command/cmd/argv are accepted and normalized to cmd_template. "
+        "Only use tool_id + args when reusing a previously registered dyn_* tool returned by propose_dynamic_tool. "
         "Execution always passes through CommandSafetyChecker, static semantic risk mapping, user confirmation, audit, and ReAct completion gates. "
-        "Prefer inline mode for one-off tasks; use propose_dynamic_tool only when the command family should be reused later."
+        "Do not call this tool with only args; it must include either cmd_template/command/argv or a dyn_* tool_id."
     ),
     "input_schema": {
         "type": "object",
@@ -127,7 +135,41 @@ EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 10,
-                "description": "inline mode 使用的 subprocess argv 模板，用 {param_name} 表示参数占位符",
+                "description": "一次性动态命令的 subprocess argv 模板，用 {param_name} 表示参数占位符",
+            },
+            "execution_mode": {
+                "type": "string",
+                "enum": ["argv", "shell"],
+                "default": "argv",
+                "description": "argv uses cmd_template. shell uses shell_command and requires operator or break_glass safety profile.",
+            },
+            "shell_command": {
+                "type": "string",
+                "description": "Shell command string for execution_mode=shell; supports pipes, redirects, and compound commands in break_glass.",
+            },
+            "privileged": {
+                "type": "boolean",
+                "default": False,
+                "description": "Run through the controlled privileged executor; sudo passwords never appear in argv or audit command text.",
+            },
+            "command": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+                "description": "cmd_template 的兼容别名；字符串会按 shell-like argv 拆分但不会通过 shell 执行",
+            },
+            "cmd": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+                "description": "cmd_template 的兼容别名",
+            },
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "cmd_template 的兼容别名",
             },
             "cwd": {
                 "type": "string",
@@ -162,7 +204,7 @@ EXECUTE_DYNAMIC_TOOL_SCHEMA: dict = {
                 "default": 30,
             },
         },
-        "required": ["args"],
+        "required": [],
     },
 }
 

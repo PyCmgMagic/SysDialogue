@@ -65,6 +65,18 @@ def test_load_config_clamps_max_iterations(monkeypatch, tmp_path) -> None:
     assert load_config().max_iterations == 160
 
 
+def test_load_config_reads_safety_profile_and_operator_compat(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SYSDIALOGUE_SAFETY_PROFILE", "break-glass")
+    assert load_config().safety_profile == "break_glass"
+
+    monkeypatch.delenv("SYSDIALOGUE_SAFETY_PROFILE")
+    monkeypatch.setenv("SYSDIALOGUE_OPERATOR_MODE", "1")
+    assert load_config().safety_profile == "operator"
+
+    assert load_config(safety_profile="break_glass").safety_profile == "break_glass"
+
+
 def test_load_config_reads_ssh_password_from_environment(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SYSDIALOGUE_SSH_PASSWORD", "secret")
@@ -109,6 +121,24 @@ def test_tui_remote_cli_accepts_ssh_password_option(monkeypatch, tmp_path) -> No
     assert config.ssh_host == "example.test"
     assert config.ssh_port == 2222
     assert config.ssh_password == "secret"
+
+
+def test_cli_break_glass_sets_safety_profile(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    captured = {}
+
+    def fake_run_tui(config):
+        captured["config"] = config
+
+    monkeypatch.setattr(cli_module, "_run_tui", fake_run_tui)
+    result = CliRunner().invoke(
+        main,
+        ["--break-glass", "--model", "model"],
+        env={"OPENAI_API_KEY": "key"},
+    )
+
+    assert result.exit_code == 0
+    assert captured["config"].safety_profile == "break_glass"
 
 
 def test_cli_help_no_longer_exposes_dev_mode() -> None:

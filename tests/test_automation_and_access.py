@@ -8,6 +8,7 @@ from sysdialogue.agent.conversation import ConversationManager
 from sysdialogue.app.config import AppConfig
 from sysdialogue.app.jobs import run_scheduled_job
 from sysdialogue.runtime.capability_probe import CapabilityProbe
+from sysdialogue.security.command_safety import check_command
 from sysdialogue.security import path_policies as path_policies
 from sysdialogue.security.risk_classifier import classify
 from sysdialogue.tools import auth_keys as auth_keys_module
@@ -18,6 +19,7 @@ from sysdialogue.tools.cron_jobs import get_cron_job, manage_cron
 from sysdialogue.tools.file_ops import copy_move_path
 from sysdialogue.tools.firewall import manage_firewall
 from sysdialogue.tools.containers import manage_container
+from sysdialogue.tools.registry import default_registry
 from sysdialogue.tools.services import manage_service
 from sysdialogue.tools.users_groups import create_user
 
@@ -256,6 +258,129 @@ def test_manage_container_exec_uses_argv_without_shell() -> None:
     assert result.success is True
     assert executor.calls[0] == ["docker", "exec", "mysql-test", "mysql", "-uroot", "-e", "SELECT 1"]
     assert result.data["verification_candidate"] is True
+
+
+def test_manage_container_accepts_arguments_alias_through_registry() -> None:
+    executor = RecordingExecutor()
+    registry = default_registry()
+
+    result = registry.call(
+        "manage_container",
+        {
+            "action": "exec",
+            "name": "db",
+            "arguments": ["mysql", "-e", "SELECT 1"],
+        },
+        executor=executor,
+        env_profile={"container_backend": "docker"},
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["docker", "exec", "db", "mysql", "-e", "SELECT 1"]
+
+
+def test_manage_container_defaults_to_list_when_action_missing() -> None:
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("containers", 0))
+    registry = default_registry()
+
+    result = registry.call(
+        "manage_container",
+        {},
+        executor=executor,
+        env_profile={"container_backend": "docker"},
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["docker", "ps", "-a"]
+
+
+def test_manage_container_accepts_arguments_alias_directly() -> None:
+    executor = RecordingExecutor()
+
+    result = manage_container(
+        executor,
+        action="exec",
+        backend="docker",
+        name="db",
+        arguments=["mysql", "-e", "SELECT 1"],
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["docker", "exec", "db", "mysql", "-e", "SELECT 1"]
+
+
+def test_modify_user_groups_accepts_arguments_alias_through_registry() -> None:
+    executor = RecordingExecutor()
+    registry = default_registry()
+
+    result = registry.call(
+        "modify_user_groups",
+        {
+            "username": "foofish",
+            "arguments": {"groups": ["docker"], "action": "add"},
+        },
+        executor=executor,
+    )
+
+    assert result.success is True
+    assert executor.calls[0] == ["sudo", "-n", "--", "usermod", "-aG", "docker", "foofish"]
+
+
+def test_command_safety_blocks_su_privilege_switching() -> None:
+    decision = check_command(["su", "root", "-c", "docker ps -a"], env_profile={})
+
+    assert decision.level == "BLOCK"
+    assert "CS010" in decision.rule_ids
+
+
+def test_manage_container_docker_permission_denied_is_actionable() -> None:
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: (
+            "permission denied while trying to connect to the Docker API at unix:///var/run/docker.sock",
+            1,
+        )
+    )
+
+    result = manage_container(
+        executor,
+        action="list",
+        backend="docker",
+    )
+
+    assert result.success is False
+    assert "Docker socket" in result.error
+    assert "不要继续重试容器工具" in result.error
+
+
+def test_manage_container_missing_backend_returns_actionable_error() -> None:
+    result = manage_container(
+        RecordingExecutor(),
+        action="list",
+        backend="auto",
+        env_profile={"container_backend": "none"},
+    )
+
+    assert result.success is False
+    assert "Docker/Podman" in result.error
+    assert "get_system_info" in result.error
+
+
+def test_capability_probe_disables_docker_when_socket_permission_denied() -> None:
+    def handler(cmd: list[str], timeout: int):
+        if cmd == ["which", "docker"]:
+            return ("/usr/bin/docker", 0)
+        if cmd == ["docker", "info"]:
+            return ("permission denied while trying to connect to the Docker API at unix:///var/run/docker.sock", 1)
+        if cmd == ["which", "podman"]:
+            return ("", 1)
+        if cmd[:1] == ["which"]:
+            return ("", 1)
+        return ("", 1)
+
+    profile = CapabilityProbe(RecordingExecutor(handler=handler)).probe()
+
+    assert profile["container_backend"] == "none"
+    assert profile["container_backend_error"] == "docker_permission_denied"
 
 
 def test_manage_container_wait_exec_retries_read_only_mysql_ping() -> None:

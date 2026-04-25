@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from sysdialogue.agent.command_registry import CommandRegistry
 from sysdialogue.agent.conversation import ConversationManager
-from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
+from sysdialogue.agent.dynamic_args import (
+    normalize_execute_dynamic_tool_args,
+    normalize_propose_dynamic_tool_args,
+)
 from sysdialogue.agent.hooks import HookEvent, HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy
@@ -29,6 +32,7 @@ from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
 from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision, classify
 from sysdialogue.tools.base import ToolResult
+from sysdialogue.tools.arg_normalizer import normalize_tool_call_args
 from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
 from sysdialogue.tools.meta_tools import (
     META_ACTIVATE_SKILL,
@@ -180,6 +184,7 @@ class AgentController:
     hook_manager: HookManager | None = None
     role_runner: RoleRunner | None = None
     target_profile_store: TargetProfileStore | None = None
+    safety_profile: str = "standard"
 
     # 运行时状态
     _session_counters: dict = field(default_factory=dict)
@@ -197,6 +202,7 @@ class AgentController:
     _forced_resume_task_id: str | None = None
 
     def __post_init__(self) -> None:
+        self.safety_profile = _normalize_safety_profile(self.safety_profile)
         if self.session_store is None:
             self.session_store = SessionStore()
         if self.task_store is None:
@@ -224,6 +230,7 @@ class AgentController:
             self._env_sanitized,
             self.registry,
             dynamic_tools_summary=self._dynamic_tools_prompt_summary(),
+            safety_profile=self.safety_profile,
         )
         self._env_profile_id = self.audit_log.log_env_profile(self._env_sanitized)
         if self.conversation_manager is None:
@@ -308,6 +315,8 @@ class AgentController:
             )
             return _tool_result_block(tool_use_id, f"未注册工具：{name}", is_error=True)
 
+        args = normalize_tool_call_args(name, args)
+
         # 安全门判定
         decision: RiskDecision = classify(
             name,
@@ -364,7 +373,24 @@ class AgentController:
                     is_error=True,
                 )
 
-        policy_asks = bool(policy_decision and policy_decision.requires_confirmation and not decision.requires_confirmation)
+        policy_allows = _policy_allows_without_confirmation(policy_decision)
+        if policy_allows and policy_decision is not None:
+            self.audit_log.log_decision(
+                tool=name,
+                args=args,
+                risk_level=decision.level,
+                rule_ids=[policy_decision.rule_id],
+                reason=policy_decision.reason,
+                decision="permission_auto_allowed",
+                env_profile_id=self._env_profile_id,
+            )
+
+        policy_asks = bool(
+            policy_decision
+            and policy_decision.requires_confirmation
+            and not decision.requires_confirmation
+            and not policy_allows
+        )
         confirm_decision = decision
         if policy_asks and policy_decision is not None:
             confirm_decision = RiskDecision(
@@ -375,7 +401,7 @@ class AgentController:
                 rollback_hint=decision.rollback_hint,
             )
 
-        if decision.requires_confirmation or policy_asks:
+        if (decision.requires_confirmation or policy_asks) and not policy_allows:
             self._emit_task_event(
                 "confirmation_requested",
                 f"{name} requires confirmation ({confirm_decision.level})",
@@ -520,6 +546,39 @@ class AgentController:
             plan_steps = args.get("plan_steps") or []
             planner = self._get_planning_engine()
             frozen = planner.freeze(plan_steps)
+            if frozen.has_fatal_errors():
+                if self.current_task_id and self.task_store is not None:
+                    self.task_store.update(
+                        self.current_task_id,
+                        mode="direct",
+                        plan_id="",
+                        current_phase="analysis",
+                    )
+                    self.task_store.set_steps(self.current_task_id, [])
+                self.audit_log.log_decision(
+                    tool=META_SET_EXECUTION_MODE, args=args,
+                    risk_level="SAFE", rule_ids=[],
+                    reason="invalid plan definition",
+                    decision="plan_rejected",
+                    plan_id=frozen.plan_id,
+                    env_profile_id=self._env_profile_id,
+                )
+                return _tool_result_block(
+                    tool_use_id,
+                    json.dumps(
+                        {
+                            **frozen.summary(),
+                            "success": False,
+                            "message": (
+                                "Invalid plan definition; the plan was not activated. "
+                                "Resubmit set_execution_mode(mode='plan') with valid plan_steps, "
+                                "or switch to direct mode before continuing."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    is_error=True,
+                )
             if self.current_task_id and self.task_store is not None:
                 from sysdialogue.agent.state_store import TaskStepRecord
 
@@ -572,6 +631,14 @@ class AgentController:
             )
 
         # direct 或未指定
+        if self.current_task_id and self.task_store is not None:
+            self.task_store.update(
+                self.current_task_id,
+                mode="direct",
+                plan_id="",
+                current_phase="analysis",
+            )
+            self.task_store.set_steps(self.current_task_id, [])
         self.audit_log.log_decision(
             tool=META_SET_EXECUTION_MODE, args=args,
             risk_level="SAFE", rule_ids=[],
@@ -846,6 +913,7 @@ class AgentController:
             skills_summary=skills_summary,
             hooks_summary=hooks_summary,
             target_summary=target_summary,
+            safety_profile=self.safety_profile,
         )
 
     def _dynamic_tools_prompt_summary(self) -> str | None:
@@ -857,6 +925,12 @@ class AgentController:
             return None
 
     def _handle_propose_dynamic_tool(self, args: dict, tool_use_id: str) -> dict:
+        if not isinstance(args, dict):
+            return _tool_result_block(
+                tool_use_id,
+                "propose_dynamic_tool 参数必须是对象。一次性命令请优先直接调用 execute_dynamic_tool 并提供 cmd_template/command/argv。",
+                is_error=True,
+            )
         if self.dynamic_registry is None:
             self.audit_log.log_decision(
                 tool=META_PROPOSE_DYNAMIC_TOOL, args=args,
@@ -870,11 +944,14 @@ class AgentController:
                 "DynTool registry is unavailable; runtime did not inject DynamicToolRegistry.",
                 is_error=True,
             )
+        args = normalize_propose_dynamic_tool_args(args)
         try:
             dt = self.dynamic_registry.register(
                 name=args.get("proposed_tool_name", ""),
                 description=args.get("intent_summary", ""),
                 cmd_template=args.get("cmd_template") or [],
+                execution_mode=str(args.get("execution_mode") or ("shell" if args.get("shell_command") else "argv")),
+                shell_command=str(args.get("shell_command") or ""),
                 params=args.get("params") or {},
                 cwd=args.get("cwd") or None,
                 consequences=args.get("consequences", ""),
@@ -906,6 +983,8 @@ class AgentController:
                 "tool_id": dt["tool_id"], "name": dt["name"],
                 "estimated_risk": dt["estimated_risk"],
                 "changes_state": dt.get("changes_state", True),
+                "execution_mode": dt.get("execution_mode", "argv"),
+                "shell_command": dt.get("shell_command", ""),
                 "reused_existing": bool(dt.get("reused_existing")),
                 "note": "这是可复用 DynTool；如需执行，请继续调用 execute_dynamic_tool。对于一次性命令，也可以直接用 execute_dynamic_tool 的 inline cmd_template 模式。",
             }, ensure_ascii=False),
@@ -936,18 +1015,33 @@ class AgentController:
         args = normalize_execute_dynamic_tool_args(args)
         raw_tool_id = args.get("tool_id", "")
         has_tool_id = isinstance(raw_tool_id, str) and bool(raw_tool_id.strip())
-        cmd_template = args.get("cmd_template")
-        has_inline_template = isinstance(cmd_template, list) and bool(cmd_template)
-        if has_tool_id and has_inline_template:
+        execution_mode = str(args.get("execution_mode") or ("shell" if args.get("shell_command") else "argv")).strip().lower()
+        if execution_mode not in {"argv", "shell"}:
             return _tool_result_block(
                 tool_use_id,
-                "execute_dynamic_tool 不能同时传 tool_id 和 cmd_template；请选择 registered 或 inline 其中一种模式。",
+                "execute_dynamic_tool.execution_mode must be 'argv' or 'shell'.",
                 is_error=True,
             )
-        if not has_tool_id and not has_inline_template:
+        cmd_template = args.get("cmd_template")
+        has_inline_template = isinstance(cmd_template, list) and bool(cmd_template)
+        shell_command = str(args.get("shell_command") or "").strip()
+        has_inline_shell = execution_mode == "shell" and bool(shell_command)
+        if has_tool_id and (has_inline_template or has_inline_shell):
             return _tool_result_block(
                 tool_use_id,
-                "execute_dynamic_tool 需要 registered 模式的 tool_id，或 inline 模式的非空 cmd_template。",
+                "execute_dynamic_tool 不能同时传 tool_id 和 cmd_template；已有 dyn_* 工具 ID 时只传 tool_id + args，一次性命令只传 cmd_template/command/argv + args。",
+                is_error=True,
+            )
+        if not has_tool_id and execution_mode == "argv" and not has_inline_template:
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool 缺少可执行命令。一次性命令请提供 cmd_template/command/argv，例如 {\"cmd_template\":[\"uname\",\"-a\"],\"args\":{},\"changes_state\":false}；只有复用已注册 dyn_* 工具时才需要 tool_id。",
+                is_error=True,
+            )
+        if not has_tool_id and execution_mode == "shell" and not has_inline_shell:
+            return _tool_result_block(
+                tool_use_id,
+                "execute_dynamic_tool shell mode requires a non-empty shell_command.",
                 is_error=True,
             )
         dyn_args = args.get("args") or {}
@@ -991,6 +1085,36 @@ class AgentController:
             return lock_error
 
         def confirm_dynamic(payload: dict) -> bool:
+            final_risk = str(payload.get("final_risk") or "UNKNOWN")
+            if self.safety_profile == "break_glass" and not payload.get("hard_blocked"):
+                self.audit_log.log_decision(
+                    tool=META_EXECUTE_DYNAMIC_TOOL,
+                    args=payload,
+                    risk_level=final_risk,
+                    rule_ids=["BREAK_GLASS"],
+                    reason="break_glass safety profile auto-approved DynTool execution.",
+                    decision="break_glass_auto_allowed",
+                    env_profile_id=self._env_profile_id,
+                )
+                self._trace(
+                    "guardrail",
+                    "break_glass_dyntool",
+                    status="ok",
+                    summary="break_glass auto-approved DynTool execution",
+                    data={"cmd": payload.get("cmd"), "execution_mode": payload.get("execution_mode")},
+                )
+                return True
+            if self.safety_profile == "operator" and final_risk in {"SAFE", "WARN-LOW"}:
+                self.audit_log.log_decision(
+                    tool=META_EXECUTE_DYNAMIC_TOOL,
+                    args=payload,
+                    risk_level=final_risk,
+                    rule_ids=["OPERATOR"],
+                    reason="operator safety profile auto-approved low-risk DynTool execution.",
+                    decision="operator_auto_allowed",
+                    env_profile_id=self._env_profile_id,
+                )
+                return True
             if self.permission_policy is not None:
                 policy_decision = self.permission_policy.evaluate_command(
                     argv=list(payload.get("cmd") or []),
@@ -1019,6 +1143,17 @@ class AgentController:
                         env_profile_id=self._env_profile_id,
                     )
                     return False
+                if _policy_allows_without_confirmation(policy_decision):
+                    self.audit_log.log_decision(
+                        tool=META_EXECUTE_DYNAMIC_TOOL,
+                        args=payload,
+                        risk_level=str(payload.get("final_risk") or "UNKNOWN"),
+                        rule_ids=[policy_decision.rule_id],
+                        reason=policy_decision.reason,
+                        decision="permission_auto_allowed",
+                        env_profile_id=self._env_profile_id,
+                    )
+                    return True
             reason = (
                 f"DynTool 将执行：{payload.get('tool_name')}；"
                 f"命令 argv={payload.get('cmd')}；"
@@ -1102,12 +1237,16 @@ class AgentController:
                     confirm_fn=confirm_dynamic,
                     timeout=timeout,
                     cwd=cwd,
+                    safety_profile=self.safety_profile,
+                    privileged=bool(args.get("privileged", False)),
                 )
             else:
                 result = self.dynamic_registry.execute_inline(
                     name=str(args.get("tool_name") or ""),
                     description=str(args.get("intent_summary") or ""),
-                    cmd_template=list(cmd_template),
+                    cmd_template=list(cmd_template or []),
+                    execution_mode=execution_mode,
+                    shell_command=shell_command,
                     params=inline_params if isinstance(inline_params, dict) else {},
                     cwd=cwd,
                     args=dyn_args,
@@ -1120,6 +1259,8 @@ class AgentController:
                     env_profile=self.env_profile,
                     confirm_fn=confirm_dynamic,
                     timeout=timeout,
+                    safety_profile=self.safety_profile,
+                    privileged=bool(args.get("privileged", False)),
                 )
         except Exception as exc:
             self.audit_log.log_decision(
@@ -1144,12 +1285,19 @@ class AgentController:
             "exit_code": result.exit_code,
             "reason": result.reason,
             "cmd": result.cmd,
+            "effective_cmd": result.effective_cmd,
+            "privileged": result.privileged,
+            "privilege_reason": result.privilege_reason,
             "cwd": result.cwd,
             "final_risk": result.final_risk,
             "declared_changes_state": result.declared_changes_state,
             "changes_state": result.changes_state,
             "dynamic_mode": "registered" if has_tool_id else "inline",
             "tool_id": raw_tool_id.strip() if has_tool_id else None,
+            "safety_profile": result.safety_profile,
+            "execution_mode": result.execution_mode,
+            "shell_command": result.shell_command,
+            "hard_blocked": result.hard_blocked,
         }
         self.audit_log.log_command(
             tool=META_EXECUTE_DYNAMIC_TOOL,
@@ -1168,6 +1316,9 @@ class AgentController:
                 "exit_code": result.exit_code,
                 "cwd": result.cwd,
                 "changes_state": result.changes_state,
+                "safety_profile": result.safety_profile,
+                "execution_mode": result.execution_mode,
+                "hard_blocked": result.hard_blocked,
             },
         )
         return _tool_result_block(
@@ -1404,6 +1555,27 @@ def _confirmation_outcome(value: Any) -> tuple[bool, bool]:
             "always_this_session",
         }
     return bool(value), False
+
+
+def _policy_allows_without_confirmation(policy_decision: Any) -> bool:
+    """Only explicit policy/session allows may skip a confirmation prompt.
+
+    ``PermissionPolicy`` deliberately returns ``allow`` for the default
+    RiskClassifier fallback. That default must not suppress WARN-HIGH prompts;
+    otherwise every high-risk static tool would become auto-approved. Session
+    grants and explicit allow rules are the cases where the user/operator has
+    already made an allow decision for this scope.
+    """
+
+    if policy_decision is None or getattr(policy_decision, "action", "") != "allow":
+        return False
+    rule_id = str(getattr(policy_decision, "rule_id", "") or "")
+    return bool(rule_id and not rule_id.startswith("default:"))
+
+
+def _normalize_safety_profile(value: str | None) -> str:
+    normalized = str(value or "standard").strip().lower().replace("-", "_")
+    return normalized if normalized in {"standard", "operator", "break_glass"} else "standard"
 
 
 # --------------------------------------------------------------------------

@@ -216,7 +216,8 @@ def _permissions(controller: Any) -> str:
     policy = getattr(controller, "permission_policy", None)
     if policy is None:
         return "PermissionPolicy is unavailable."
-    return policy.render_summary()
+    profile = str(getattr(controller, "safety_profile", "standard") or "standard")
+    return f"SafetyProfile: {profile}\n{policy.render_summary()}"
 
 
 def _compact(controller: Any, arg: str) -> str:

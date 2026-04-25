@@ -165,6 +165,29 @@ def test_task_timeline_corrections_are_debug_details_not_main_thinking() -> None
     assert sum("ReAct 纠偏记录" in item for item in state["details"]) == 1
 
 
+def test_task_timeline_compacts_repeated_tool_errors() -> None:
+    card = TaskTimelineCard("检查系统版本和负载")
+
+    for index in range(3):
+        card.apply_event("tool_started", "raw", {"tool": "handoff_to_role", "args_preview": "{}"})
+        card.apply_event(
+            "tool_finished",
+            "raw",
+            {
+                "tool": "handoff_to_role",
+                "success": False,
+                "error_summary": "handoff_to_role requires role and objective.",
+                "raw_result_preview": "handoff_to_role requires role and objective.",
+            },
+        )
+
+    state = card.snapshot()
+    assert len(state["tools"]) == 1
+    assert "失败×3" in state["tools"][0]
+    assert len(state["errors"]) == 1
+    assert "失败×3" in state["errors"][0]
+
+
 def test_tui_persists_history_to_shared_runtime_session(tmp_path) -> None:
     from sysdialogue.agent.state_store import SessionStore
 

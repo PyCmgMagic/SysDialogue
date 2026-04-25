@@ -83,7 +83,7 @@ def create_runtime(
             username=config.ssh_user,
             password=config.ssh_password or None,
             key_filename=config.ssh_key_file or None,
-            sudo_password=config.ssh_sudo_password or None,
+            sudo_password=config.ssh_sudo_password or config.ssh_password or None,
         )
         executor = RemoteExecutor(ssh_cfg)
         executor.connect()
@@ -131,6 +131,7 @@ def create_runtime(
         llm_client=llm_client,
         dynamic_registry=DynamicToolRegistry(),
         max_iterations=config.max_iterations,
+        safety_profile=config.safety_profile,
         workflows_dir=Path(config.workflows_dir) if config.workflows_dir else None,
         surface=surface,
         session_store=session_store,

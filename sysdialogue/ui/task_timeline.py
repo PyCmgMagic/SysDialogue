@@ -67,6 +67,9 @@ class TaskTimelineCard(Vertical):
         self._correction_detail = ""
         self._tool_call_count   = 0
         self._tool_ok_count     = 0
+        self._tool_error_counts: dict[str, int] = {}
+        self._tool_error_indices: dict[str, int] = {}
+        self._error_indices: dict[str, int] = {}
 
         g = get_glyphs()
         self._header            = Static(classes="card_header")
@@ -215,13 +218,50 @@ class TaskTimelineCard(Vertical):
             self._tool_ok_count += 1
             output = data.get("output_preview")
             suffix = f" — {output}" if output else ""
-            self._tools.append(f"{g.ok} `{name}`  完成{suffix}")
+            self._replace_last_running_tool(name, f"{g.ok} `{name}`  完成{suffix}")
         else:
             summary = data.get("error_summary") or f"{kind}调用失败。"
-            self._tools.append(f"{g.fail} `{name}`  失败：{summary}")
-            self._errors.append(f"{kind} `{name}` 失败：{summary}")
+            signature = f"{name}\n{summary}"
+            count = self._tool_error_counts.get(signature, 0) + 1
+            self._tool_error_counts[signature] = count
+            suffix = f"失败×{count}" if count > 1 else "失败"
+            line = f"{g.fail} `{name}`  {suffix}：{summary}"
+            error_line = f"{kind} `{name}` {suffix}：{summary}"
+            index = self._tool_error_indices.get(signature)
+            if index is not None and 0 <= index < len(self._tools):
+                self._tools[index] = line
+                self._remove_last_running_tool(name)
+            else:
+                self._replace_last_running_tool(name, line)
+                self._tool_error_indices[signature] = max(0, len(self._tools) - 1)
+            self._upsert_error_line(signature, error_line)
         if data.get("raw_result_preview"):
             self._details.append(_detail_block(f"{name} — 原始输出", data["raw_result_preview"]))
+
+    def _replace_last_running_tool(self, name: str, line: str) -> None:
+        marker = f"`{name}`"
+        for index in range(len(self._tools) - 1, -1, -1):
+            current = self._tools[index]
+            if marker in current and "执行中" in current:
+                self._tools[index] = line
+                return
+        self._tools.append(line)
+
+    def _remove_last_running_tool(self, name: str) -> None:
+        marker = f"`{name}`"
+        for index in range(len(self._tools) - 1, -1, -1):
+            current = self._tools[index]
+            if marker in current and "执行中" in current:
+                del self._tools[index]
+                return
+
+    def _upsert_error_line(self, signature: str, line: str) -> None:
+        index = self._error_indices.get(signature)
+        if index is not None and 0 <= index < len(self._errors):
+            self._errors[index] = line
+            return
+        self._error_indices[signature] = len(self._errors)
+        self._errors.append(line)
 
     def _record_finish(self, data: dict[str, Any]) -> None:
         status = data.get("status") or "completed"

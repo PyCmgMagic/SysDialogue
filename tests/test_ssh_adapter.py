@@ -139,3 +139,31 @@ def test_remote_executor_quotes_cwd_before_command() -> None:
     assert code == 0
     assert out == "ok"
     assert client.commands[0] == "cd '/tmp/app dir' && mvn test"
+
+
+def test_remote_executor_runs_shell_command_with_cwd() -> None:
+    executor = RemoteExecutor(SSHConfig(host="example.test"))
+    client = _FakeClient(_FakeStream(b"ok"), _FakeStream(b""))
+    executor._client = client
+
+    out, code = executor.run_shell("echo hi && pwd > out.txt", timeout=5, cwd="/tmp/app dir")
+
+    assert code == 0
+    assert out == "ok"
+    assert client.commands[0] == "cd '/tmp/app dir' && echo hi && pwd > out.txt"
+
+
+def test_remote_executor_runs_privileged_shell_with_sudo_password() -> None:
+    executor = RemoteExecutor(
+        SSHConfig(host="example.test", username="alice", sudo_password="secret")
+    )
+    client = _FakeClient(_FakeStream(b"ok"), _FakeStream(b""))
+    executor._client = client
+
+    out, code = executor.run_privileged_shell("systemctl restart demo.service", timeout=5)
+
+    assert code == 0
+    assert out == "ok"
+    assert client.stdin.writes == ["secret\n"]
+    assert "secret" not in client.commands[0]
+    assert "sudo -S -p '' -- sh -lc 'systemctl restart demo.service'" in client.commands[0]

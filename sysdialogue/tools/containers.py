@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import shlex
 import time
+from typing import Any
 
 from sysdialogue.runtime.secure_runner import SafeExecutor
 from sysdialogue.security import path_policies as pp
@@ -17,28 +19,46 @@ VALID_ACTIONS = {
 
 def manage_container(
     executor: SafeExecutor,
-    action: str,
+    action: str = "list",
     backend: str = "auto",
     name: str | None = None,
+    container_name: str | None = None,
     image: str | None = None,
     ports: list[dict] | None = None,
     env_vars: dict | None = None,
     volumes: list[dict] | None = None,
     restart_policy: str | None = None,
     command: list[str] | None = None,
+    arguments: list[str] | str | None = None,
+    argv: list[str] | str | None = None,
+    cmd: list[str] | str | None = None,
+    exec_command: list[str] | str | None = None,
     lines: int = 50,
     retries: int = 10,
     interval_sec: float = 2,
     success_contains: str | None = None,
     env_profile: dict | None = None,
+    **_: Any,
 ) -> ToolResult:
     """Manage containers without shell, privileged, or host-network support."""
+    if not name and container_name:
+        name = container_name
+    if command is None:
+        command = _coerce_argv(arguments if arguments is not None else argv if argv is not None else cmd if cmd is not None else exec_command)
+
     if action not in VALID_ACTIONS:
         return ToolResult(success=False, error=f"Invalid action: {action}")
 
     be = _resolve_backend(backend, env_profile)
     if not be:
-        return ToolResult(success=False, error="Unable to determine container backend")
+        return ToolResult(
+            success=False,
+            error=(
+                "未检测到可用的容器后端（Docker/Podman）。"
+                "请在目标机安装并启动 docker/podman，或在目标配置中确认 container_backend；"
+                "如果只是检查系统状态，请改用 get_system_info/list_processes/get_port_status 等非容器工具。"
+            ),
+        )
 
     if action == "list":
         cmd = [be, "ps", "-a"]
@@ -91,7 +111,8 @@ def manage_container(
         return _run_exec(executor, cmd, name=name or "", command=command or [], read_only_reason=read_only_reason)
 
     out, code = executor.run(cmd, timeout=timeout)
-    return ToolResult(success=(code == 0), data=out, error=out if code != 0 else "", exit_code=code, cmd_trace=[" ".join(cmd)])
+    error = _container_runtime_error(out) if code != 0 else ""
+    return ToolResult(success=(code == 0), data=out, error=error or (out if code != 0 else ""), exit_code=code, cmd_trace=[" ".join(cmd)])
 
 
 def _run_exec(
@@ -114,7 +135,8 @@ def _run_exec(
         "read_only_reason": read_only_reason,
     }
     output = (result.stdout + ("\n" + result.stderr if result.stderr else "")).strip()
-    return ToolResult(success=(result.exit_code == 0), data=data, error=output if result.exit_code != 0 else "", exit_code=result.exit_code, cmd_trace=[" ".join(cmd)])
+    error = _container_runtime_error(output) if result.exit_code != 0 else ""
+    return ToolResult(success=(result.exit_code == 0), data=data, error=error or (output if result.exit_code != 0 else ""), exit_code=result.exit_code, cmd_trace=[" ".join(cmd)])
 
 
 def _run_wait_exec(
@@ -179,6 +201,38 @@ def _validate_exec_args(action: str, name: str | None, command: list[str] | None
     if len(command) > 20:
         return False, f"{action} command is too long"
     return True, ""
+
+
+def _coerce_argv(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            return shlex.split(text, posix=True)
+        except ValueError:
+            return [text]
+    return []
+
+
+def _container_runtime_error(output: str) -> str:
+    text = str(output or "")
+    lower = text.lower()
+    if "permission denied" in lower and ("docker.sock" in lower or "docker api" in lower):
+        return (
+            "容器后端存在但当前用户没有权限访问 Docker socket。"
+            "请将用户加入 docker 组后重新登录，或配置可用 sudo/使用 root/改用 Podman；"
+            "在权限修复前不要继续重试容器工具。"
+        )
+    if "cannot connect to the docker daemon" in lower or "is the docker daemon running" in lower:
+        return "Docker daemon 当前不可用或未启动。请启动 Docker 服务后重试，或改用非容器工具。"
+    return ""
 
 
 def _resolve_backend(backend: str, env_profile: dict | None) -> str | None:

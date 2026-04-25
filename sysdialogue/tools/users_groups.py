@@ -56,6 +56,7 @@ def modify_user_groups(
     username: str,
     groups: list[str],
     action: str = "add",
+    **_: object,
 ) -> ToolResult:
     """修改用户组（add/remove）。"""
     traces: list[str] = []

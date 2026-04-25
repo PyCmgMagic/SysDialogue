@@ -76,7 +76,7 @@ class PermissionPolicy:
             )
 
         key = self._grant_key("tool", tool, target)
-        if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
+        if key in self.session_grants:
             return PolicyDecision(
                 "allow",
                 "Allowed by this-session grant.",
@@ -100,7 +100,7 @@ class PermissionPolicy:
                 matched_rule=_rule_payload(rule),
                 candidate_rules=[_rule_payload(candidate) for candidate in candidates],
                 decision_reason="Most specific matching rule wins; equal specificity uses the later rule.",
-                suggested_always_grant=(action == "ask" and risk_level in {"SAFE", "WARN-LOW"}),
+                suggested_always_grant=(action == "ask" and risk_level != "BLOCK"),
             )
 
         return PolicyDecision(
@@ -126,7 +126,7 @@ class PermissionPolicy:
             )
         command = _basename(argv[0]) if argv else ""
         key = self._grant_key("command", command, target)
-        if key in self.session_grants and risk_level in {"SAFE", "WARN-LOW"}:
+        if key in self.session_grants:
             return PolicyDecision(
                 "allow",
                 "Allowed by this-session grant.",
@@ -142,14 +142,14 @@ class PermissionPolicy:
                 rule.rule_id,
                 matched_rule=_rule_payload(rule),
                 decision_reason="Most specific matching command rule wins.",
-                suggested_always_grant=(action == "ask" and risk_level in {"SAFE", "WARN-LOW"}),
+                suggested_always_grant=(action == "ask" and risk_level != "BLOCK"),
             )
         return PolicyDecision(
             "ask",
             "Dynamic commands require explicit confirmation by default.",
             "default:command",
             decision_reason="No command policy matched; DynTool defaults to ask.",
-            suggested_always_grant=(risk_level in {"SAFE", "WARN-LOW"}),
+            suggested_always_grant=(risk_level != "BLOCK"),
         )
 
     def explain_tool(

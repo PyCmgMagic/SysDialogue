@@ -102,6 +102,13 @@ class RemoteExecutor(SafeExecutor):
             cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
         return self._run_command_string(cmd_str, timeout=timeout)
 
+    def run_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        cmd_str = str(command)
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
+        result = self._run_command_string(cmd_str, timeout=timeout)
+        return _combine_result(result)
+
     def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
         """Run a command through the configured privilege path.
 
@@ -126,6 +133,21 @@ class RemoteExecutor(SafeExecutor):
             if cwd:
                 cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
             result = self._run_command_string(cmd_str, timeout=timeout)
+        return _combine_result(result)
+
+    def run_privileged_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        if self._config.username == "root":
+            return self.run_shell(command, timeout=timeout, cwd=cwd)
+        sudo_prefix = ["sudo", "-S", "-p", "", "--", "sh", "-lc", command]
+        stdin_text = None
+        if self._config.sudo_password:
+            stdin_text = f"{self._config.sudo_password}\n"
+        else:
+            sudo_prefix = ["sudo", "-n", "--", "sh", "-lc", command]
+        cmd_str = _quote_command(sudo_prefix)
+        if cwd:
+            cmd_str = f"cd {shlex.quote(cwd)} && {cmd_str}"
+        result = self._run_command_string(cmd_str, timeout=timeout, stdin_text=stdin_text)
         return _combine_result(result)
 
     def _run_command_string(

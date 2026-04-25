@@ -246,14 +246,22 @@ class CapabilityProbe:
     def _probe_container(self, p: EnvProfile) -> None:
         avail = p.get("available_cmds", {})
         if avail.get("docker"):
-            _, code = self._run(["docker", "info"], timeout=3)
+            out, code = self._run(["docker", "info"], timeout=3)
             if code == 0:
                 p["container_backend"] = "docker"
                 return
+            if "permission denied" in out.lower() and ("docker.sock" in out.lower() or "docker api" in out.lower()):
+                p["container_backend"] = "none"
+                p["container_backend_error"] = "docker_permission_denied"
+                return
+            p["container_backend_error"] = "docker_unavailable"
         if avail.get("podman"):
-            p["container_backend"] = "podman"
-        else:
-            p["container_backend"] = "none"
+            out, code = self._run(["podman", "info"], timeout=3)
+            if code == 0:
+                p["container_backend"] = "podman"
+                return
+            p["container_backend_error"] = "podman_unavailable"
+        p["container_backend"] = "none"
 
     def _probe_validators(self, p: EnvProfile) -> None:
         validators: list[str] = []
@@ -362,6 +370,7 @@ class EnvProfileSanitizer:
             "package_manager": profile.get("package_manager", "unknown"),
             "firewall_backend": profile.get("firewall_backend", "unknown"),
             "container_backend": profile.get("container_backend", "unknown"),
+            "container_backend_error": profile.get("container_backend_error", ""),
             "config_validators": profile.get("config_validators", []),
             "supports_journalctl": profile.get("supports_journalctl", False),
             "cron_writable": profile.get("cron_writable", False),

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 _HARD_CONSTRAINTS = """[Hard Constraints]
 1. Never provide raw shell command strings as user-facing operational advice; perform operations through tools.
-2. The security gate is mandatory for every OS-facing tool call; BLOCK rules have no override path.
+2. The security gate is mandatory for every OS-facing tool call; HARD-BLOCK rules have no override path.
 3. Every operation must be auditable, including SAFE, WARN, BLOCK, and user-cancelled decisions.
 4. Low-level commands may appear in audit traces and replay packages, but not as unaudited user instructions.
 5. Read before write. Inspect the target before mutating it. Every mutation task requires verification, and high-risk changes require a rollback plan."""
@@ -23,8 +23,11 @@ Before using OS-facing tools, call set_execution_mode when one of these applies:
 - The request is a single direct action: mode="direct" or proceed directly when obvious.
 
 DynTool is always available, but it is a last resort. If static tools or built-in workflows can express the task, do not call propose_dynamic_tool.
-- If an existing reusable DynTool already matches the command family, reuse it with execute_dynamic_tool(tool_id=..., args=...).
-- If the command is a one-off ad-hoc capability for the current task, call execute_dynamic_tool directly with inline cmd_template + args; do not register a new persistent tool first.
+- For one-off ad-hoc commands, call execute_dynamic_tool directly with cmd_template/command/argv + args; do not register a persistent tool first.
+- Only use execute_dynamic_tool(tool_id=..., args=...) when the tool_id is a concrete dyn_* ID returned by propose_dynamic_tool or listed under [Reusable DynTools].
+- Never build password-pipe or shell-elevation commands such as echo password | su ... . If a command needs privileges, use argv form with a sudo prefix, for example ["sudo", "docker", "ps", "-a"]; SysDialogue will route it through the controlled privileged executor.
+- If docker fails because the current user lacks Docker socket permission, retry with the same argv shape or a sudo argv prefix; do not call execute_dynamic_tool with empty args.
+- In operator or break_glass profiles, execute_dynamic_tool may use execution_mode="shell" with shell_command for compound commands. In break_glass, DynTool is no longer last resort for complex OS work.
 - Use propose_dynamic_tool only when the command family should be reusable across future turns or future tasks. A successful proposal returns a reusable tool_id; call execute_dynamic_tool only when execution is still required, then continue observing, repairing, verifying, and finishing based on the result."""
 
 
@@ -59,12 +62,32 @@ Use continue_on_failure=true only for read-only dependency prechecks that are ex
 
 
 _SAFETY_SUMMARY = """[Safety Summary]
-- BLOCK: refuse directly and do not bypass. Examples include reading /etc/shadow, deleting root, or stopping sshd in remote mode.
+- HARD-BLOCK: refuse directly and do not bypass. Examples include credential files, password-pipe elevation, destructive disk commands, and remote SSH lockout.
 - WARN-HIGH: show plan, impact, and rollback information; execute only after user confirmation.
 - WARN-LOW: execute with a clear low-risk note and audit record.
 - SAFE: execute automatically for read-only and metadata operations.
 - Preferred config-edit path: dry-run preview -> backup_path -> precise edit -> validate_config -> rollback on failure.
 - Reject path parameters containing ".."; never read or search credential paths such as private keys, certificates, .env, or credentials files."""
+
+
+def _render_safety_profile(profile: str | None) -> str:
+    normalized = str(profile or "standard").strip().lower().replace("-", "_")
+    if normalized == "break_glass":
+        return (
+            "[Safety Profile]\n"
+            "profile: break_glass\n"
+            "- DynTool shell mode is allowed and may be used directly for complex OS tasks.\n"
+            "- Non-hard DynTool risks are auto-approved; audit, trace, and post-mutation verification still apply.\n"
+            "- Hard blocks remain: credential paths, password-pipe elevation, su/runuser, destructive disk commands, and remote SSH lockout."
+        )
+    if normalized == "operator":
+        return (
+            "[Safety Profile]\n"
+            "profile: operator\n"
+            "- DynTool shell mode is available with safety checks.\n"
+            "- SAFE/WARN-LOW DynTool commands may run without confirmation; WARN-HIGH still asks."
+        )
+    return "[Safety Profile]\nprofile: standard\n- DynTool uses argv mode by default and asks before dynamic command execution."
 
 
 def _render_env_profile(env_sanitized: dict) -> str:
@@ -99,6 +122,7 @@ def build_system_prompt(
     skills_summary: str | None = None,
     hooks_summary: str | None = None,
     target_summary: str | None = None,
+    safety_profile: str | None = None,
 ) -> str:
     """Build the system prompt injected into the LLM."""
     sections = [
@@ -107,6 +131,7 @@ def build_system_prompt(
             "Users describe operational goals in natural language; you plan and execute only through the controlled tool system, with security gates and audit logs."
         ),
         _HARD_CONSTRAINTS,
+        _render_safety_profile(safety_profile),
         _render_env_profile(env_sanitized),
     ]
     if context_summary:

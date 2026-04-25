@@ -17,6 +17,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sysdialogue.security.risk_classifier import classify
+from sysdialogue.tools.meta_tools import (
+    META_ACTIVATE_SKILL,
+    META_EXECUTE_DYNAMIC_TOOL,
+    META_FINISH_TASK,
+    META_HANDOFF_TO_ROLE,
+    META_PROPOSE_DYNAMIC_TOOL,
+    META_SET_EXECUTION_MODE,
+)
 
 if TYPE_CHECKING:
     from sysdialogue.agent.controller import AgentController
@@ -41,6 +49,8 @@ class PlanStep:
     severity: str = ""
     blocking: bool = False
     source_ref: str = ""
+    valid: bool = True
+    validation_error: str = ""
 
 
 @dataclass
@@ -48,6 +58,14 @@ class FrozenPlan:
     plan_id: str
     steps: list[PlanStep]
     warnings: list[str] = field(default_factory=list)
+
+    def has_fatal_errors(self) -> bool:
+        return not self.steps or any(not step.valid for step in self.steps)
+
+    def fatal_errors(self) -> list[str]:
+        if not self.steps:
+            return ["plan_steps must contain at least one executable step."]
+        return [step.validation_error for step in self.steps if not step.valid and step.validation_error]
 
     def summary(self) -> dict:
         return {
@@ -67,9 +85,12 @@ class FrozenPlan:
                     "severity": s.severity,
                     "blocking": s.blocking,
                     "source_ref": s.source_ref,
+                    "valid": s.valid,
+                    "validation_error": s.validation_error,
                 } for s in self.steps
             ],
             "warnings": self.warnings,
+            "fatal_errors": self.fatal_errors(),
         }
 
     def display_text(self) -> str:
@@ -112,14 +133,25 @@ class PlanningEngine:
                     args={},
                     purpose=str(raw),
                     actual_risk="UNKNOWN",
+                    valid=False,
+                    validation_error="invalid plan step format; expected object",
                 )
                 warnings.append(f"{step.step_id}: invalid plan step format; expected object")
                 frozen.append(step)
                 continue
+            raw_args = raw.get("args", {})
+            args_valid = True
+            validation_error = ""
+            if raw_args is None:
+                raw_args = {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+                args_valid = False
+                validation_error = "plan step args must be an object"
             step = PlanStep(
-                step_id=raw.get("step_id", ""),
+                step_id=raw.get("step_id", "") or f"step_{index}",
                 tool=raw.get("tool", ""),
-                args=raw.get("args") or {},
+                args=raw_args,
                 purpose=raw.get("purpose", ""),
                 expected_risk=raw.get("expected_risk", "UNKNOWN"),
                 confirm_required=raw.get("confirm_required", False),
@@ -129,16 +161,30 @@ class PlanningEngine:
                 severity=str(raw.get("severity") or ""),
                 blocking=bool(raw.get("blocking", False)),
                 source_ref=str(raw.get("source_ref") or ""),
+                valid=args_valid,
+                validation_error=validation_error,
             )
 
             if not step.tool:
+                step.valid = False
+                step.validation_error = step.validation_error or "plan step tool is required"
                 warnings.append(f"{step.step_id or '?'}：未指定 tool")
                 step.actual_risk = "UNKNOWN"
                 frozen.append(step)
                 continue
 
             # 注册表存在性检查
-            if not self.controller.registry.has(step.tool):
+            if step.tool in {META_SET_EXECUTION_MODE, META_FINISH_TASK}:
+                warnings.append(f"{step.step_id}: meta tool {step.tool} cannot be a frozen plan step")
+                step.actual_risk = "UNKNOWN"
+                step.valid = False
+                step.validation_error = f"meta tool {step.tool} cannot be a frozen plan step"
+                frozen.append(step)
+                continue
+
+            if not _is_registered_or_plan_meta_tool(self.controller, step.tool):
+                step.valid = False
+                step.validation_error = f"tool {step.tool} is not registered"
                 warnings.append(f"{step.step_id}：工具 {step.tool} 未注册")
                 step.actual_risk = "UNKNOWN"
                 frozen.append(step)
@@ -177,3 +223,15 @@ class PlanningEngine:
             env_profile_id=self.controller._env_profile_id,
         )
         return plan
+
+
+_PLAN_META_TOOLS = {
+    META_ACTIVATE_SKILL,
+    META_EXECUTE_DYNAMIC_TOOL,
+    META_HANDOFF_TO_ROLE,
+    META_PROPOSE_DYNAMIC_TOOL,
+}
+
+
+def _is_registered_or_plan_meta_tool(controller: "AgentController", tool: str) -> bool:
+    return bool(tool in _PLAN_META_TOOLS or controller.registry.has(tool))

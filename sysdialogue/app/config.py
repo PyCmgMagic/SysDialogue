@@ -21,6 +21,7 @@ class AppConfig:
     ssh_sudo_password: str = ""
     workflows_dir: str = ""  # 空则默认 sysdialogue/workflows/
     max_iterations: int = 160
+    safety_profile: str = "standard"
 
 
 def load_config(
@@ -29,6 +30,7 @@ def load_config(
     model: str | None = None,
     remote: bool = False,
     ssh: dict | None = None,
+    safety_profile: str | None = None,
 ) -> AppConfig:
     """从环境变量 + 可选 .env 文件加载配置。"""
     # 优先加载 .env
@@ -52,6 +54,7 @@ def load_config(
         remote_mode=remote,
         max_iterations=_env_int_clamped("SYSDIALOGUE_MAX_ITER", default=160, minimum=20, maximum=300),
         workflows_dir=os.environ.get("SYSDIALOGUE_WORKFLOWS_DIR", ""),
+        safety_profile=_normalize_safety_profile(safety_profile),
     )
     if ssh:
         cfg.ssh_host = ssh.get("host", "")
@@ -64,6 +67,16 @@ def load_config(
             or os.environ.get("SYSDIALOGUE_SUDO_PASSWORD", "")
         )
     return cfg
+
+
+def _normalize_safety_profile(value: str | None = None) -> str:
+    raw = (value or os.environ.get("SYSDIALOGUE_SAFETY_PROFILE") or "").strip().lower()
+    raw = raw.replace("-", "_")
+    if not raw and os.environ.get("SYSDIALOGUE_OPERATOR_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        raw = "operator"
+    if raw in {"standard", "operator", "break_glass"}:
+        return raw
+    return "standard"
 
 
 def _env_int_clamped(name: str, *, default: int, minimum: int, maximum: int) -> int:

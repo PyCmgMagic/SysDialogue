@@ -56,6 +56,7 @@ def _copy_app_config(config: AppConfig) -> AppConfig:
         ssh_sudo_password=str(getattr(config, "ssh_sudo_password", "") or ""),
         workflows_dir=str(getattr(config, "workflows_dir", "") or ""),
         max_iterations=int(getattr(config, "max_iterations", 160) or 160),
+        safety_profile=str(getattr(config, "safety_profile", "standard") or "standard"),
     )
 
 
@@ -123,6 +124,7 @@ class WebSession:
                 "traces": [span.__dict__ for span in self.runtime.trace_store.list_spans(self.session_id, limit=50)],
                 "memory": [record.__dict__ for record in self.runtime.memory_manager.list_records(limit=20)],
                 "permission_policy": self.runtime.permission_policy.render_summary(),
+                "safety_profile": self.runtime.controller.safety_profile,
                 "skills": [skill.__dict__ for skill in self.runtime.skill_manager.list_skills()],
                 "hooks": [hook.__dict__ for hook in self.runtime.hook_manager.list_rules()],
                 "api_config": _api_config_payload(self.config),
@@ -609,11 +611,14 @@ class WebSession:
                 "user": target.get("user"),
                 "ssh_key_file": target.get("ssh_key_file"),
                 "password_configured": bool(target.get("password_configured")),
+                "sudo_password_configured": bool(self.config.ssh_sudo_password),
                 "summary": target.get("summary"),
             }
         )
         if self.config.ssh_password:
             profile.facts["ssh_password"] = self.config.ssh_password
+        if self.config.ssh_sudo_password:
+            profile.facts["ssh_sudo_password"] = self.config.ssh_sudo_password
         env = target.get("env") or {}
         if env:
             profile.facts["env"] = env
@@ -696,11 +701,14 @@ class WebSessionStore:
                 "user": target["user"],
                 "ssh_key_file": target["ssh_key_file"],
                 "password_configured": bool(config.ssh_password),
+                "sudo_password_configured": bool(config.ssh_sudo_password),
                 "summary": target["summary"],
             }
         )
         if config.ssh_password:
             profile.facts["ssh_password"] = config.ssh_password
+        if config.ssh_sudo_password:
+            profile.facts["ssh_sudo_password"] = config.ssh_sudo_password
         return _target_profile_payload(self.target_profile_store.save(profile))
 
     def delete_target(self, target_id: str) -> bool:
@@ -744,6 +752,7 @@ def _target_config_from_payload(
         new_config.ssh_user = ""
         new_config.ssh_key_file = ""
         new_config.ssh_password = ""
+        new_config.ssh_sudo_password = ""
         return new_config
 
     saved_facts: dict[str, Any] = {}
@@ -761,6 +770,13 @@ def _target_config_from_payload(
         or ""
     ).strip()
     password = str(payload.get("password") or saved_facts.get("ssh_password") or saved_facts.get("password") or "")
+    sudo_password = str(
+        payload.get("sudo_password")
+        or saved_facts.get("ssh_sudo_password")
+        or saved_facts.get("sudo_password")
+        or password
+        or ""
+    )
     raw_port = payload.get("port") or 22
     try:
         port = int(raw_port)
@@ -780,6 +796,7 @@ def _target_config_from_payload(
     new_config.ssh_user = user
     new_config.ssh_key_file = os.path.expanduser(key_file) if key_file else ""
     new_config.ssh_password = password
+    new_config.ssh_sudo_password = sudo_password
     return new_config
 
 
@@ -962,9 +979,17 @@ def _lease_payload(lease) -> dict[str, Any]:
 def _target_profile_payload(profile: TargetProfile) -> dict[str, Any]:
     facts = dict(profile.facts)
     password_configured = bool(facts.get("ssh_password") or facts.get("password") or facts.get("password_configured"))
+    sudo_password_configured = bool(
+        facts.get("ssh_sudo_password")
+        or facts.get("sudo_password")
+        or facts.get("sudo_password_configured")
+    )
     facts.pop("ssh_password", None)
     facts.pop("password", None)
+    facts.pop("ssh_sudo_password", None)
+    facts.pop("sudo_password", None)
     facts["password_configured"] = password_configured
+    facts["sudo_password_configured"] = sudo_password_configured
     return {
         "target_id": profile.target_id,
         "label": profile.label,

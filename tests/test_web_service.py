@@ -169,10 +169,12 @@ def test_web_target_config_payload_supports_local_and_ssh(tmp_path) -> None:
     assert remote.ssh_port == 2222
     assert remote.ssh_user == "root"
     assert remote.ssh_password == "secret"
+    assert remote.ssh_sudo_password == "secret"
     assert remote.ssh_key_file == str(key)
     assert local.remote_mode is False
     assert local.ssh_host == ""
     assert local.ssh_password == ""
+    assert local.ssh_sudo_password == ""
 
 
 def test_web_target_config_rejects_incomplete_ssh_payload() -> None:
@@ -358,6 +360,7 @@ def test_web_target_management_saves_password_without_api_echo(monkeypatch, tmp_
         store.target_profile_store,
     )
     assert restored.ssh_password == "secret"
+    assert restored.ssh_sudo_password == "secret"
     assert any(item["target_id"] == profile["target_id"] for item in store.list_targets())
     assert store.delete_target(profile["target_id"]) is True
     assert all(item["target_id"] != profile["target_id"] for item in store.list_targets())

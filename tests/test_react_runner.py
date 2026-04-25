@@ -16,6 +16,7 @@ from sysdialogue.agent.react_runner import (
     _plan_args_match,
     _requires_environment_feedback,
     _resolve_runtime_args_for_tool,
+    _tools_for_task,
 )
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStepRecord, TaskStore
 from sysdialogue.audit.trace_store import AuditLog
@@ -334,6 +335,20 @@ def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
     return controller, events
 
 
+class PrivilegedRecordingExecutor(RecordingExecutor):
+    def __init__(self, privileged_output: str = "", privileged_exit_code: int = 0):
+        super().__init__()
+        self.privileged_output = privileged_output
+        self.privileged_exit_code = privileged_exit_code
+        self.privileged_calls: list[list[str]] = []
+        self.privileged_cwd_calls: list[str | None] = []
+
+    def run_privileged(self, cmd: list[str], timeout: int = 30, cwd: str | None = None):
+        self.privileged_calls.append(cmd)
+        self.privileged_cwd_calls.append(cwd)
+        return self.privileged_output, self.privileged_exit_code
+
+
 def _registry_with_system_info() -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -429,6 +444,8 @@ def _registry_with_mutation_and_validation() -> ToolRegistry:
 
 def test_requires_environment_feedback_classifies_greeting_and_ops() -> None:
     assert _requires_environment_feedback("你好") is False
+    assert _requires_environment_feedback("你是谁") is False
+    assert _requires_environment_feedback("你能做什么") is False
     assert _requires_environment_feedback("检查系统版本和负载") is True
     assert _requires_environment_feedback("解释 OpenAI API 怎么使用") is False
     assert _requires_environment_feedback("审计 API 密钥配置") is True
@@ -503,7 +520,65 @@ def test_greeting_can_finish_without_system_action(tmp_path: Path) -> None:
 
     assert "你好" in reply
     assert "未执行系统操作" in reply
+    assert [tool["name"] for tool in llm.calls[0]["tools"]] == ["finish_task"]
     assert [event.stage for event in events] == ["task_started", "model_response", "task_finished"]
+
+
+def test_non_operational_plain_text_auto_finishes_without_tool_noise(tmp_path: Path) -> None:
+    llm = FakeLLM([[{"type": "text", "text": "我是 SysDialogue，可以帮你安全地执行和验证运维任务。"}]])
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("你是谁")
+
+    assert "SysDialogue" in reply
+    assert len(llm.calls) == 1
+    assert [tool["name"] for tool in llm.calls[0]["tools"]] == ["finish_task"]
+    assert "Conversation-Only Turn" in llm.calls[0]["system"]
+    assert "tool_started" not in [event.stage for event in events]
+    assert "correction" not in [event.stage for event in events]
+    assert events[-1].stage == "task_finished"
+
+
+def test_non_operational_hallucinated_os_tool_is_not_executed(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("manage_container", {"action": "list"}, tool_id="bad_tool")]
+    ])
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("你好")
+
+    assert "你好" in reply
+    assert [tool["name"] for tool in llm.calls[0]["tools"]] == ["finish_task"]
+    assert "tool_started" not in [event.stage for event in events]
+    assert "tool_finished" not in [event.stage for event in events]
+    assert events[-1].stage == "task_finished"
+
+
+def test_conversation_only_tool_set_exposes_no_os_tools(tmp_path: Path) -> None:
+    task = TaskRun(task_id="task_chat", goal="你是谁", requires_environment_feedback=False)
+    tools = _tools_for_task([{"name": "get_system_info"}], task)
+
+    assert tools == [next(schema for schema in tools if schema["name"] == "finish_task")]
+    assert [schema["name"] for schema in tools] == ["finish_task"]
+
+
+def test_container_tool_is_hidden_when_backend_unavailable() -> None:
+    task = TaskRun(task_id="task_ops", goal="检查系统状态", requires_environment_feedback=True)
+    tools = _tools_for_task(
+        [{"name": "get_system_info"}, {"name": "manage_container"}],
+        task,
+        env_profile={"container_backend": "none"},
+    )
+
+    assert [schema["name"] for schema in tools] == [
+        "get_system_info",
+        "set_execution_mode",
+        "propose_dynamic_tool",
+        "execute_dynamic_tool",
+        "activate_skill",
+        "handoff_to_role",
+        "finish_task",
+    ]
 
 
 def test_operational_task_cannot_complete_without_observation(tmp_path: Path) -> None:
@@ -690,6 +765,37 @@ def test_changed_state_requires_verification_after_mutation(tmp_path: Path) -> N
     assert stages.count("correction") == 1
 
 
+def test_changed_state_finishes_after_rule_verification_without_extra_llm_judge(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [_tool_use("mutate_marker", {}, tool_id="mutate_1")],
+        [_tool_use("validate_config", {"path": "/tmp/example.conf"}, tool_id="validate_1")],
+        [
+            _finish(
+                {
+                    "status": "completed",
+                    "summary": "Configuration changed and verified.",
+                    "evidence": ["mutate_marker changed=true", "validate_config valid=true"],
+                    "verification": "validate_config returned valid=true after the mutation.",
+                    "changed_state": True,
+                }
+            )
+        ],
+    ])
+    controller, events = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("modify config and validate it")
+
+    assert "Configuration changed and verified" in reply
+    assert len(llm.calls) == 3
+    assert all(
+        not any(tool.get("name") == "submit_verification_judgement" for tool in call["tools"])
+        for call in llm.calls
+    )
+    assert events[-1].stage == "task_finished"
+    assert events[-1].data["verification_judgement"]["judge"] == "rules"
+    assert events[-1].data["verification_judgement"]["llm_judge_skipped"] is True
+
+
 def test_frozen_plan_allows_only_dependency_ready_steps(tmp_path: Path) -> None:
     llm = FakeLLM([
         [
@@ -744,6 +850,98 @@ def test_frozen_plan_allows_only_dependency_ready_steps(tmp_path: Path) -> None:
     verify_step = [step for step in payload["steps"] if step["step_id"] == "verify"][0]
     assert verify_step["depends_on"] == ["observe"]
     assert verify_step["finding_id"] == "finding-1"
+
+
+def test_invalid_frozen_plan_does_not_lock_the_turn(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": ["inspect host"],
+                },
+                tool_id="bad_plan",
+            )
+        ],
+        [_tool_use("get_system_info", {}, tool_id="observe_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Recovered after invalid plan.",
+                "evidence": ["get_system_info succeeded"],
+                "verification": "No invalid frozen plan remained active.",
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("run a malformed frozen plan then inspect host")
+
+    assert "Recovered after invalid plan" in reply
+    rejected = llm.calls[1]["messages"][-1]["content"][0]
+    assert rejected["is_error"] is True
+    assert "Invalid plan definition" in rejected["content"]
+    payload = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert payload["mode"] == "direct"
+    assert payload["steps"] == []
+
+
+def test_active_frozen_plan_can_be_replaced_with_set_execution_mode(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "mutate",
+                            "tool": "mutate_marker",
+                            "args": {},
+                            "purpose": "mutate marker",
+                        }
+                    ],
+                },
+                tool_id="plan_1",
+            )
+        ],
+        [
+            _tool_use(
+                "set_execution_mode",
+                {
+                    "mode": "plan",
+                    "plan_steps": [
+                        {
+                            "step_id": "observe",
+                            "tool": "get_system_info",
+                            "args": {},
+                            "purpose": "observe host instead",
+                        }
+                    ],
+                },
+                tool_id="plan_2",
+            )
+        ],
+        [_tool_use("get_system_info", {}, tool_id="observe_1")],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Replacement plan completed.",
+                "evidence": ["get_system_info succeeded"],
+                "verification": "observe step completed.",
+            })
+        ],
+    ])
+    controller, _ = _controller(tmp_path, llm, _registry_with_mutation_and_validation())
+
+    reply = controller.run_turn("replace a frozen plan")
+
+    assert "Replacement plan completed" in reply
+    payload = json.loads(next(controller.task_store.storage_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert payload["mode"] == "plan"
+    assert [step["step_id"] for step in payload["steps"]] == ["observe"]
+    assert payload["steps"][0]["status"] == "completed"
 
 
 def test_frozen_plan_cron_create_delete_uses_bound_job_id(tmp_path: Path) -> None:
@@ -905,6 +1103,23 @@ def test_react_runner_stops_repeated_no_progress_plan_deviations(tmp_path: Path)
     assert "Task blocked after repeated no-progress" in reply
     assert len(llm.calls) < len(responses)
     assert [event.stage for event in events].count("correction") >= 8
+
+
+def test_react_runner_stops_repeated_identical_meta_tool_errors(tmp_path: Path) -> None:
+    responses = [
+        [_tool_use("handoff_to_role", {}, tool_id=f"handoff_{index}")]
+        for index in range(10)
+    ]
+    llm = FakeLLM(responses)
+    controller, events = _controller(tmp_path, llm)
+
+    reply = controller.run_turn("检查系统版本和负载")
+
+    assert "连续多次调用同一个失败工具" in reply
+    assert len(llm.calls) == 3
+    assert [event.stage for event in events].count("tool_finished") == 3
+    assert events[-1].stage == "task_failed"
+    assert events[-1].data["status"] == "blocked"
 
 
 def test_continue_on_failure_read_only_precheck_does_not_block_repair_plan(tmp_path: Path) -> None:
@@ -1205,6 +1420,487 @@ def test_execute_dynamic_tool_inline_mode_supports_one_off_command(tmp_path: Pat
     assert execute_result["dynamic_mode"] == "inline"
     assert execute_result["changes_state"] is False
     assert not (tmp_path / "dynamic_tools.json").exists()
+
+
+def test_session_always_grant_skips_repeated_dynamic_command_confirmation(tmp_path: Path) -> None:
+    executor = RecordingExecutor(handler=lambda cmd, timeout: ("ok\n", 0))
+    controller, _ = _controller_with_dynamic(tmp_path, FakeLLM([]), executor)
+    confirmations: list[list[str]] = []
+    controller.confirm_callback = lambda req: confirmations.append(list(req.args.get("cmd") or [])) or {
+        "approved": True,
+        "decision": "always_this_session",
+    }
+    base_args = {
+        "tool_name": "echo_once",
+        "cmd_template": ["echo", "{message}"],
+        "params": {"message": {"type": "string", "required": True}},
+        "intent_summary": "Run a one-off echo diagnostic.",
+        "consequences": "Read-only diagnostic.",
+        "risk_assessment": "Read-only command.",
+        "estimated_risk": "WARN-LOW",
+        "changes_state": False,
+    }
+
+    first = controller._handle_execute_dynamic_tool(
+        {**base_args, "args": {"message": "one"}},
+        "execute_1",
+    )
+    second = controller._handle_execute_dynamic_tool(
+        {**base_args, "args": {"message": "two"}},
+        "execute_2",
+    )
+
+    assert first["is_error"] is False
+    assert second["is_error"] is False
+    assert confirmations == [["echo", "one"]]
+    assert executor.calls == [["echo", "one"], ["echo", "two"]]
+
+
+def test_execute_dynamic_tool_accepts_command_alias_without_registered_mode(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "command": "echo hello",
+                    "intent_summary": "Run a one-off echo diagnostic.",
+                    "consequences": "只读输出，不修改系统。",
+                    "risk_assessment": "Read-only diagnostic command.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_alias_1",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "一次性动态命令已执行。",
+                "evidence": ["execute_dynamic_tool output=hello"],
+                "verification": "命令返回 exit_code=0，且声明为只读。",
+            })
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("hello\n", 0) if cmd == ["echo", "hello"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("执行一个一次性的 echo 诊断动作")
+
+    assert "一次性动态命令已执行" in reply
+    assert executor.calls == [["echo", "hello"]]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["dynamic_mode"] == "inline"
+    assert execute_result["tool_id"] is None
+    assert execute_result["changes_state"] is False
+
+
+def test_execute_dynamic_tool_standard_profile_rejects_shell_mode(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "execution_mode": "shell",
+                    "shell_command": "echo hi && pwd > out.txt",
+                    "intent_summary": "Run a compound shell command.",
+                    "consequences": "Writes a local output file.",
+                    "risk_assessment": "Requires shell profile.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": False,
+                },
+                tool_id="execute_shell_standard",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Shell mode requires an elevated safety profile.",
+                "next_steps": ["Enable operator or break_glass."],
+            })
+        ],
+    ])
+    executor = RecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+
+    reply = controller.run_turn("run shell")
+
+    assert "Shell mode requires" in reply
+    assert executor.shell_calls == []
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["blocked"] is True
+    assert execute_result["execution_mode"] == "shell"
+    assert execute_result["safety_profile"] == "standard"
+    assert execute_result["hard_blocked"] is True
+
+
+def test_execute_dynamic_tool_break_glass_runs_compound_shell_without_confirmation(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "execution_mode": "shell",
+                    "shell_command": "echo hi && pwd > out.txt",
+                    "intent_summary": "Run a compound shell command.",
+                    "consequences": "Writes a local output file.",
+                    "risk_assessment": "Break-glass shell execution.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": False,
+                },
+                tool_id="execute_shell_break_glass",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Break-glass shell command completed.",
+                "evidence": ["execute_dynamic_tool output=ok"],
+                "verification": "Shell command returned exit_code=0.",
+            })
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("ok", 0) if cmd == ["<shell>", "echo hi && pwd > out.txt"] else ("", 1)
+    )
+    controller, events = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.safety_profile = "break_glass"
+
+    reply = controller.run_turn("run shell")
+
+    assert "Break-glass shell command completed" in reply
+    assert executor.shell_calls == ["echo hi && pwd > out.txt"]
+    assert "confirmation_requested" not in [event.stage for event in events]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["success"] is True
+    assert execute_result["execution_mode"] == "shell"
+    assert execute_result["safety_profile"] == "break_glass"
+    assert execute_result["shell_command"] == "echo hi && pwd > out.txt"
+    assert execute_result["hard_blocked"] is False
+
+
+def test_execute_dynamic_tool_break_glass_runs_privileged_shell(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "execution_mode": "shell",
+                    "shell_command": "systemctl status demo.service",
+                    "privileged": True,
+                    "intent_summary": "Inspect a service through privileged shell.",
+                    "consequences": "Reads demo service status.",
+                    "risk_assessment": "Break-glass privileged shell execution.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": False,
+                },
+                tool_id="execute_privileged_shell",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Privileged shell command completed.",
+                "evidence": ["execute_dynamic_tool output=ok"],
+                "verification": "Command returned exit_code=0.",
+            })
+        ],
+    ])
+    executor = RecordingExecutor(
+        handler=lambda cmd, timeout: ("ok", 0) if cmd == ["<privileged-shell>", "systemctl status demo.service"] else ("", 1)
+    )
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.safety_profile = "break_glass"
+
+    reply = controller.run_turn("run privileged shell")
+
+    assert "Privileged shell command completed" in reply
+    assert executor.privileged_shell_calls == ["systemctl status demo.service"]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["privileged"] is True
+    assert execute_result["execution_mode"] == "shell"
+
+
+def test_execute_dynamic_tool_break_glass_keeps_password_pipe_hard_blocked(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "execution_mode": "shell",
+                    "shell_command": "echo nexus | su - root -c 'docker ps'",
+                    "intent_summary": "Unsafe password pipe elevation.",
+                    "consequences": "Would expose a password in shell history/audit.",
+                    "risk_assessment": "Unsafe shell elevation.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": False,
+                },
+                tool_id="execute_break_glass_password_pipe",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Unsafe shell elevation was hard-blocked.",
+                "next_steps": ["Use privileged=true instead of password pipes."],
+            })
+        ],
+    ])
+    executor = RecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.safety_profile = "break_glass"
+
+    reply = controller.run_turn("try unsafe shell elevation")
+
+    assert "hard-blocked" in reply
+    assert executor.shell_calls == []
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["blocked"] is True
+    assert execute_result["hard_blocked"] is True
+    assert "hard-blocked" in execute_result["reason"]
+
+
+def test_execute_dynamic_tool_auto_privileges_docker_socket_permission_denied(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "cmd_template": ["docker", "ps", "-a"],
+                    "args": {},
+                    "intent_summary": "List containers.",
+                    "consequences": "Read container state.",
+                    "risk_assessment": "Read-only docker inspection.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_docker",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Docker inventory completed through controlled privilege escalation.",
+                "evidence": ["execute_dynamic_tool output=CONTAINER ID"],
+                "verification": "docker ps is read-only and returned successfully.",
+            })
+        ],
+    ])
+    executor = PrivilegedRecordingExecutor(privileged_output="CONTAINER ID\nabc\n", privileged_exit_code=0)
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.env_profile["container_backend"] = "none"
+    controller.env_profile["container_backend_error"] = "docker_permission_denied"
+
+    reply = controller.run_turn("列出容器")
+
+    assert "Docker inventory completed" in reply
+    assert executor.calls == []
+    assert executor.privileged_calls == [["docker", "ps", "-a"]]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["success"] is True
+    assert execute_result["privileged"] is True
+    assert execute_result["privilege_reason"] == "docker_socket_permission_denied"
+    assert execute_result["effective_cmd"] == ["docker", "ps", "-a"]
+    assert execute_result["changes_state"] is False
+
+
+def test_execute_dynamic_tool_blocks_docker_when_daemon_unavailable(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "cmd_template": ["docker", "ps", "-a"],
+                    "args": {},
+                    "intent_summary": "List containers.",
+                    "consequences": "Read container state.",
+                    "risk_assessment": "Read-only docker inspection.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_docker_daemon_down",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Container runtime is unavailable.",
+                "next_steps": ["Start Docker daemon and retry", "Use non-container diagnostics"],
+            })
+        ],
+    ])
+    executor = PrivilegedRecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.env_profile["container_backend"] = "none"
+    controller.env_profile["container_backend_error"] = "docker_unavailable"
+
+    reply = controller.run_turn("list containers")
+
+    assert "Container runtime is unavailable" in reply
+    assert executor.calls == []
+    assert executor.privileged_calls == []
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["blocked"] is True
+    assert "拒绝直接执行 docker 命令" in execute_result["reason"]
+
+
+def test_execute_dynamic_tool_allows_sudo_docker_through_privileged_executor(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "cmd_template": ["sudo", "docker", "ps", "-a"],
+                    "args": {},
+                    "intent_summary": "List containers with controlled sudo.",
+                    "consequences": "Read-only container inventory.",
+                    "risk_assessment": "Read-only docker inspection through privileged executor.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="execute_sudo_docker",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Privileged docker inventory completed.",
+                "evidence": ["execute_dynamic_tool output=CONTAINER ID"],
+                "verification": "docker ps is a read-only inspection command.",
+            })
+        ],
+    ])
+    executor = PrivilegedRecordingExecutor(privileged_output="CONTAINER ID\nabc\n", privileged_exit_code=0)
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.env_profile["container_backend"] = "none"
+    controller.env_profile["container_backend_error"] = "docker_permission_denied"
+
+    reply = controller.run_turn("list containers with sudo")
+
+    assert "Privileged docker inventory completed" in reply
+    assert executor.calls == []
+    assert executor.privileged_calls == [["docker", "ps", "-a"]]
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["success"] is True
+    assert execute_result["privileged"] is True
+    assert execute_result["effective_cmd"] == ["docker", "ps", "-a"]
+    assert execute_result["changes_state"] is False
+
+
+def test_execute_dynamic_tool_keeps_password_pipe_shell_elevation_blocked(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "execute_dynamic_tool",
+                {
+                    "command": "echo nexus | su - root -c 'docker ps'",
+                    "intent_summary": "Unsafe password pipe elevation.",
+                    "consequences": "Would expose a password in argv/audit if executed.",
+                    "risk_assessment": "Unsafe shell elevation.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": False,
+                },
+                tool_id="execute_password_pipe",
+            )
+        ],
+        [
+            _finish({
+                "status": "blocked",
+                "summary": "Unsafe shell elevation was blocked.",
+                "next_steps": ["Use argv form with sudo, for example ['sudo', 'docker', 'ps', '-a']."],
+            })
+        ],
+    ])
+    executor = RecordingExecutor()
+    controller, _ = _controller_with_dynamic(tmp_path, llm, executor)
+    controller.env_profile["container_backend"] = "none"
+    controller.env_profile["container_backend_error"] = "docker_permission_denied"
+
+    reply = controller.run_turn("try password pipe docker command")
+
+    assert "Unsafe shell elevation was blocked" in reply
+    assert executor.calls == []
+    execute_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert execute_result["blocked"] is True
+    assert "CommandSafetyChecker BLOCK" in execute_result["reason"]
+    assert "CS010" in execute_result["reason"]
+
+
+def test_propose_dynamic_tool_generates_name_from_command_when_missing(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "propose_dynamic_tool",
+                {
+                    "intent_summary": "Reusable echo diagnostic.",
+                    "command": ["echo", "{message}"],
+                    "params": {"message": {"type": "string", "required": True}},
+                    "consequences": "只读输出，不修改系统。",
+                    "risk_assessment": "Read-only diagnostic command.",
+                    "estimated_risk": "WARN-LOW",
+                    "changes_state": False,
+                },
+                tool_id="propose_missing_name",
+            )
+        ],
+        [
+            _finish({
+                "status": "partial",
+                "summary": "已创建可复用动态工具。",
+                "next_steps": ["使用返回的 tool_id 调用 execute_dynamic_tool，或改用 inline command 直接执行。"],
+            })
+        ],
+    ])
+    controller, _ = _controller_with_dynamic(tmp_path, llm, RecordingExecutor())
+
+    reply = controller.run_turn("创建一个可复用 echo 动态工具")
+
+    assert "已创建可复用动态工具" in reply
+    tool_result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert tool_result["name"] == "adhoc_echo"
+    assert tool_result["tool_id"].startswith("dyn_")
+    assert controller.dynamic_registry.list_tools()[0]["name"] == "adhoc_echo"
+
+
+def test_propose_dynamic_tool_registers_reusable_shell_tool(tmp_path: Path) -> None:
+    llm = FakeLLM([
+        [
+            _tool_use(
+                "propose_dynamic_tool",
+                {
+                    "proposed_tool_name": "restart_and_check",
+                    "intent_summary": "Reusable service restart and status shell flow.",
+                    "execution_mode": "shell",
+                    "shell_command": "systemctl restart {service} && systemctl status {service}",
+                    "params": {"service": {"type": "string", "required": True}},
+                    "consequences": "Restarts and checks a service.",
+                    "risk_assessment": "Mutating service operation.",
+                    "estimated_risk": "WARN-HIGH",
+                    "changes_state": True,
+                },
+                tool_id="propose_shell",
+            )
+        ],
+        [
+            _finish({
+                "status": "completed",
+                "summary": "Reusable shell DynTool was registered.",
+                "evidence": ["propose_dynamic_tool returned a dyn_* id"],
+                "verification": "The registry contains execution_mode=shell.",
+            })
+        ],
+    ])
+    controller, _ = _controller_with_dynamic(tmp_path, llm, RecordingExecutor())
+
+    reply = controller.run_turn("register reusable shell tool")
+
+    assert "Reusable shell DynTool" in reply
+    result = json.loads(llm.calls[1]["messages"][-1]["content"][0]["content"])
+    assert result["execution_mode"] == "shell"
+    tool = controller.dynamic_registry.list_tools()[0]
+    assert tool["execution_mode"] == "shell"
+    assert tool["shell_command"] == "systemctl restart {service} && systemctl status {service}"
 
 
 def test_execute_dynamic_tool_inline_mode_supports_cwd(tmp_path: Path) -> None:

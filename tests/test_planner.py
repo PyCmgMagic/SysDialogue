@@ -26,3 +26,5 @@ def test_planner_tolerates_non_object_steps_from_llm() -> None:
     assert plan.steps[0].step_id == "step_1"
     assert plan.steps[0].purpose == "create user"
     assert "invalid plan step format" in plan.warnings[0]
+    assert plan.has_fatal_errors() is True
+    assert plan.steps[0].valid is False

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sysdialogue.runtime.secure_runner import SafeExecutor
+from sysdialogue.tools.arg_normalizer import normalize_tool_call_args
 from sysdialogue.tools.base import ToolResult
 
 # 工具函数导入
@@ -92,7 +93,7 @@ class ToolRegistry:
         td = self._tools.get(name)
         if td is None:
             return ToolResult(success=False, error=f"未注册工具：{name}")
-        kwargs: dict[str, Any] = dict(args or {})
+        kwargs: dict[str, Any] = dict(normalize_tool_call_args(name, args or {}) or {})
         if td.requires_executor:
             if executor is None:
                 return ToolResult(success=False, error=f"工具 {name} 需要 executor 但未提供")
@@ -541,6 +542,7 @@ SCHEMA_MANAGE_CONTAINER = _schema(
         "backend": {"type": "string", "enum": ["auto", "docker", "podman"], "default": "auto"},
         "action": {"type": "string", "enum": ["list", "status", "pull", "start", "stop", "restart", "logs", "inspect", "run", "remove", "exec", "wait_exec"]},
         "name": {"type": "string"},
+        "container_name": {"type": "string", "description": "name 的兼容别名"},
         "image": {"type": "string"},
         "ports": {
             "type": "array",
@@ -572,6 +574,16 @@ SCHEMA_MANAGE_CONTAINER = _schema(
             "type": "array",
             "items": {"type": "string"},
             "description": "exec 动作的容器内 argv，例如 [\"mysql\", \"-uroot\", \"-e\", \"SELECT 1\"]",
+        },
+        "arguments": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "command 的兼容别名；会归一化为 command",
+        },
+        "argv": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "command 的兼容别名；会归一化为 command",
         },
         "lines": {"type": "integer", "minimum": 10, "maximum": 1000, "default": 50},
         "retries": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10},

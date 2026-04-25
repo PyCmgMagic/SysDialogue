@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from sysdialogue.agent.state_store import TaskRecord, TaskStepRecord
 from sysdialogue.agent.dynamic_args import normalize_execute_dynamic_tool_args
 from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
+from sysdialogue.tools.arg_normalizer import normalize_tool_call_args
 from sysdialogue.tools.meta_tools import (
     META_ACTIVATE_SKILL,
     META_EXECUTE_DYNAMIC_TOOL,
@@ -150,6 +152,8 @@ class TaskRun:
     technical_details: str = ""
     no_progress_turns: int = 0
     progress_signature: str = ""
+    repeated_tool_error_signature: str = ""
+    repeated_tool_error_count: int = 0
 
 
 class ReActRunner:
@@ -203,7 +207,11 @@ class ReActRunner:
                 allow_execute=True,
             )
             messages = self._prepare_messages(task, user_message)
-            all_tools = self.controller.registry.all_schemas() + META_TOOL_SCHEMAS
+            all_tools = _tools_for_task(
+                self.controller.registry.all_schemas(),
+                task,
+                env_profile=self.controller.env_profile,
+            )
             empty_action_turns = 0
 
             for iteration in range(task.iteration_budget):
@@ -227,7 +235,7 @@ class ReActRunner:
                         else None
                     )
                     response = self.controller.llm_client.messages_create(
-                        system=self.controller._current_system_prompt(),
+                        system=_system_prompt_for_task(self.controller._current_system_prompt(), task),
                         messages=messages,
                         tools=all_tools,
                     )
@@ -287,7 +295,34 @@ class ReActRunner:
                     },
                 )
 
+                if not task.requires_environment_feedback:
+                    finish_blocks = [
+                        block for block in tool_blocks
+                        if _block_attr(block, "name") == META_FINISH_TASK
+                    ]
+                    if finish_blocks:
+                        tool_blocks = finish_blocks[:1]
+                    elif tool_blocks:
+                        task.technical_details = (
+                            "Conversation-only turn returned non-conversation tool calls. "
+                            f"tool_names={[_block_attr(block, 'name') for block in tool_blocks]}"
+                        )
+                        task.final_status = "completed"
+                        task.final_reply = _conversation_fallback_reply(user_message)
+                        self._emit_conversation_finish(task, task.final_reply)
+                        self._commit_final(messages, task)
+                        return task.final_reply
+
                 if not tool_blocks:
+                    if not task.requires_environment_feedback:
+                        visible_text = _extract_text(content)
+                        if visible_text:
+                            task.final_status = "completed"
+                            task.final_reply = visible_text
+                            self._emit_conversation_finish(task, visible_text)
+                            self._commit_final(messages, task)
+                            return task.final_reply
+
                     empty_action_turns += 1
                     if empty_action_turns <= 2:
                         correction = _react_correction_message(user_message, _extract_text(content))
@@ -328,6 +363,7 @@ class ReActRunner:
                 empty_action_turns = 0
                 result_blocks: list[dict[str, Any]] = []
                 final_ready = False
+                repeated_error_blocked = False
 
                 if any(_block_attr(block, "name") == META_FINISH_TASK for block in tool_blocks) and len(tool_blocks) > 1:
                     for block in tool_blocks:
@@ -379,6 +415,10 @@ class ReActRunner:
                     result_blocks.append(result_block)
                     self._observe_tool_result(task, name, args, result_block)
                     self._emit_tool_finished(task, name, args, result_block)
+                    if self._detect_repeated_tool_error(task, name, args, result_block):
+                        repeated_error_blocked = True
+                        result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block))
+                        break
 
                     if self.controller.is_cancel_requested():
                         result_blocks.extend(_cancelled_results_for_pending(tool_blocks, block))
@@ -394,6 +434,24 @@ class ReActRunner:
                     return task.final_reply
 
                 if final_ready:
+                    self._commit_final(messages, task)
+                    return task.final_reply
+
+                if repeated_error_blocked:
+                    task.final_status = "blocked"
+                    task.final_reply = _blocked_repeated_tool_error_reply(task)
+                    self._emit(
+                        task,
+                        "task_failed",
+                        "ReAct task stopped after repeated identical tool errors.",
+                        {
+                            "status": "blocked",
+                            "error_summary": "模型反复调用同一个失败工具，任务已自动暂停。",
+                            "error_detail": task.technical_details or task.final_reply,
+                            "repeated_error_count": task.repeated_tool_error_count,
+                            "next_steps": ["换一种工具或参数继续", "补充更明确的目标后重试"],
+                        },
+                    )
                     self._commit_final(messages, task)
                     return task.final_reply
 
@@ -583,6 +641,8 @@ class ReActRunner:
     def _guard_plan_step(self, task: TaskRun, name: str, args: dict[str, Any]) -> str | None:
         if task.mode != "plan":
             return None
+        if name == META_SET_EXECUTION_MODE:
+            return None
         executable_steps = _executable_plan_steps(task.steps)
         repair_steps = [
             step
@@ -634,6 +694,35 @@ class ReActRunner:
             task.no_progress_turns = 0
         return task.no_progress_turns >= 8
 
+    def _detect_repeated_tool_error(
+        self,
+        task: TaskRun,
+        name: str,
+        args: dict[str, Any],
+        result_block: dict,
+    ) -> bool:
+        if not result_block.get("is_error"):
+            task.repeated_tool_error_signature = ""
+            task.repeated_tool_error_count = 0
+            return False
+        signature = _tool_error_signature(name, args, result_block)
+        if signature == task.repeated_tool_error_signature:
+            task.repeated_tool_error_count += 1
+        else:
+            task.repeated_tool_error_signature = signature
+            task.repeated_tool_error_count = 1
+        if task.repeated_tool_error_count < 3:
+            return False
+        content = str(result_block.get("content") or "")
+        task.technical_details = (
+            "Repeated identical tool error stopped the ReAct loop.\n"
+            f"tool={name}\n"
+            f"count={task.repeated_tool_error_count}\n"
+            f"args={_preview_json(args, limit=600)}\n"
+            f"error={content[:1200]}"
+        )
+        return True
+
     def _handle_finish_task(self, task: TaskRun, args: dict, tool_use_id: str) -> dict:
         errors = _validate_finish_args(task, args)
         if errors:
@@ -680,6 +769,7 @@ class ReActRunner:
                 "summary": args.get("summary", ""),
                 "evidence": args.get("evidence") or [],
                 "verification": args.get("verification") or "",
+                "verification_judgement": task.verification_judgement,
                 "changed_state": bool(args.get("changed_state")),
                 "next_steps": args.get("next_steps") or [],
                 "remaining_risks": args.get("remaining_risks") or [],
@@ -751,6 +841,8 @@ class ReActRunner:
                         task.steps = list(record.steps)
             else:
                 task.mode = "direct"
+                task.plan_id = ""
+                task.steps = []
             self._persist_task_state(task)
             return
 
@@ -869,6 +961,14 @@ class ReActRunner:
         rule_judgement = VerificationJudge().judge(task)
         if not rule_judgement.get("sufficient"):
             return {**rule_judgement, "judge": "rules"}
+        if not _strict_completion_verification_enabled(task, finish_args):
+            return {
+                **rule_judgement,
+                "judge": "rules",
+                "llm_judge_skipped": True,
+                "reason": rule_judgement.get("reason")
+                or "post-mutation verification evidence satisfied the hard gate",
+            }
         llm_client = getattr(self.controller, "llm_client", None)
         if llm_client is None or llm_client.__class__.__name__ in {"NullLLMClient", "NoLLM"}:
             return {
@@ -960,7 +1060,7 @@ class ReActRunner:
         )
 
     def _commit_final(self, messages: list[dict], task: TaskRun) -> None:
-        if task.final_reply:
+        if task.final_reply and _last_assistant_text(messages) != task.final_reply:
             messages.append({"role": "assistant", "content": [{"type": "text", "text": task.final_reply}]})
         persisted_messages = [message for message in messages if not message.get("sysdialogue_internal")]
         self.controller.conversation_manager.commit_turn(persisted_messages)
@@ -1021,6 +1121,23 @@ class ReActRunner:
             **(data or {}),
         }
         self._emit(task, "correction", message, payload)
+
+    def _emit_conversation_finish(self, task: TaskRun, summary: str) -> None:
+        self._emit(
+            task,
+            "task_finished",
+            summary,
+            {
+                "status": "completed",
+                "summary": summary,
+                "evidence": [],
+                "verification": "",
+                "changed_state": False,
+                "next_steps": [],
+                "remaining_risks": [],
+                "no_action_reason": "这是普通对话或说明类请求，不需要访问目标系统。",
+            },
+        )
 
 
 def _task_run_from_record(record: TaskRecord, *, resumed: bool = False) -> TaskRun:
@@ -1105,7 +1222,8 @@ def _resolve_runtime_args_for_tool(task: TaskRun, name: str, args: Any) -> tuple
         return {}, f"{name} arguments must be an object."
     if name == META_EXECUTE_DYNAMIC_TOOL:
         args = normalize_execute_dynamic_tool_args(args)
-    if task.mode != "plan":
+    args = normalize_tool_call_args(name, args)
+    if task.mode != "plan" or name == META_SET_EXECUTION_MODE:
         return args, None
     resolved, unresolved = _resolve_value(args, task.steps)
     if unresolved:
@@ -1487,6 +1605,15 @@ def _needs_llm_verification_judge(task: TaskRun) -> bool:
     return task.mode in {"plan", "workflow"} or action_count >= 3 or any(term in text for term in complex_terms)
 
 
+def _strict_completion_verification_enabled(task: TaskRun, finish_args: dict[str, Any]) -> bool:
+    """Keep semantic verification opt-in so routine tasks do not loop on redundant checks."""
+
+    explicit = str(os.getenv("SYSDIALOGUE_STRICT_VERIFY", "")).strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return _needs_llm_verification_judge(task)
+    return bool(finish_args.get("strict_verification"))
+
+
 def _parse_llm_verification_response(content: Any) -> dict[str, Any] | None:
     blocks = content if isinstance(content, list) else []
     for block in blocks:
@@ -1583,6 +1710,25 @@ def _blocked_no_progress_reply(task: TaskRun) -> str:
     )
 
 
+def _blocked_repeated_tool_error_reply(task: TaskRun) -> str:
+    return (
+        "任务已暂停：模型连续多次调用同一个失败工具，且错误完全相同。\n"
+        f"重复次数：{task.repeated_tool_error_count}。\n"
+        "这通常表示模型没有按工具协议补全必要参数，或一直沿用错误参数。\n"
+        "建议换一种工具/参数继续，或补充更明确的目标后重试。"
+    )
+
+
+def _tool_error_signature(name: str, args: dict[str, Any], result_block: dict) -> str:
+    return _normalized_json(
+        {
+            "tool": name,
+            "args": _safe_result_data(args),
+            "error": str(result_block.get("content") or "")[:1000],
+        }
+    )
+
+
 def _latest_post_mutation_candidate_step(task: TaskRun) -> int:
     steps = [
         int(item.get("step") or 0)
@@ -1618,6 +1764,63 @@ def _final_task_store_status(status: str) -> str:
     }.get(status, status or "completed")
 
 
+def _tools_for_task(static_tools: list[dict], task: TaskRun, env_profile: dict | None = None) -> list[dict]:
+    if task.requires_environment_feedback:
+        filtered = [
+            schema for schema in static_tools
+            if _tool_available_for_task(schema.get("name", ""), task, env_profile)
+        ]
+        return filtered + META_TOOL_SCHEMAS
+    return [
+        schema for schema in META_TOOL_SCHEMAS
+        if schema.get("name") == META_FINISH_TASK
+    ]
+
+
+def _tool_available_for_task(name: str, task: TaskRun, env_profile: dict | None) -> bool:
+    if name == "manage_container" and not _container_tools_available(env_profile):
+        return False
+    return True
+
+
+def _container_tools_available(env_profile: dict | None) -> bool:
+    backend = str((env_profile or {}).get("container_backend") or "none").lower()
+    return backend in {"docker", "podman"}
+
+
+def _system_prompt_for_task(base_prompt: str, task: TaskRun) -> str:
+    if task.requires_environment_feedback:
+        return base_prompt
+    return (
+        base_prompt
+        + "\n\n[Conversation-Only Turn]\n"
+        "This user input is casual chat, identity/help, explanation, or design discussion. "
+        "Do not call OS-facing tools, workflow tools, dynamic tools, handoff_to_role, or activate_skill. "
+        "Only finish_task is available for this turn. Answer directly and close with "
+        "finish_task(status=\"completed\", no_action_reason=\"no system access needed\")."
+    )
+
+
+def _conversation_fallback_reply(user_message: str) -> str:
+    text = (user_message or "").strip().lower()
+    identity_markers = ("你是谁", "你是什么", "who are you", "what are you", "介绍一下你", "你的身份")
+    capability_markers = ("你能做什么", "能做什么", "help", "帮助", "怎么用", "如何使用")
+    if any(marker in text for marker in identity_markers):
+        return (
+            "我是 SysDialogue，一个面向 Linux/远程主机运维的智能代理。"
+            "我会通过受控工具、风险确认、审计日志和 ReAct 闭环来完成检查、诊断、配置变更和验证任务；"
+            "普通对话不会访问你的系统。"
+        )
+    if any(marker in text for marker in capability_markers):
+        return (
+            "我可以帮你做只读巡检、安全审计、服务状态检查、配置变更、回滚验证、SSH 目标管理、"
+            "审计追踪和技能/权限说明。直接描述目标即可，例如：检查系统版本和负载。"
+        )
+    if text in {"你好", "您好", "hi", "hello", "hey", "在吗"}:
+        return "你好，我在。你可以直接告诉我要检查或处理的运维目标。"
+    return "这是普通对话请求，我不会访问目标系统。你可以继续提问，或直接描述一个需要执行的运维任务。"
+
+
 def _requires_environment_feedback(user_message: str) -> bool:
     text = (user_message or "").strip().lower()
     if not text:
@@ -1625,6 +1828,23 @@ def _requires_environment_feedback(user_message: str) -> bool:
 
     greetings = {"你好", "您好", "hi", "hello", "hey", "在吗", "谢谢", "thanks"}
     if text in greetings:
+        return False
+
+    identity_or_help_patterns = (
+        "你是谁",
+        "你是什么",
+        "你的身份",
+        "介绍一下你",
+        "你能做什么",
+        "能做什么",
+        "怎么用",
+        "如何使用",
+        "使用帮助",
+        "help",
+        "who are you",
+        "what are you",
+    )
+    if any(pattern in text for pattern in identity_or_help_patterns):
         return False
 
     non_ops_keywords = (
@@ -1838,6 +2058,15 @@ def _model_response_summary(content: list) -> str:
     return text[:160] if text else "Model returned no tool calls."
 
 
+def _last_assistant_text(messages: list[dict]) -> str:
+    if not messages:
+        return ""
+    last = messages[-1]
+    if last.get("role") != "assistant":
+        return ""
+    return _visible_text_preview(_content_as_list(last.get("content"))).strip()
+
+
 def _analysis_summary(content: list) -> str:
     tool_names = [str(_block_attr(block, "name") or "") for block in content if _block_type(block) == "tool_use"]
     visible_text = _visible_text_preview(content)
@@ -1985,6 +2214,12 @@ def _parse_tool_result_json(result_block: dict) -> dict:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _content_as_list(content) -> list:
+    if isinstance(content, list):
+        return content
+    return [content]
 
 
 def _block_type(block) -> str:

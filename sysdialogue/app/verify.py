@@ -104,7 +104,7 @@ def run_verify(config: "AppConfig") -> int:
 
         _safe_print("\n[4/5] Security rules:")
         _safe_print(f"  - RiskClassifier coverage: {len(rc._CLASSIFIERS)} tools")
-        _safe_print("  - CommandSafetyChecker: CS001-CS009")
+        _safe_print("  - CommandSafetyChecker: CS001-CS010")
         _safe_print("  - RemoteLockoutChecker: B010 / B015-B017 / WH023")
     except Exception as exc:
         issues.append(f"Security rule modules failed to load: {exc}")

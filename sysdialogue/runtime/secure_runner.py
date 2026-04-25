@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -35,6 +36,12 @@ class SafeExecutor(ABC):
         uses non-interactive sudo so callers do not hang on a password prompt.
         """
         return self.run(["sudo", "-n", "--", *cmd], timeout=timeout, cwd=cwd)
+
+    def run_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        return self.run(_local_shell_argv(command), timeout=timeout, cwd=cwd)
+
+    def run_privileged_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        return self.run_privileged(_local_shell_argv(command), timeout=timeout, cwd=cwd)
 
     def run_full(self, cmd: list[str], timeout: int = 30, cwd: str | None = None) -> RunResult:
         try:
@@ -97,6 +104,14 @@ class LocalExecutor(SafeExecutor):
         pm.invalidate()
         return _combine_result(last_failure)
 
+    def run_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        return self.run(_local_shell_argv(command), timeout=timeout, cwd=cwd)
+
+    def run_privileged_shell(self, command: str, timeout: int = 30, cwd: str | None = None) -> tuple[str, int]:
+        if os.name == "nt":
+            return self.run_shell(command, timeout=timeout, cwd=cwd)
+        return self.run_privileged(_local_shell_argv(command), timeout=timeout, cwd=cwd)
+
     def _raw_run_with_stdin(
         self,
         cmd: list[str],
@@ -145,3 +160,21 @@ def _truncate(text: str) -> str:
     if len(encoded) > MAX_OUTPUT_BYTES:
         return encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
     return text
+
+
+def _local_shell_argv(command: str) -> list[str]:
+    if os.name == "nt":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+    shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+    shell_name = os.path.basename(shell)
+    if shell_name == "bash":
+        return [shell, "-lc", command]
+    return [shell, "-lc", command]

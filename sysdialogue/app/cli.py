@@ -49,13 +49,16 @@ from sysdialogue.audit.trace_store import AuditLog
               help="Web 控制台监听地址")
 @click.option("--port", "web_port", default=8000, show_default=True, type=int,
               help="Web 控制台监听端口")
+@click.option("--break-glass", "break_glass", is_flag=True,
+              help="Enable the explicit break_glass safety profile for DynTool shell execution.")
 def main(verify: bool, demo: bool, remote: str | None,
          ssh_key_file: str | None, ssh_password: str | None,
          model: str | None, env_file: str | None,
          workflows_dir: str | None, scheduled_job_id: str | None,
          export_audit_session: str | None, export_replay_session: str | None,
          export_dir: str | None,
-         simple: bool, web_mode: bool, web_host: str, web_port: int) -> None:
+         simple: bool, web_mode: bool, web_host: str, web_port: int,
+         break_glass: bool) -> None:
     """SysDialogue v9 — Linux 服务器运维智能代理。"""
 
     ssh_conf: dict = {}
@@ -83,6 +86,7 @@ def main(verify: bool, demo: bool, remote: str | None,
         model=model,
         remote=remote_mode,
         ssh=ssh_conf if ssh_conf else None,
+        safety_profile="break_glass" if break_glass else None,
     )
     if workflows_dir:
         config.workflows_dir = workflows_dir
