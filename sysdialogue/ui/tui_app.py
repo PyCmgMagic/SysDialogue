@@ -116,7 +116,7 @@ class SysDialogueTUI(App):
                         id="user_input",
                     ),
                     Static(
-                        "/status  /resume  /skills  /skill  /hooks  /why  /target",
+                        "/help  /examples  /playbooks  /evidence  /acceptance  /doctor  /check-model  /next",
                         id="input_hint",
                     ),
                     id="input_area",
@@ -149,18 +149,21 @@ class SysDialogueTUI(App):
         tagline.append("  ·  ", style="dim")
         tagline.append("自然语言 -> 意图解析 -> 安全执行 -> 反馈核查", style="dim")
         line1 = Text.from_markup(
-            f"[dim]{glyphs.bullet}[/dim]  直接输入需求回车即可；[bold]/plan[/bold] 进入审查模式。"
+            f"[dim]{glyphs.bullet}[/dim]  直接输入需求回车即可；[bold]/examples[/bold] 看任务样例，[bold]/playbooks[/bold] 看生产工作流，[bold]/evidence[/bold] 看完成证据，[bold]/acceptance[/bold] 看发布验收。"
         )
         line2 = Text.from_markup(
-            f"[dim]{glyphs.bullet}[/dim]  高风险操作会主动拦截，请求二次确认。"
+            f"[dim]{glyphs.bullet}[/dim]  [bold]/doctor[/bold] 检查代理状态；[bold]/check-model[/bold] 验证模型工具调用能力。"
         )
         line3 = Text.from_markup(
+            f"[dim]{glyphs.bullet}[/dim]  高风险操作会主动拦截，请求二次确认。"
+        )
+        line4 = Text.from_markup(
             f"[dim]{glyphs.bullet}[/dim]  "
             "[bold]F2[/bold] 历史  [bold]F3[/bold] 审计  [bold]F4[/bold] 环境  "
             "[bold]^C[/bold] 取消  [bold]^L[/bold] 清屏  [bold]^D[/bold] 退出"
         )
         return Panel(
-            Group(logo, tagline, Rule(style="dim"), line1, line2, line3),
+            Group(logo, tagline, Rule(style="dim"), line1, line2, line3, line4),
             border_style=f"dim {theme.banner_fg}",
             padding=(1, 3),
             title_align="left",
@@ -347,7 +350,7 @@ class SysDialogueTUI(App):
         glyphs = get_glyphs()
         try:
             session_id = getattr(self.controller, "session_id", "") or ""
-            model = (getattr(self.controller, "model", "") or "").split("/")[-1]
+            model = _controller_model_name(self.controller)
             parts = [f"{glyphs.bullet} {text}"]
             if session_id:
                 parts.append(f"会话 #{session_id[:6]}")
@@ -710,6 +713,15 @@ def _looks_like_failure_reply(reply: str) -> bool:
         "Traceback (most recent call last)",
     )
     return any(marker in (reply or "") for marker in markers)
+
+
+def _controller_model_name(controller: Any) -> str:
+    direct = str(getattr(controller, "model", "") or "")
+    if direct:
+        return direct.split("/")[-1]
+    llm_client = getattr(controller, "llm_client", None)
+    model = str(getattr(llm_client, "model", "") or "")
+    return model.split("/")[-1] if model else ""
 
 
 def _format_error_markdown(reply: str) -> str:

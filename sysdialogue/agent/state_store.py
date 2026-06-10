@@ -272,6 +272,7 @@ class SessionStore:
         surface: str = "unknown",
         entry_role: str = "assistant",
         technical_details: str = "",
+        clear_active_task_on_final: bool = True,
     ) -> SessionRecord:
         def mutate(record: SessionRecord) -> None:
             if not record.title or record.title == "Untitled conversation":
@@ -298,7 +299,7 @@ class SessionStore:
             record.events_summary = _sanitize_events(events_summary or {})
             record.pending_confirmation = None
             record.pending_input = None
-            if status in {"completed", "failed", "cancelled", "blocked", "need_info", "partial", "rolled_back"}:
+            if clear_active_task_on_final and status in {"completed", "failed", "cancelled", "blocked", "need_info", "partial", "rolled_back"}:
                 record.active_task_id = ""
             if technical_details:
                 record.technical_details = technical_details

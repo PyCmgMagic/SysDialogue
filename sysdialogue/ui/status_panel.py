@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -11,6 +11,7 @@ from textual.containers import Vertical
 from textual.widgets import Static
 
 from sysdialogue.ui.theme import get_glyphs, get_theme
+from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
 
 if TYPE_CHECKING:
     from sysdialogue.runtime.capability_probe import EnvProfile
@@ -75,6 +76,10 @@ class StatusPanel(Vertical):
     def _build_body(self) -> Text:
         t = get_theme()
         body = Text()
+        env = _sanitized_env(self.env_profile)
+
+        if env.get("remote_mode"):
+            return _remote_target_body(env)
 
         if not _HAS_PSUTIL:
             body.append("未安装 psutil，无法显示实时状态。\n", style="dim")
@@ -126,6 +131,74 @@ class StatusPanel(Vertical):
 
 
 # ─────────────────────────────── helpers ────────────────────────────────────
+
+def _sanitized_env(env_profile: "EnvProfile | None") -> dict[str, Any]:
+    if not env_profile:
+        return {}
+    try:
+        return EnvProfileSanitizer.sanitize(env_profile)
+    except Exception:
+        return {}
+
+
+def _remote_target_body(env: dict[str, Any]) -> Text:
+    t = get_theme()
+    body = Text()
+
+    body.append("TARGET", style="bold")
+    body.append("  ")
+    body.append(_target_label(env), style=t.accent)
+    body.append("\n")
+
+    body.append("OS    ", style="bold")
+    body.append(_compact_values(env.get("distro"), env.get("os"), env.get("kernel")), style="dim")
+    body.append("\n")
+
+    body.append("ACCESS", style="bold")
+    body.append("  ")
+    body.append(_access_summary(env), style="dim")
+    body.append("\n")
+
+    body.append("CAPS  ", style="bold")
+    body.append("  ")
+    body.append(_capability_summary(env), style=t.muted)
+    body.append("\n")
+
+    body.append("LIVE  remote metrics require target observation", style=t.warning)
+    return body
+
+
+def _target_label(env: dict[str, Any]) -> str:
+    if env.get("remote_mode"):
+        host = str(env.get("host") or env.get("hostname") or "remote").strip() or "remote"
+        port = str(env.get("ssh_port") or "22").strip() or "22"
+        return f"ssh://{host}:{port}"
+    return str(env.get("hostname") or "local").strip() or "local"
+
+
+def _compact_values(*values: object) -> str:
+    parts = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text != "unknown" and text not in parts:
+            parts.append(text)
+    return " / ".join(parts) if parts else "unknown"
+
+
+def _access_summary(env: dict[str, Any]) -> str:
+    user = str(env.get("user") or "unknown")
+    root = "root" if env.get("is_root") else "non-root"
+    sudo = "sudo" if env.get("has_sudo") else "no sudo"
+    proxy = ", proxy" if env.get("ssh_proxy_command_configured") else ""
+    return f"{user}, {root}, {sudo}{proxy}"
+
+
+def _capability_summary(env: dict[str, Any]) -> str:
+    service = str(env.get("init_system") or "unknown")
+    packages = str(env.get("package_manager") or "unknown")
+    containers = str(env.get("container_backend") or "unknown")
+    firewall = str(env.get("firewall_backend") or "unknown")
+    return f"svc={service}; pkg={packages}; ctr={containers}; fw={firewall}"
 
 def _bar_row(label: str, value: float, total: float, *, suffix: str = "", width: int = 14) -> Text:
     t = get_theme()

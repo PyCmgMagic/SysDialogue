@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sysdialogue.agent.evidence_matrix import (
+    EVIDENCE_MATRIX,
+    check_evidence_references,
+    coverage_gaps,
+)
 from sysdialogue.app.runtime_factory import create_runtime
 
 if TYPE_CHECKING:
@@ -35,6 +40,7 @@ def run_verify(config: "AppConfig") -> int:
     _safe_print("=" * 60)
 
     issues: list[str] = []
+    notices: list[str] = []
 
     # 1. EnvProfile probing
     try:
@@ -58,7 +64,7 @@ def run_verify(config: "AppConfig") -> int:
             )
             profile = probe.probe()
         sanitized = EnvProfileSanitizer.sanitize(profile)
-        _safe_print("\n[1/5] Sanitized environment profile:")
+        _safe_print("\n[1/6] Sanitized environment profile:")
         for key, value in sanitized.items():
             _safe_print(f"  {key}: {value}")
     except Exception as exc:
@@ -72,7 +78,7 @@ def run_verify(config: "AppConfig") -> int:
 
         reg = default_registry()
         _safe_print(
-            f"\n[2/5] Registered tools: {len(reg.all_schemas())} static"
+            f"\n[2/6] Registered tools: {len(reg.all_schemas())} static"
             f" + {len(META_TOOL_SCHEMAS)} meta"
         )
         for name, desc in reg.describe()[:5]:
@@ -90,7 +96,7 @@ def run_verify(config: "AppConfig") -> int:
             else Path(__file__).parent.parent / "workflows"
         )
         yamls = sorted(workflows_dir.glob("*.yaml"))
-        _safe_print(f"\n[3/5] Built-in workflows: {len(yamls)}")
+        _safe_print(f"\n[3/6] Built-in workflows: {len(yamls)}")
         for workflow in yamls:
             _safe_print(f"  - {workflow.stem}")
         if len(yamls) != 10:
@@ -102,15 +108,33 @@ def run_verify(config: "AppConfig") -> int:
     try:
         from sysdialogue.security import risk_classifier as rc
 
-        _safe_print("\n[4/5] Security rules:")
+        _safe_print("\n[4/6] Security rules:")
         _safe_print(f"  - RiskClassifier coverage: {len(rc._CLASSIFIERS)} tools")
         _safe_print("  - CommandSafetyChecker: CS001-CS010")
         _safe_print("  - RemoteLockoutChecker: B010 / B015-B017 / WH023")
     except Exception as exc:
         issues.append(f"Security rule modules failed to load: {exc}")
 
-    # 5. Runtime config
-    _safe_print("\n[5/5] Config:")
+    # 5. Evidence matrix
+    try:
+        gaps = coverage_gaps()
+        missing_refs = check_evidence_references()
+        _safe_print(f"\n[5/6] Evidence matrix: {len(EVIDENCE_MATRIX)} requirements")
+        if gaps:
+            issues.extend(f"Evidence matrix coverage gap: {gap}" for gap in gaps)
+            _safe_print(f"  - coverage gaps: {len(gaps)}")
+        else:
+            _safe_print("  - coverage gaps: none")
+        if missing_refs:
+            issues.extend(f"Evidence matrix reference missing: {ref}" for ref in missing_refs)
+            _safe_print(f"  - missing references: {len(missing_refs)}")
+        else:
+            _safe_print("  - missing references: none")
+    except Exception as exc:
+        issues.append(f"Evidence matrix check failed: {exc}")
+
+    # 6. Runtime config
+    _safe_print("\n[6/6] Config:")
     _safe_print(f"  - model: {config.model}")
     _safe_print(f"  - base_url: {config.base_url or '(OpenAI SDK default)'}")
     _safe_print("  - dynamic_tools: enabled")
@@ -118,11 +142,11 @@ def run_verify(config: "AppConfig") -> int:
     if config.api_key:
         _safe_print(f"  - OPENAI_API_KEY: configured ({config.api_key[:8]}...)")
     else:
-        _safe_print("  - OPENAI_API_KEY: missing (required for TUI/simple/web)")
-        issues.append("OPENAI_API_KEY is not configured")
+        _safe_print("  - OPENAI_API_KEY: missing (required only for TUI/simple/web)")
+        notices.append("OPENAI_API_KEY is not configured; --verify and --demo do not call the model API.")
     if not config.model:
-        _safe_print("  - OPENAI_MODEL / --model: missing (required for TUI/simple/web)")
-        issues.append("OPENAI_MODEL or --model is not configured")
+        _safe_print("  - OPENAI_MODEL / --model: missing (required only for TUI/simple/web)")
+        notices.append("OPENAI_MODEL or --model is not configured; interactive modes need a model.")
 
     _safe_print("\n" + "=" * 60)
     if issues:
@@ -131,6 +155,13 @@ def run_verify(config: "AppConfig") -> int:
             _safe_print(f"  {index}. {message}")
         _safe_print("=" * 60)
         return 1
+
+    if notices:
+        _safe_print(f"[INFO] Self-check passed with {len(notices)} non-blocking notice(s):")
+        for index, message in enumerate(notices, 1):
+            _safe_print(f"  {index}. {message}")
+        _safe_print("=" * 60)
+        return 0
 
     _safe_print("[OK] Self-check passed.")
     _safe_print("=" * 60)

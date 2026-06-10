@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sysdialogue.security.output_sanitizer import sanitize_text
+
 
 HOOK_EVENTS = {
     "task_started",
@@ -198,5 +200,5 @@ def _render_template(template: str, payload: dict[str, Any]) -> str:
     rendered = str(template or "")
     for key, value in (payload or {}).items():
         if isinstance(value, (str, int, float, bool)):
-            rendered = rendered.replace("{" + str(key) + "}", str(value))
-    return rendered
+            rendered = rendered.replace("{" + str(key) + "}", sanitize_text(value, limit=1000))
+    return sanitize_text(rendered, limit=4000)

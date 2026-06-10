@@ -165,6 +165,10 @@ class MemoryManager:
         tmp = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.index_path)
+        try:
+            os.chmod(self.index_path, 0o600)
+        except OSError:
+            pass
         _write_markdown(self.storage_dir / "MEMORY.md", records)
 
 
@@ -181,3 +185,7 @@ def _write_markdown(path: Path, records: list[MemoryRecord]) -> None:
         lines.append(record.value)
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass

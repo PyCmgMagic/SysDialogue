@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController, LLMResponse, _direct_lock_scopes
+from sysdialogue.agent.hooks import HookManager
+from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.react_runner import (
     LLMVerificationJudge,
     TaskRun,
@@ -18,7 +20,10 @@ from sysdialogue.agent.react_runner import (
     _resolve_runtime_args_for_tool,
     _tools_for_task,
 )
+from sysdialogue.agent.skills import SkillManager
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStepRecord, TaskStore
+from sysdialogue.agent.target_profile import TargetProfileStore
+from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.tools.base import ToolResult
@@ -79,6 +84,11 @@ def _controller(tmp_path: Path, llm: FakeLLM, registry: ToolRegistry | None = No
         session_store=SessionStore(str(tmp_path / "sessions")),
         task_store=TaskStore(str(tmp_path / "tasks")),
         lock_store=LockStore(str(tmp_path / "locks")),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        trace_store=TraceStore(str(tmp_path / "traces")),
+        skill_manager=SkillManager(user_root=tmp_path / "skills"),
+        hook_manager=HookManager(user_path=tmp_path / "hooks.json"),
+        target_profile_store=TargetProfileStore(str(tmp_path / "targets")),
     )
     return controller, events
 
@@ -259,6 +269,13 @@ def test_container_exec_verification_only_accepts_read_only_checks() -> None:
     )
 
 
+def test_read_only_action_keys_are_not_counted_as_mutations() -> None:
+    assert not _is_mutating_tool("manage_firewall", {"action": "list"})
+    assert _is_verification_tool("manage_firewall", {"action": "list"})
+    assert not _is_mutating_tool("get_set_system_config", {"key": "hostname"})
+    assert _is_verification_tool("get_set_system_config", {"key": "hostname"})
+
+
 def test_frozen_plan_allows_limited_repairs_for_cwd_and_mysql_tcp() -> None:
     maven_step = TaskStepRecord(
         step_id="maven-test",
@@ -331,6 +348,11 @@ def _controller_with_dynamic(tmp_path: Path, llm: FakeLLM, executor):
         session_store=SessionStore(str(tmp_path / "sessions")),
         task_store=TaskStore(str(tmp_path / "tasks")),
         lock_store=LockStore(str(tmp_path / "locks")),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        trace_store=TraceStore(str(tmp_path / "traces")),
+        skill_manager=SkillManager(user_root=tmp_path / "skills"),
+        hook_manager=HookManager(user_path=tmp_path / "hooks.json"),
+        target_profile_store=TargetProfileStore(str(tmp_path / "targets")),
     )
     return controller, events
 

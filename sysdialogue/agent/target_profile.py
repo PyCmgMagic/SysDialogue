@@ -12,6 +12,8 @@ from typing import Any
 
 from filelock import FileLock
 
+from sysdialogue.security.output_sanitizer import sanitize_text, sanitize_value
+
 
 @dataclass
 class TargetProfile:
@@ -61,8 +63,13 @@ class TargetProfileStore:
         lock = FileLock(str(path) + ".lock", timeout=10)
         with lock:
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(json.dumps(asdict(profile), ensure_ascii=False, indent=2), encoding="utf-8")
+            payload = sanitize_value(asdict(profile))
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
         return profile
 
     def delete(self, target_id: str) -> bool:
@@ -76,7 +83,8 @@ class TargetProfileStore:
 
     def remember_fact(self, target_id: str, key: str, value: Any) -> TargetProfile:
         profile = self.load(target_id) or TargetProfile(target_id=target_id)
-        profile.facts[str(key)] = value
+        safe_key = sanitize_text(str(key), limit=120).strip() or "fact"
+        profile.facts[safe_key] = sanitize_value(value, limit=2000)
         return self.save(profile)
 
     def list_profiles(self, limit: int = 30) -> list[TargetProfile]:
@@ -92,7 +100,7 @@ class TargetProfileStore:
         if profile.label:
             lines.append(f"Label: {profile.label}")
         for key, value in sorted(profile.facts.items()):
-            lines.append(f"- {key}: {value}")
+            lines.append(f"- {sanitize_text(key, limit=120)}: {sanitize_text(value, limit=1000)}")
         if profile.common_services:
             lines.append("Common services: " + ", ".join(profile.common_services[:10]))
         if profile.last_verification:

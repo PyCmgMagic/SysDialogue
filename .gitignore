@@ -10,7 +10,9 @@ dist/
 .venv/
 venv/
 env/
-
+docs/
+submission_materials/
+submission_materials
 # 本地状态与审计日志
 .env
 .sysdialogue/
@@ -21,7 +23,8 @@ env/
 .vscode/
 *.swp
 *.swo
-
+.playwright-mcp/
+.pytest_cache/
 # 本地测试与临时文件
 _test_*.py
 *.log

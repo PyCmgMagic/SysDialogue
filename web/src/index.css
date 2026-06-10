@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", "Noto Sans SC", "Segoe UI Variable", "PingFang SC", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+:root {
+  color: #171717;
+  background: #f6f5f1;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 245, 241, 0.95)),
+    repeating-linear-gradient(90deg, rgba(23, 23, 23, 0.035) 0, rgba(23, 23, 23, 0.035) 1px, transparent 1px, transparent 56px);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.app-grid {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr) minmax(320px, 400px);
+  min-height: calc(100vh - 54px);
+}
+
+.main-scroll {
+  height: calc(100vh - 54px);
+  overflow: hidden;
+}
+
+.mobile-nav {
+  display: none;
+}
+
+.rail-button {
+  position: relative;
+}
+
+.rail-button[data-active="true"]::before {
+  position: absolute;
+  left: -15px;
+  top: 50%;
+  width: 4px;
+  height: 26px;
+  border-radius: 99px;
+  background: #171717;
+  content: "";
+  transform: translateY(-50%);
+}
+
+.terminal-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+@media (max-width: 1180px) {
+  .app-grid {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .right-dock {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .side-rail {
+    display: none;
+  }
+
+  .main-scroll {
+    height: auto;
+    min-height: calc(100vh - 54px);
+  }
+
+  .content-shell {
+    padding-bottom: calc(8rem + env(safe-area-inset-bottom));
+  }
+
+  .mobile-nav {
+    display: block;
+  }
+}

@@ -277,6 +277,7 @@ class AgentController:
                     final_reply=result.output,
                     status="completed",
                     surface=self.surface,
+                    clear_active_task_on_final=False,
                 )
             return result.output
 

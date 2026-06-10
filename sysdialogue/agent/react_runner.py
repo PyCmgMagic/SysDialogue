@@ -41,6 +41,7 @@ READ_ONLY_TOOLS = {
     "read_file",
     "manage_package:list",
     "manage_package:search",
+    "manage_firewall:list",
     "get_resource_stats",
     "list_directory",
     "stat_path",
@@ -62,6 +63,7 @@ READ_ONLY_TOOLS = {
     "manage_cron:list",
     "manage_sysctl:list",
     "manage_sysctl:get",
+    "get_set_system_config:get",
 }
 
 VERIFICATION_CANDIDATE_TOOLS = {

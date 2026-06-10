@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from sysdialogue.security.output_sanitizer import sanitize_value
+
 
 @dataclass(frozen=True)
 class SkillRecord:
@@ -91,7 +93,7 @@ class SkillManager:
             raise PermissionError(f"Skill is not user-invocable: {record.name}")
         if source == "model" and not record.model_invocable:
             raise PermissionError(f"Skill is not model-invocable: {record.name}")
-        safe_args = _json_object(args or {})
+        safe_args = _json_object(sanitize_value(args or {}))
         context = _render_skill_context(record, safe_args)
         return SkillInvocation(
             name=record.name,

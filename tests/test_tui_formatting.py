@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from rich.console import Console
+
 from sysdialogue.agent.conversation import ConversationManager
 from sysdialogue.agent.conversation_store import ConversationStore
 from sysdialogue.ui.tui_app import (
     SysDialogueTUI,
     _choice_button_label,
+    _controller_model_name,
     _choices_from_task_event,
     _event_style,
     _format_confirmation_result,
@@ -15,6 +18,7 @@ from sysdialogue.ui.tui_app import (
     _normalize_confirmation_decision,
     _looks_like_failure_reply,
 )
+from sysdialogue.ui.status_panel import StatusPanel, _target_label
 from sysdialogue.ui.task_timeline import TaskTimelineCard, present_error
 from sysdialogue.security.approval_rules import ConfirmationRequest
 from sysdialogue.security.risk_classifier import RiskDecision
@@ -44,6 +48,60 @@ def test_tui_failure_reply_detection_and_markdown_wrapper() -> None:
     assert formatted.startswith("### 执行异常")
     assert "```text" in formatted
     assert "boom" in formatted
+
+
+def test_tui_status_bar_reads_model_from_llm_client() -> None:
+    controller = SimpleNamespace(llm_client=SimpleNamespace(model="openai/gpt-5.1"))
+
+    assert _controller_model_name(controller) == "gpt-5.1"
+
+
+def test_status_panel_uses_remote_target_summary_not_local_metrics() -> None:
+    panel = StatusPanel(
+        {
+            "remote_mode": True,
+            "host": "example.test",
+            "hostname": "prod-box",
+            "ssh_port": 2222,
+            "os_release": "Ubuntu 24.04",
+            "distro_id": "ubuntu",
+            "kernel_version": "6.8.0",
+            "current_user": "deploy",
+            "is_root": False,
+            "has_sudo": True,
+            "ssh_proxy_command_configured": True,
+            "init_system": "systemd",
+            "package_manager": "apt",
+            "container_backend": "docker",
+            "firewall_backend": "ufw",
+        }
+    )
+
+    rendered = panel._build_body().plain
+
+    assert _target_label({"remote_mode": True, "host": "example.test", "ssh_port": 2222}) == "ssh://example.test:2222"
+    assert "ssh://example.test:2222" in rendered
+    assert "deploy, non-root, sudo, proxy" in rendered
+    assert "svc=systemd; pkg=apt; ctr=docker; fw=ufw" in rendered
+    assert "CPU" not in rendered
+
+
+def test_tui_welcome_and_bindings_expose_recovery_and_diagnostic_commands() -> None:
+    app = SysDialogueTUI(SimpleNamespace(audit_log=SimpleNamespace(), env_profile={}))
+    console = Console(record=True, width=120)
+
+    console.print(app._build_welcome())
+    rendered = console.export_text()
+
+    assert "/examples" in rendered
+    assert "/playbooks" in rendered
+    assert "/evidence" in rendered
+    assert "/acceptance" in rendered
+    assert "/doctor" in rendered
+    assert "/check-model" in rendered
+    assert "F2" in rendered
+    assert "F3" in rendered
+    assert "F4" in rendered
 
 
 def test_tui_need_info_choices_are_limited_and_labelled() -> None:

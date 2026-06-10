@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from sysdialogue.agent.controller import AgentController
+from sysdialogue.agent.hooks import HookManager
+from sysdialogue.agent.memory import MemoryManager
+from sysdialogue.agent.skills import SkillManager
 from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.target_profile import TargetProfileStore
+from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.agent.workflow_engine import WorkflowEngine
 from sysdialogue.audit.trace_store import AuditLog
 from sysdialogue.runtime.secure_runner import LocalExecutor
@@ -18,6 +23,14 @@ def _engine(tmp_path: Path) -> WorkflowEngine:
         audit_log=AuditLog(log_dir=str(tmp_path / "audit")),
         registry=ToolRegistry(),
         llm_client=None,
+        session_store=SessionStore(str(tmp_path / "sessions")),
+        task_store=TaskStore(str(tmp_path / "tasks")),
+        lock_store=LockStore(str(tmp_path / "locks")),
+        memory_manager=MemoryManager(str(tmp_path / "memory")),
+        trace_store=TraceStore(str(tmp_path / "traces")),
+        skill_manager=SkillManager(user_root=tmp_path / "skills"),
+        hook_manager=HookManager(user_path=tmp_path / "hooks.json"),
+        target_profile_store=TargetProfileStore(str(tmp_path / "targets")),
     )
     return WorkflowEngine(controller=controller, workflows_dir=tmp_path / "workflows")
 

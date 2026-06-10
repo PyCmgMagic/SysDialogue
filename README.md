@@ -108,6 +108,26 @@ Windows 控制端连接远程 Linux：
 python -m sysdialogue.app.cli --remote user@example.com:22 --ssh-key <ssh_key_path>
 ```
 
+Web 控制台后端桥接服务：
+
+```powershell
+python -m sysdialogue.app.web_api
+```
+
+如 8000 端口已被占用：
+
+```powershell
+$env:SYSDIALOGUE_WEB_PORT="8010"
+python -m sysdialogue.app.web_api
+```
+
+然后进入 `web` 目录启动前端，默认连接 `http://127.0.0.1:8000/api`：
+
+```powershell
+cd web
+npm run dev
+```
+
 Break-glass 模式：
 
 ```powershell
@@ -142,31 +162,3 @@ Get-ChildItem $env:USERPROFILE\.sysdialogue\traces
 ```
 
 这些文件记录任务过程、工具执行、安全判断、审批和最终结果。
-
-## 7. 验证
-
-```powershell
-python -m pytest -q
-python -m compileall -q sysdialogue tests
-python -m sysdialogue.app.cli --verify
-```
-
-评测指令：
-
-```text
-submission_materials/05_评测指令.md
-```
-
-## 8. 提交材料
-
-书面材料位于：
-
-```text
-submission_materials/
-```
-
-演示视频位于：
-
-```text
-video/演示视频.mp4
-```

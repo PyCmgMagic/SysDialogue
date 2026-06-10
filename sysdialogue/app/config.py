@@ -19,6 +19,7 @@ class AppConfig:
     ssh_key_file: str = ""
     ssh_password: str = ""
     ssh_sudo_password: str = ""
+    ssh_proxy_command: str = ""
     workflows_dir: str = ""  # 空则默认 sysdialogue/workflows/
     max_iterations: int = 160
     safety_profile: str = "standard"
@@ -65,6 +66,10 @@ def load_config(
         cfg.ssh_sudo_password = (
             ssh.get("sudo_password", "")
             or os.environ.get("SYSDIALOGUE_SUDO_PASSWORD", "")
+        )
+        cfg.ssh_proxy_command = (
+            ssh.get("proxy_command", "")
+            or os.environ.get("SYSDIALOGUE_SSH_PROXY_COMMAND", "")
         )
     return cfg
 

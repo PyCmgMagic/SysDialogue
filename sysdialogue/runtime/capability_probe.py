@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 class EnvProfile(TypedDict):
     # v4.1 原有字段
+    host: str
+    hostname: str
     os_release: str
     distro_id: str
     distro_version: str
@@ -33,6 +35,7 @@ class EnvProfile(TypedDict):
     # v5.3 新增
     firewall_backend: str      # "ufw" | "firewalld" | "iptables" | "none"
     ssh_port: int              # SSH 连接端口（用于远程锁门检测）
+    ssh_proxy_command_configured: bool
 
     # v5.4 新增
     container_backend: str     # "docker" | "podman" | "none"
@@ -49,6 +52,8 @@ class EnvProfile(TypedDict):
 def _unknown_profile(remote_mode: bool = False, ssh_port: int = 22) -> EnvProfile:
     """返回全 unknown 的保守 EnvProfile，探测失败时使用。"""
     return EnvProfile(
+        host="",
+        hostname="unknown",
         os_release="unknown",
         distro_id="unknown",
         distro_version="unknown",
@@ -68,6 +73,7 @@ def _unknown_profile(remote_mode: bool = False, ssh_port: int = 22) -> EnvProfil
         available_cmds={},
         firewall_backend="unknown",
         ssh_port=ssh_port,
+        ssh_proxy_command_configured=False,
         container_backend="unknown",
         config_validators=[],
         supports_journalctl=False,
@@ -161,6 +167,12 @@ class CapabilityProbe:
         out, _ = self._run(["uname", "-m"])
         if out:
             p["architecture"] = out
+
+        out, _ = self._run(["hostname"])
+        if not out:
+            out, _ = self._run(["uname", "-n"])
+        if out:
+            p["hostname"] = out
 
         out, code = self._run(["cat", "/.dockerenv"])
         if code == 0:
@@ -354,6 +366,9 @@ class EnvProfileSanitizer:
     def sanitize(cls, profile: EnvProfile) -> dict:
         """返回适合注入 SystemPrompt 的脱敏字典（只含能力特征，无敏感凭证）。"""
         safe: dict = {
+            "host": cls._safe_text(profile.get("host", "")),
+            "hostname": cls._safe_text(profile.get("hostname", "unknown")),
+            "ssh_port": profile.get("ssh_port", 22),
             "os": profile.get("os_release", "unknown"),
             "distro": profile.get("distro_id", "unknown"),
             "distro_family": profile.get("distro_family", "unknown"),
@@ -366,7 +381,9 @@ class EnvProfileSanitizer:
             "sudo_passwordless": profile.get("sudo_passwordless", False),
             "is_container": profile.get("is_container", False),
             "remote_mode": profile.get("remote_mode", False),
+            "ssh_proxy_command_configured": profile.get("ssh_proxy_command_configured", False),
             "init_system": profile.get("init_system", "unknown"),
+            "service_manager": profile.get("service_manager", "unknown"),
             "package_manager": profile.get("package_manager", "unknown"),
             "firewall_backend": profile.get("firewall_backend", "unknown"),
             "container_backend": profile.get("container_backend", "unknown"),
@@ -379,3 +396,10 @@ class EnvProfileSanitizer:
             "apparmor_mode": profile.get("apparmor_mode", "unknown"),
         }
         return safe
+
+    @classmethod
+    def _safe_text(cls, value: object, *, limit: int = 300) -> str:
+        text = str(value or "")
+        for pattern in cls._CREDENTIAL_PATTERNS:
+            text = pattern.sub("<redacted>", text)
+        return text[:limit]

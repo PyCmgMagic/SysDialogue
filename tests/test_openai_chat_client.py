@@ -6,11 +6,13 @@ import pytest
 
 from sysdialogue.agent.controller import (
     LLMClientError,
+    LLMResponse,
     _from_openai_response,
     _from_openai_message,
     _to_openai_messages,
     _to_openai_tools,
 )
+from sysdialogue.agent.model_diagnostics import diagnose_tool_call_support
 
 
 def test_openai_tool_schema_conversion_uses_function_tools() -> None:
@@ -157,3 +159,68 @@ def test_legacy_assistant_string_messages_remain_visible_to_openai() -> None:
         {"role": "system", "content": "system prompt"},
         {"role": "assistant", "content": "历史回复"},
     ]
+
+
+class ToolCallingDiagnosticClient:
+    model = "diagnostic-model"
+    base_url = "https://api.example.test/v1"
+
+    def messages_create(self, *, system, messages, tools):
+        assert tools[0]["name"] == "diagnostic_ping"
+        return LLMResponse(
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": "call_diag",
+                    "name": "diagnostic_ping",
+                    "input": {"ok": True},
+                }
+            ],
+            stop_reason="tool_use",
+        )
+
+
+class PlainTextDiagnosticClient:
+    model = "plain-model"
+    base_url = ""
+
+    def messages_create(self, *, system, messages, tools):
+        return LLMResponse(
+            content=[{"type": "text", "text": "I cannot call tools."}],
+            stop_reason="stop",
+        )
+
+
+class FailingDiagnosticClient:
+    model = "bad-model"
+    base_url = "https://console.example.test"
+
+    def messages_create(self, *, system, messages, tools):
+        raise RuntimeError("Authorization: Bearer abc.def failed")
+
+
+def test_model_diagnostic_passes_when_tool_call_is_returned() -> None:
+    result = diagnose_tool_call_support(ToolCallingDiagnosticClient())
+
+    assert result.ok is True
+    assert result.status == "ok"
+    assert "valid tool call" in result.summary
+    assert "diagnostic-model" in result.to_text()
+
+
+def test_model_diagnostic_fails_on_plain_text_response() -> None:
+    result = diagnose_tool_call_support(PlainTextDiagnosticClient())
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert "plain text" in result.technical_details
+    assert "tool_calls" in "\n".join(result.next_steps)
+
+
+def test_model_diagnostic_sanitizes_endpoint_errors() -> None:
+    result = diagnose_tool_call_support(FailingDiagnosticClient())
+
+    assert result.ok is False
+    assert result.error_type == "RuntimeError"
+    assert "abc.def" not in result.to_text()
+    assert "<redacted>" in result.to_text()

@@ -10,13 +10,16 @@ from sysdialogue.agent.controller import AgentController, LLMResponse
 from sysdialogue.agent.hooks import HookEvent, HookManager
 from sysdialogue.agent.memory import MemoryManager
 from sysdialogue.agent.permission_policy import PermissionPolicy, PermissionRule
+from sysdialogue.agent.playbook_catalog import PRODUCTION_PLAYBOOKS
+from sysdialogue.agent.prompt import build_system_prompt
 from sysdialogue.agent.role_agents import RoleRunner
 from sysdialogue.agent.skills import SkillManager
-from sysdialogue.agent.state_store import LockStore, SessionStore, TaskStore
+from sysdialogue.agent.state_store import LockStore, SessionStore, TaskEventRecord, TaskStepRecord, TaskStore
 from sysdialogue.agent.target_profile import TargetProfileStore
 from sysdialogue.agent.trace_store import TraceStore
 from sysdialogue.audit.serializers import export_replay_package
 from sysdialogue.audit.trace_store import AuditLog
+from sysdialogue.runtime.capability_probe import EnvProfileSanitizer
 from sysdialogue.runtime.secure_runner import LocalExecutor
 from sysdialogue.security.output_sanitizer import sanitize_command, sanitize_text, sanitize_value
 from sysdialogue.tools.base import ToolResult
@@ -26,6 +29,24 @@ from sysdialogue.tools.registry import ToolDef, ToolRegistry
 class NoLLM:
     def messages_create(self, *, system, messages, tools):
         return LLMResponse(content=[], stop_reason="stop")
+
+
+class DiagnosticLLM:
+    model = "diag-model"
+    base_url = "https://api.example.test/v1"
+
+    def messages_create(self, *, system, messages, tools):
+        return LLMResponse(
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": "call_diag",
+                    "name": "diagnostic_ping",
+                    "input": {"ok": True},
+                }
+            ],
+            stop_reason="tool_use",
+        )
 
 
 def _registry() -> ToolRegistry:
@@ -276,7 +297,46 @@ def test_tool_result_audit_and_replay_exports_are_sanitized(tmp_path: Path) -> N
     assert "sk-live-secret" not in json.dumps(result.to_dict(), ensure_ascii=False)
     assert "abc.def" not in raw_audit
     with zipfile.ZipFile(replay) as zf:
+        names = set(zf.namelist())
         combined = "\n".join(zf.read(name).decode("utf-8") for name in zf.namelist())
+    assert "SUMMARY.md" in names
+    assert "sk-live-secret" not in combined
+    assert "abc.def" not in combined
+
+
+def test_replay_package_includes_human_readable_summary(tmp_path: Path) -> None:
+    audit = AuditLog(session_id="summary_session", log_dir=str(tmp_path / "audit"))
+    audit.log_env_profile({"os": "linux", "distro": "ubuntu", "container_backend": "docker"})
+    audit.log_decision(
+        tool="manage_service",
+        args={"name": "nginx", "action": "restart"},
+        risk_level="WARN-HIGH",
+        rule_ids=["WH006"],
+        reason="restart Authorization: Bearer abc.def",
+        decision="WARN-HIGH",
+    )
+    audit.log_command(
+        "manage_service",
+        ["systemctl", "restart", "nginx"],
+        1,
+        "OPENAI_API_KEY=sk-live-secret failed",
+    )
+    audit.log_final(final_status="failed", detail="service restart failed")
+
+    replay = export_replay_package(audit, output_dir=str(tmp_path / "exports"))
+
+    with zipfile.ZipFile(replay) as zf:
+        summary_md = zf.read("SUMMARY.md").decode("utf-8")
+        summary_json = json.loads(zf.read("summary.json").decode("utf-8"))
+        combined = "\n".join(zf.read(name).decode("utf-8") for name in zf.namelist())
+
+    assert "# SysDialogue Replay Summary" in summary_md
+    assert "WARN-HIGH" in summary_md
+    assert "manage_service" in summary_md
+    assert "FAILED" in summary_md
+    assert "service restart failed" in summary_md
+    assert summary_json["risk_counts"]["WARN-HIGH"] == 1
+    assert summary_json["failed_command_count"] == 1
     assert "sk-live-secret" not in combined
     assert "abc.def" not in combined
 
@@ -287,13 +347,219 @@ def test_slash_commands_persist_and_can_compact_memory(tmp_path: Path) -> None:
     status = controller.run_turn("/status")
     compact = controller.run_turn("/compact remember nginx service context")
     memory = controller.run_turn("/memory")
+    memory_id = controller.conversation_manager.context["last_compaction_memory_id"]
+    forget = controller.run_turn(f"/forget {memory_id}")
 
     record = controller.session_store.load(controller.session_id)
     assert "Session:" in status
     assert "Compacted" in compact
+    assert memory_id in memory
     assert "remember nginx" in memory
+    assert f"Forgot {memory_id}" in forget
     assert record is not None
     assert [entry["role"] for entry in record.entries[-2:]] == ["user", "assistant"]
+
+
+def test_slash_doctor_reports_agent_readiness(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    reply = controller.run_turn("/doctor")
+
+    assert "SysDialogue doctor:" in reply
+    assert "Safety profile:" in reply
+    assert "Tools: 1 static" in reply
+    assert "Actionable notices:" in reply
+
+
+def test_slash_examples_are_context_aware(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.env_profile["container_backend"] = "docker"
+    controller.conversation_manager.context["service_name"] = "postgresql"
+    controller.conversation_manager.context["container_name"] = "db"
+
+    reply = controller.run_turn("/examples")
+
+    assert "Example tasks:" in reply
+    assert "postgresql" in reply
+    assert "db" in reply
+    assert "Docker/Podman" not in reply
+    assert "/playbooks" in reply
+
+
+def test_slash_playbooks_lists_copy_ready_workflows(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.env_profile.update(
+        {
+            "remote_mode": True,
+            "host": "prod.example.test",
+            "ssh_port": 2222,
+            "ssh_proxy_command_configured": True,
+        }
+    )
+
+    reply = controller.run_turn("/playbooks")
+    alias_reply = controller.run_turn("/workflows")
+    help_reply = controller.run_turn("/help")
+
+    assert "Production playbooks:" in reply
+    assert "Target: ssh://prod.example.test:2222 via ProxyCommand" in reply
+    assert "security_audit" in reply
+    assert "service_restart" in reply
+    assert "safe_config_patch" in reply
+    assert "container_rollout" in reply
+    assert "set_execution_mode(mode=\"workflow\")" in reply
+    assert "Safely restart nginx" in reply
+    assert alias_reply == reply
+    assert "/playbooks" in help_reply
+
+
+def test_production_playbooks_doc_mentions_workflow_onboarding() -> None:
+    guide = Path("docs/PRODUCTION_PLAYBOOKS.md").read_text(encoding="utf-8")
+
+    assert "/playbooks" in guide
+    assert "safe_config_patch" in guide
+    assert "container_rollout" in guide
+    assert "via ProxyCommand" in guide
+
+
+def test_production_playbook_catalog_matches_builtin_workflow_files() -> None:
+    workflow_names = {path.stem for path in Path("sysdialogue/workflows").glob("*.yaml")}
+    catalog_names = {entry.workflow_name for entry in PRODUCTION_PLAYBOOKS}
+
+    assert catalog_names <= workflow_names
+    assert {"security_audit", "service_restart", "safe_config_patch"} <= catalog_names
+
+
+def test_slash_examples_remote_includes_setup_and_recovery(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.env_profile.update(
+        {
+            "remote_mode": True,
+            "host": "example.test",
+            "ssh_port": 2222,
+            "current_user": "alice",
+        }
+    )
+
+    reply = controller.run_turn("/examples")
+
+    assert "Remote setup and recovery:" in reply
+    assert "sysdialogue --doctor --remote alice@example.test:2222" in reply
+    assert "ssh -p 2222 alice@example.test 'uname -a'" in reply
+    assert "--ssh-proxy-command" in reply
+    assert "/next" in reply
+    assert "/resume" in reply
+    assert "/abandon" in reply
+    assert "known_hosts" in reply
+
+
+def test_remote_operations_guide_documents_failure_and_recovery_commands() -> None:
+    guide = Path("docs/REMOTE_OPERATIONS_GUIDE.md").read_text(encoding="utf-8")
+
+    assert "sysdialogue --doctor --remote user@example.com:22" in guide
+    assert "known_hosts" in guide
+    assert "SYSDIALOGUE_SSH_PASSWORD" in guide
+    assert "SYSDIALOGUE_SSH_PROXY_COMMAND" in guide
+    assert "--ssh-proxy-command" in guide
+    assert "/next" in guide
+    assert "/resume" in guide
+    assert "/abandon" in guide
+
+
+def test_slash_check_model_runs_tool_call_diagnostic(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.llm_client = DiagnosticLLM()
+
+    reply = controller.run_turn("/check-model")
+
+    assert "Model tool-call diagnostic:" in reply
+    assert "Status: ok" in reply
+    assert "diag-model" in reply
+
+
+def test_slash_next_recommends_resume_and_abandon_for_interrupted_task(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    controller.task_store.create(
+        task_id="task_interrupted",
+        session_id=controller.session_id,
+        surface="test",
+        goal="restart nginx safely",
+        status="interrupted",
+        current_phase="resume",
+    )
+    controller.session_store.set_status(
+        controller.session_id,
+        "interrupted",
+        surface="test",
+        active_task_id="task_interrupted",
+        technical_details="heartbeat expired",
+    )
+    controller.lock_store.acquire(
+        "service:nginx",
+        task_id="task_interrupted",
+        session_id=controller.session_id,
+        surface="test",
+        timeout=0.1,
+    )
+
+    next_reply = controller.run_turn("/next")
+    abandon_reply = controller.run_turn("/abandon")
+
+    assert "/resume" in next_reply
+    assert "/abandon" in next_reply
+    assert "restart nginx safely" in next_reply
+    assert "Abandoned task_interrupted" in abandon_reply
+    assert "Released 1 lock" in abandon_reply
+    assert controller.task_store.load("task_interrupted").status == "cancelled"
+    assert controller.session_store.load(controller.session_id).active_task_id == ""
+    assert controller.lock_store.list_leases() == []
+
+
+def test_slash_next_summarizes_blocked_task_advice(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    task = controller.task_store.create(
+        task_id="task_blocked",
+        session_id=controller.session_id,
+        surface="test",
+        goal="patch nginx config",
+        status="blocked",
+        current_phase="verify",
+        iteration_budget=80,
+        iteration_limit=160,
+    )
+    task.steps = [
+        TaskStepRecord(
+            step_id="validate",
+            status="failed",
+            tool="validate_config",
+            purpose="Validate nginx config",
+            error="nginx binary not found",
+        ),
+        TaskStepRecord(
+            step_id="verify",
+            status="pending",
+            tool="read_file",
+            purpose="Read target config after validation is available",
+            last_rejected_args={"path": ""},
+        ),
+    ]
+    task.events = [
+        TaskEventRecord(
+            ts="2026-05-27T00:00:00+00:00",
+            stage="task_failed",
+            message="blocked",
+            data={"next_steps": ["Install nginx or provide the absolute nginx binary path."]},
+        )
+    ]
+    controller.task_store.save(task)
+
+    reply = controller.run_turn("/next")
+
+    assert "task_blocked" in reply
+    assert "Install nginx" in reply
+    assert "Next pending step" in reply
+    assert "Last failed step" in reply
+    assert "nginx binary not found" in reply
 
 
 def test_tui_facing_slash_commands_render_readable_summaries(tmp_path: Path) -> None:
@@ -338,6 +604,18 @@ def test_skill_manager_project_skill_overrides_user_skill(tmp_path: Path) -> Non
     assert "project body" in invocation.context
     assert "user body" not in invocation.context
     assert '"service": "nginx"' in invocation.context
+
+
+def test_skill_activation_redacts_secret_arguments(tmp_path: Path) -> None:
+    project_skill = tmp_path / "project" / ".sysdialogue" / "skills" / "deploy" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text("---\nname: deploy\ndescription: deploy\n---\nDeploy safely.\n", encoding="utf-8")
+    manager = SkillManager(project_root=tmp_path / "project", user_root=tmp_path / "user")
+
+    invocation = manager.activate("deploy", {"token": "sk-live-secret"}, source="user")
+
+    assert "sk-live-secret" not in invocation.context
+    assert "<redacted>" in invocation.context
 
 
 def test_slash_skill_activates_context_without_os_execution(tmp_path: Path) -> None:
@@ -398,6 +676,30 @@ def test_hook_manager_notify_and_inject_context(tmp_path: Path) -> None:
     assert controller.conversation_manager.context["hook:ctx"] == "ctx audit"
 
 
+def test_hook_template_redacts_secret_payload_values(tmp_path: Path) -> None:
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": [
+                    {"id": "ctx", "event": "task_started", "action": "inject_context", "context": "token {token}"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    controller = _controller(tmp_path)
+    manager = HookManager(project_root=tmp_path / "project", user_path=hooks_path)
+
+    manager.run(
+        HookEvent(event="task_started", session_id=controller.session_id, payload={"token": "sk-live-secret"}),
+        controller=controller,
+    )
+
+    assert "sk-live-secret" not in controller.conversation_manager.context["hook:ctx"]
+    assert "<redacted>" in controller.conversation_manager.context["hook:ctx"]
+
+
 def test_role_runner_handoff_is_structured_and_advisory() -> None:
     record = RoleRunner().handoff(
         role="verifier",
@@ -450,6 +752,71 @@ def test_target_profile_store_persists_facts(tmp_path: Path) -> None:
     assert target_id == "ssh-example.com-22"
     assert "service" in summary
     assert "nginx" in summary
+
+
+def test_env_profile_sanitizer_keeps_remote_target_identity_without_credentials() -> None:
+    sanitized = EnvProfileSanitizer.sanitize(
+        {
+            "remote_mode": True,
+            "host": "example.test token=secret-value",
+            "hostname": "prod-box",
+            "ssh_port": 2222,
+            "ssh_proxy_command_configured": True,
+            "service_manager": "service",
+            "os_release": "Ubuntu 24.04",
+            "distro_id": "ubuntu",
+            "kernel_version": "6.8.0",
+            "architecture": "x86_64",
+            "current_user": "deploy",
+        }
+    )
+
+    assert sanitized["host"] == "example.test <redacted>"
+    assert sanitized["hostname"] == "prod-box"
+    assert sanitized["ssh_port"] == 2222
+    assert sanitized["ssh_proxy_command_configured"] is True
+    assert sanitized["service_manager"] == "service"
+    assert "secret-value" not in str(sanitized)
+
+
+def test_system_prompt_uses_env_profile_for_remote_platform_limits() -> None:
+    prompt = build_system_prompt(
+        {
+            "remote_mode": True,
+            "host": "example.test",
+            "ssh_port": 2222,
+            "service_manager": "unknown",
+            "supports_journalctl": False,
+            "has_sudo": False,
+            "is_root": False,
+        },
+        _registry(),
+    )
+
+    assert "[Environment Operating Guidance]" in prompt
+    assert "Remote target is example.test:2222" in prompt
+    assert "directly reachable SSH host:port" in prompt
+    assert "do not assume systemd or journalctl" in prompt
+    assert "finish need_info" in prompt
+    assert "service_manager=systemd" in prompt
+    assert "supports_journalctl=false" in prompt
+    assert "[Built-in Production Workflows]" in prompt
+    assert "safe_config_patch" in prompt
+    assert "scheduled_health_check" in prompt
+
+
+def test_target_profile_store_redacts_secret_facts(tmp_path: Path) -> None:
+    store = TargetProfileStore(str(tmp_path / "targets"))
+    target_id = store.target_id_from_env({"hostname": "box"})
+
+    store.remember_fact(target_id, "api_key", "OPENAI_API_KEY=sk-live-secret")
+    raw = "\n".join(path.read_text(encoding="utf-8") for path in (tmp_path / "targets").glob("*.json"))
+    summary = store.render_prompt_summary(target_id)
+
+    assert "sk-live-secret" not in raw
+    assert "sk-live-secret" not in summary
+    assert "<redacted>" in raw
+    assert "<redacted>" in summary
 
 
 def test_memory_forget_removes_record(tmp_path: Path) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sysdialogue.agent.playbook_catalog import render_prompt_workflow_catalog
+
 if TYPE_CHECKING:
     from sysdialogue.tools.registry import ToolRegistry
 
@@ -56,9 +58,9 @@ The verification must happen after the last mutation and must refer to the objec
 
 
 _JAVA_MYSQL_DEPLOYMENT_GUIDANCE = """[Java + MySQL Deployment Guidance]
-For Java/Spring + MySQL deployments, use this order: inspect project tree and ports -> run Docker MySQL -> wait_exec TCP readiness -> initialize DB/user/table/seed -> verify with SELECT -> install Java/Maven if missing -> rerun java -version and mvn -version as separate execute_dynamic_tool calls -> run mvn test/package with execute_dynamic_tool cwd set to the project directory -> verify JAR with stat_path -> copy exactly one built JAR to a stable app path such as /opt/<app>/app.jar -> create app user/config/systemd -> daemon-reload/start/status -> verify journal plus /actuator/health and CRUD endpoints.
+For Java/Spring + MySQL deployments, use this order: inspect project tree and ports -> run Docker MySQL -> wait_exec TCP readiness -> initialize DB/user/table/seed -> verify with SELECT -> install Java/Maven if missing -> rerun java -version and mvn -version as separate execute_dynamic_tool calls -> run mvn test/package with execute_dynamic_tool cwd set to the project directory -> verify JAR with stat_path -> copy exactly one built JAR to a stable app path such as /opt/<app>/app.jar -> create an app user/config/service only through the service manager observed in EnvProfile. Use systemd only when service_manager=systemd; use sysvinit/service only when service_manager=service; if service_manager is unknown or the target is systemd-less, finish need_info or ask for an approved supervisor strategy before installing a service. Verify with service/process status, available logs, /actuator/health, and CRUD endpoints; do not require journalctl when supports_journalctl=false.
 For Maven/Gradle/npm project commands, set execute_dynamic_tool.cwd to the observed absolute project directory. Do not encode cd, &&, ;, or shell syntax inside cmd_template; split combined checks into separate tool calls.
-Use continue_on_failure=true only for read-only dependency prechecks that are expected to fail before an install/repair step. Completion requires JAR, systemd status, endpoint, and DB/CRUD evidence."""
+Use continue_on_failure=true only for read-only dependency prechecks that are expected to fail before an install/repair step. Completion requires JAR evidence plus the strongest service/process, endpoint, and DB/CRUD evidence available on the target."""
 
 
 _SAFETY_SUMMARY = """[Safety Summary]
@@ -97,8 +99,42 @@ def _render_env_profile(env_sanitized: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_environment_operating_guidance(env_sanitized: dict) -> str:
+    remote = _truthy(env_sanitized.get("remote_mode"))
+    service_manager = str(env_sanitized.get("service_manager") or env_sanitized.get("init_system") or "unknown")
+    has_sudo = _truthy(env_sanitized.get("has_sudo"))
+    is_root = _truthy(env_sanitized.get("is_root"))
+    supports_journalctl = _truthy(env_sanitized.get("supports_journalctl"))
+
+    lines: list[str] = []
+    if remote:
+        host = str(env_sanitized.get("host") or env_sanitized.get("hostname") or "remote")
+        port = str(env_sanitized.get("ssh_port") or "22")
+        lines.append(f"- Remote target is {host}:{port}; all OS-facing tools operate on that target, not the controller.")
+        lines.append(
+            "- For bastion or jump-host topologies, ask the user for a directly reachable SSH host:port "
+            "or a pre-created local tunnel before running tools."
+        )
+    if service_manager != "systemd":
+        lines.append(
+            f"- service_manager={service_manager}; do not assume systemd or journalctl. "
+            "Observe available init/log commands before service changes."
+        )
+    if not supports_journalctl:
+        lines.append("- supports_journalctl=false; verify with service status, process checks, files, or app endpoints.")
+    if not is_root and not has_sudo:
+        lines.append(
+            "- Current user is not root and sudo is unavailable; do not attempt privileged mutations. "
+            "Finish need_info with the required access or offer read-only diagnostics."
+        )
+    if not lines:
+        return ""
+    return "[Environment Operating Guidance]\n" + "\n".join(lines)
+
+
 def _render_tools(registry: "ToolRegistry") -> str:
-    lines = ["[Available Tools: 37 static + 6 meta]"]
+    static_count = len(registry.all_schemas()) if hasattr(registry, "all_schemas") else len(registry.describe())
+    lines = [f"[Available Tools: {static_count} static + 6 meta]"]
     for name, desc in registry.describe():
         head = desc.split("。")[0] if desc else ""
         lines.append(f"  - {name}: {head}")
@@ -109,6 +145,14 @@ def _render_tools(registry: "ToolRegistry") -> str:
     lines.append("  - handoff_to_role: ask a constrained built-in role for structured guidance")
     lines.append("  - finish_task: close every ReAct task")
     return "\n".join(lines)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def build_system_prompt(
@@ -134,6 +178,9 @@ def build_system_prompt(
         _render_safety_profile(safety_profile),
         _render_env_profile(env_sanitized),
     ]
+    env_guidance = _render_environment_operating_guidance(env_sanitized)
+    if env_guidance:
+        sections.append(env_guidance)
     if context_summary:
         sections.append("[Reusable Cross-Turn Context]\n" + context_summary)
     if memory_summary:
@@ -154,6 +201,7 @@ def build_system_prompt(
         [
             _REACT_PROTOCOL,
             _EXECUTION_MODE_RULES,
+            render_prompt_workflow_catalog(),
             _VERIFICATION_GUIDANCE,
             _JAVA_MYSQL_DEPLOYMENT_GUIDANCE,
             _SAFETY_SUMMARY,

@@ -29,6 +29,7 @@ class SSHConfig:
     known_hosts_file: str | None = None  # None = ~/.ssh/known_hosts
     auto_add_host_keys: bool = True
     sudo_password: str | None = None
+    proxy_command: str | None = None
 
 
 class RemoteExecutor(SafeExecutor):
@@ -43,6 +44,7 @@ class RemoteExecutor(SafeExecutor):
             raise RuntimeError("paramiko is required for remote mode. Install it with: pip install paramiko")
         self._config = config
         self._client: "paramiko.SSHClient | None" = None
+        self._proxy = None
 
     def connect(self) -> None:
         import paramiko
@@ -57,22 +59,43 @@ class RemoteExecutor(SafeExecutor):
             client.set_missing_host_key_policy(_AutoAddKnownHostPolicy(known_hosts_path))
         else:
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        client.connect(
-            hostname=self._config.host,
-            port=self._config.port,
-            username=self._config.username,
-            password=self._config.password,
-            key_filename=self._config.key_filename,
-            timeout=15,
-            allow_agent=True,
-            look_for_keys=True,
-        )
+        sock = None
+        if self._config.proxy_command:
+            rendered = _render_proxy_command(self._config.proxy_command, self._config)
+            sock = paramiko.ProxyCommand(rendered)
+            self._proxy = sock
+        try:
+            client.connect(
+                hostname=self._config.host,
+                port=self._config.port,
+                username=self._config.username,
+                password=self._config.password,
+                key_filename=self._config.key_filename,
+                timeout=15,
+                allow_agent=True,
+                look_for_keys=True,
+                sock=sock,
+            )
+        except Exception:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self._proxy = None
+            raise
         self._client = client
 
     def disconnect(self) -> None:
         if self._client:
             self._client.close()
             self._client = None
+        if self._proxy is not None:
+            try:
+                self._proxy.close()
+            except Exception:
+                pass
+            self._proxy = None
 
     def open_sftp(self):
         if self._client is None:
@@ -289,6 +312,21 @@ class _AutoAddKnownHostPolicy:
 
 def _quote_command(cmd: list[str]) -> str:
     return " ".join(shlex.quote(c) for c in cmd)
+
+
+def _render_proxy_command(template: str, config: SSHConfig) -> str:
+    host = shlex.quote(config.host)
+    port = str(config.port)
+    user = shlex.quote(config.username or "")
+    return (
+        str(template)
+        .replace("%h", host)
+        .replace("%p", port)
+        .replace("%r", user)
+        .replace("{host}", host)
+        .replace("{port}", port)
+        .replace("{user}", user)
+    )
 
 
 def _combine_result(result: RunResult) -> tuple[str, int]:

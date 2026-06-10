@@ -9,6 +9,14 @@ from typing import Any
 
 from sysdialogue.audit.serializers import export_audit_jsonl, export_replay_package
 from sysdialogue.audit.trace_store import AuditLog
+from sysdialogue.agent.acceptance_checklist import render_acceptance_checklist
+from sysdialogue.agent.acceptance_runner import render_guided_acceptance
+from sysdialogue.agent.evidence_matrix import render_evidence_matrix
+from sysdialogue.agent.playbook_catalog import render_playbook_command_output
+from sysdialogue.agent.remote_guidance import render_remote_examples
+from sysdialogue.agent.release_readiness import render_release_gate_report, render_release_readiness_report
+from sysdialogue.security.output_sanitizer import sanitize_text
+from sysdialogue.tools.meta_tools import META_TOOL_SCHEMAS
 
 
 @dataclass
@@ -27,8 +35,30 @@ class CommandRegistry:
             return CommandResult(_help_text())
         if command == "/status":
             return CommandResult(_status(controller))
+        if command == "/doctor":
+            return CommandResult(_doctor(controller))
+        if command == "/check-model":
+            return CommandResult(_check_model(controller))
+        if command == "/examples":
+            return CommandResult(_examples(controller))
+        if command in {"/playbooks", "/workflows"}:
+            return CommandResult(_playbooks(controller))
+        if command in {"/evidence", "/verification"}:
+            return CommandResult(render_evidence_matrix())
+        if command in {"/acceptance", "/release-checklist"}:
+            return CommandResult(render_acceptance_checklist(getattr(controller, "env_profile", {}) or {}))
+        if command in {"/acceptance-runner", "/acceptance-run"}:
+            return CommandResult(render_guided_acceptance(getattr(controller, "env_profile", {}) or {}))
+        if command in {"/release-readiness", "/readiness"}:
+            return CommandResult(render_release_readiness_report(arg.strip() or None))
+        if command in {"/release-gate", "/gate"}:
+            return CommandResult(render_release_gate_report(arg.strip() or None)[0])
+        if command == "/next":
+            return CommandResult(_next(controller))
         if command == "/resume":
             return _resume(controller)
+        if command in {"/abandon", "/abandon-task"}:
+            return CommandResult(_abandon(controller, arg))
         if command == "/locks":
             return CommandResult(_locks(controller))
         if command == "/plan":
@@ -76,8 +106,20 @@ def _help_text() -> str:
     return "\n".join(
         [
             "Available commands:",
+            "- /help: show this command reference",
             "- /status: show session and active task state",
+            "- /doctor: show agent readiness, stores, tools, and actionable notices",
+            "- /check-model: call the configured model once to verify tool-call support",
+            "- /examples: show copy-ready safe operational task examples",
+            "- /playbooks: show copy-ready production workflow playbooks",
+            "- /evidence: show product-bar and verification-gate evidence",
+            "- /acceptance: show release-ready operator acceptance checklist",
+            "- /acceptance-runner: run safe local preflight and produce a guided A01-A10 artifact",
+            "- /release-readiness [path]: summarize completed acceptance artifacts",
+            "- /release-gate [path]: show strict release gate status and blocking reasons",
+            "- /next: recommend the best continuation for an interrupted, blocked, or failed task",
             "- /resume: explicitly resume the interrupted active task",
+            "- /abandon [task_id]: abandon an interrupted/stale active task and release its locks",
             "- /locks: show current lock leases",
             "- /plan: show active durable plan/workflow steps",
             "- /audit: show recent audit records",
@@ -121,6 +163,183 @@ def _status(controller: Any) -> str:
     return "\n".join(lines)
 
 
+def _doctor(controller: Any) -> str:
+    issues: list[str] = []
+    record = controller.session_store.ensure(controller.session_id, surface=controller.surface)
+    task = controller.task_store.load(record.active_task_id) if record.active_task_id else None
+
+    lines = [
+        "SysDialogue doctor:",
+        f"- Session: {record.session_id} ({record.status}, surface={record.surface})",
+        f"- Safety profile: {getattr(controller, 'safety_profile', 'standard')}",
+    ]
+
+    if task is None:
+        lines.append("- Active task: none")
+    else:
+        lines.append(f"- Active task: {task.task_id} ({task.status}, phase={task.current_phase})")
+        if task.status == "interrupted":
+            issues.append("An interrupted task is available; use /resume to continue it.")
+
+    static_count = _count_static_tools(controller)
+    lines.append(f"- Tools: {static_count} static + {len(META_TOOL_SCHEMAS)} meta")
+
+    dynamic_registry = getattr(controller, "dynamic_registry", None)
+    if dynamic_registry is not None and hasattr(dynamic_registry, "list_tools"):
+        try:
+            lines.append(f"- DynTools: {len(dynamic_registry.list_tools())} reusable")
+        except Exception as exc:
+            lines.append(f"- DynTools: unavailable ({type(exc).__name__})")
+            issues.append("Dynamic tool registry could not be read.")
+    else:
+        lines.append("- DynTools: unavailable")
+
+    llm_client = getattr(controller, "llm_client", None)
+    model = str(getattr(llm_client, "model", "") or "")
+    base_url = str(getattr(llm_client, "base_url", "") or "")
+    llm_name = type(llm_client).__name__ if llm_client is not None else "none"
+    if model:
+        lines.append(f"- LLM: {llm_name} model={model} base_url={base_url or 'OpenAI SDK default'}")
+    else:
+        lines.append(f"- LLM: {llm_name} (model not configured on this client)")
+        if llm_name == "NullLLMClient":
+            issues.append("This entrypoint cannot call the model; start TUI/simple with API config for live tasks.")
+
+    lines.append(f"- Memory: {_count_records(getattr(controller, 'memory_manager', None), 'list_records')}")
+    lines.append(f"- Skills: {_count_records(getattr(controller, 'skill_manager', None), 'list_skills')}")
+    lines.append(f"- Hooks: {_count_records(getattr(controller, 'hook_manager', None), 'list_rules')}")
+
+    target_store = getattr(controller, "target_profile_store", None)
+    if target_store is not None:
+        try:
+            target_id = target_store.target_id_from_env(getattr(controller, "env_profile", {}) or {})
+            lines.append(f"- Target profile: {target_id}")
+        except Exception as exc:
+            lines.append(f"- Target profile: unavailable ({type(exc).__name__})")
+            issues.append("Target profile store could not resolve the current target.")
+
+    env = getattr(controller, "env_profile", {}) or {}
+    if env.get("remote_mode"):
+        lines.append(f"- Remote access: {_remote_access_summary(env)}")
+
+    if issues:
+        lines.append("")
+        lines.append("Actionable notices:")
+        lines.extend(f"- {sanitize_text(issue, limit=300)}" for issue in issues)
+    else:
+        lines.append("")
+        lines.append("Actionable notices: none")
+    return "\n".join(lines)
+
+
+def _check_model(controller: Any) -> str:
+    from sysdialogue.agent.model_diagnostics import diagnose_tool_call_support
+
+    return diagnose_tool_call_support(getattr(controller, "llm_client", None)).to_text()
+
+
+def _examples(controller: Any) -> str:
+    env = getattr(controller, "env_profile", {}) or {}
+    remote = bool(env.get("remote_mode"))
+    container_backend = str(env.get("container_backend") or "none")
+    service = _context_value(controller, "service_name") or _context_value(controller, "target:service") or "nginx"
+    container = _context_value(controller, "container_name") or "my-container"
+
+    examples = [
+        "检查系统版本、CPU/内存负载、磁盘使用率和当前监听端口。",
+        f"检查 {service} 服务状态，读取最近日志并判断是否健康。",
+        f"为 {service} 的配置文件做只读检查，并说明需要哪些变更才能安全修改。",
+        "执行一次安全审计工作流，重点检查用户、端口、服务和关键配置。",
+        "查看当前审计记录并导出可复盘包。",
+    ]
+    if remote:
+        examples.insert(1, "检查远程目标的 SSH 连通性风险，确认不会把当前会话锁在门外。")
+    if container_backend in {"docker", "podman"}:
+        examples.insert(2, f"检查容器 {container} 的状态、最近日志和健康探针。")
+    else:
+        examples.append("检查当前环境是否具备 Docker/Podman 能力，并给出缺失原因。")
+
+    lines = [
+        "Example tasks:",
+        "Copy one line into the input box, then adjust names/paths as needed.",
+    ]
+    lines.extend(f"- {example}" for example in examples)
+    if remote:
+        lines.append("")
+        lines.extend(render_remote_examples(env))
+    lines.append("")
+    lines.append("For recurring production workflows, run `/playbooks`.")
+    return "\n".join(lines)
+
+
+def _playbooks(controller: Any) -> str:
+    return render_playbook_command_output(getattr(controller, "env_profile", {}) or {})
+
+
+def _next(controller: Any) -> str:
+    record = controller.session_store.ensure(controller.session_id, surface=controller.surface)
+    task = _task_for_next(controller, record)
+    if task is None:
+        return (
+            "No interrupted, blocked, failed, or need-info task needs continuation.\n"
+            "Try /examples for safe starting points, or describe the next operational goal directly."
+        )
+
+    lines = [
+        f"Next recommendation for task {task.task_id} ({task.status}):",
+        f"- Goal: {sanitize_text(task.goal, limit=500)}",
+        f"- Phase: {task.current_phase or 'unknown'}",
+    ]
+
+    if task.status == "interrupted":
+        lines.append("- Recommended action: run `/resume` to continue the interrupted task.")
+        lines.append("- Alternative: run `/abandon` if this task is stale or no longer needed.")
+    elif task.status == "blocked":
+        lines.append("- Recommended action: start a new turn with the missing information or corrected parameters below.")
+    elif task.status == "failed":
+        lines.append("- Recommended action: review the failure, then retry with a narrower goal or safer parameters.")
+    elif task.status == "cancelled":
+        lines.append("- Recommended action: rerun the original goal when you are ready.")
+    else:
+        lines.append("- Recommended action: inspect `/status` and `/plan`, then continue with the next explicit instruction.")
+
+    advice = _latest_task_advice(task)
+    if advice:
+        lines.append("")
+        lines.append("Task advice:")
+        lines.extend(f"- {item}" for item in advice)
+
+    pending = [step for step in getattr(task, "steps", []) if step.status in {"pending", "running"}]
+    failed = [step for step in getattr(task, "steps", []) if step.status in {"failed", "blocked"}]
+    if pending:
+        step = pending[0]
+        lines.append("")
+        lines.append(
+            "Next pending step: "
+            f"`{step.step_id}` {step.tool or step.workflow_step_type or step.kind} - {sanitize_text(step.purpose, limit=300)}"
+        )
+        if step.last_rejected_args:
+            lines.append(f"Last rejected args: {sanitize_text(json.dumps(step.last_rejected_args, ensure_ascii=False), limit=500)}")
+    if failed:
+        step = failed[-1]
+        lines.append("")
+        lines.append(
+            "Last failed step: "
+            f"`{step.step_id}` {step.tool or step.workflow_step_type or step.kind} - {sanitize_text(step.error or step.result_summary, limit=500)}"
+        )
+
+    if task.changed_state and not task.verified:
+        lines.append("- Safety note: this task changed state but lacks final verification; verify before claiming completion.")
+    if task.failed_mutations:
+        lines.append("- Safety note: failed mutation attempts exist; inspect audit/replay before retrying.")
+    if task.technical_details:
+        lines.append(f"- Technical detail: {sanitize_text(task.technical_details, limit=500)}")
+
+    lines.append("")
+    lines.append("Useful commands: /status, /plan, /audit, /why <tool>, /export-replay")
+    return "\n".join(lines)
+
+
 def _resume(controller: Any) -> CommandResult:
     record = controller.session_store.ensure(controller.session_id, surface=controller.surface)
     if not record.active_task_id:
@@ -133,6 +352,44 @@ def _resume(controller: Any) -> CommandResult:
         resume_task_id=task.task_id,
         resume_goal=task.goal,
     )
+
+
+def _abandon(controller: Any, arg: str) -> str:
+    record = controller.session_store.ensure(controller.session_id, surface=controller.surface)
+    task_id = (arg or "").strip() or record.active_task_id
+    if not task_id:
+        return "No active task to abandon. Use `/next` to inspect recent blocked or failed tasks."
+
+    task = controller.task_store.load(task_id)
+    if task is None:
+        controller.session_store.set_status(
+            controller.session_id,
+            "ready",
+            surface=controller.surface,
+            active_task_id="",
+            technical_details=f"Cleared missing active task reference: {task_id}",
+        )
+        return f"Cleared missing active task reference: {task_id}."
+
+    if task.is_final() and record.active_task_id != task_id:
+        return f"Task {task_id} is already final ({task.status}); nothing to abandon."
+
+    controller.task_store.update(
+        task_id,
+        status="cancelled",
+        current_phase="abandoned",
+        technical_details="Abandoned by user command.",
+    )
+    released = _release_locks_for_task(controller, task_id)
+    controller.session_store.set_status(
+        controller.session_id,
+        "ready",
+        surface=controller.surface,
+        active_task_id="",
+        technical_details=f"Abandoned task {task_id}.",
+    )
+    suffix = f" Released {released} lock(s)." if released else ""
+    return f"Abandoned {task_id}.{suffix}"
 
 
 def _locks(controller: Any) -> str:
@@ -198,7 +455,15 @@ def _memory(controller: Any, arg: str) -> str:
     if arg.strip():
         record = manager.remember(scope="global", key=f"note:{controller.session_id}", value=arg.strip(), source="command")
         return f"Remembered {record.memory_id}."
-    return manager.render_prompt_summary()
+    records = manager.list_records(limit=50)
+    if not records:
+        return "Memory records: none"
+    lines = ["Memory records:"]
+    for record in records:
+        target = f", target={record.target_id}" if record.target_id else ""
+        value = sanitize_text(record.value, limit=500)
+        lines.append(f"- {record.memory_id} [{record.scope}{target}] {record.key}: {value}")
+    return "\n".join(lines)
 
 
 def _tools(controller: Any) -> str:
@@ -390,3 +655,102 @@ def _split_name_and_tail(text: str) -> tuple[str, str]:
     name = parts[0].strip("\"'")
     tail = stripped[len(parts[0]):].strip()
     return name, tail
+
+
+def _count_static_tools(controller: Any) -> int:
+    registry = getattr(controller, "registry", None)
+    if registry is None:
+        return 0
+    if hasattr(registry, "all_schemas"):
+        try:
+            return len(registry.all_schemas())
+        except Exception:
+            return 0
+    if hasattr(registry, "names"):
+        try:
+            return len(registry.names())
+        except Exception:
+            return 0
+    return 0
+
+
+def _count_records(owner: Any, method_name: str) -> str:
+    if owner is None:
+        return "unavailable"
+    method = getattr(owner, method_name, None)
+    if method is None:
+        return "unavailable"
+    try:
+        return str(len(method()))
+    except Exception as exc:
+        return f"unavailable ({type(exc).__name__})"
+
+
+def _task_for_next(controller: Any, record: Any) -> Any | None:
+    task_store = getattr(controller, "task_store", None)
+    if task_store is None:
+        return None
+    if getattr(record, "active_task_id", ""):
+        task = task_store.load(record.active_task_id)
+        if task is not None:
+            return task
+    try:
+        candidates = task_store.list_records(session_id=controller.session_id, limit=20)
+    except Exception:
+        return None
+    interesting = {"interrupted", "blocked", "failed", "need_info", "cancelled"}
+    return next((task for task in candidates if task.status in interesting), None)
+
+
+def _latest_task_advice(task: Any) -> list[str]:
+    advice: list[str] = []
+    for event in reversed(list(getattr(task, "events", []) or [])):
+        data = getattr(event, "data", {}) or {}
+        if not isinstance(data, dict):
+            continue
+        for item in data.get("next_steps") or []:
+            if isinstance(item, str) and item.strip() and item.strip() not in advice:
+                advice.append(sanitize_text(item.strip(), limit=500))
+        if data.get("no_action_reason"):
+            advice.append("No action reason: " + sanitize_text(data["no_action_reason"], limit=500))
+        if data.get("error_summary"):
+            advice.append("Last error: " + sanitize_text(data["error_summary"], limit=500))
+        if data.get("error_detail") and not advice:
+            advice.append("Error detail: " + sanitize_text(data["error_detail"], limit=500))
+        if len(advice) >= 5:
+            break
+    return advice[:5]
+
+
+def _release_locks_for_task(controller: Any, task_id: str) -> int:
+    lock_store = getattr(controller, "lock_store", None)
+    if lock_store is None or not hasattr(lock_store, "list_leases"):
+        return 0
+    released = 0
+    try:
+        leases = lock_store.list_leases()
+    except Exception:
+        return 0
+    for lease in leases:
+        if getattr(lease, "task_id", "") != task_id:
+            continue
+        try:
+            lock_store.release(lease.scope, task_id=task_id)
+            released += 1
+        except Exception:
+            continue
+    return released
+
+
+def _context_value(controller: Any, key: str) -> str:
+    manager = getattr(controller, "conversation_manager", None)
+    context = getattr(manager, "context", {}) or {}
+    value = context.get(key)
+    return sanitize_text(value, limit=120).strip() if value not in (None, "") else ""
+
+
+def _remote_access_summary(env: dict[str, Any]) -> str:
+    host = sanitize_text(env.get("host") or env.get("hostname") or "remote", limit=120).strip() or "remote"
+    port = str(env.get("ssh_port") or "22").strip() or "22"
+    mode = "ProxyCommand" if env.get("ssh_proxy_command_configured") else "direct SSH"
+    return f"ssh://{host}:{port} via {mode}"
