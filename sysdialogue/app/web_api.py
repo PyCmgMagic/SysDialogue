@@ -735,6 +735,9 @@ def acceptance_mutation_drill(request: AcceptanceMutationDrillRequest) -> dict[s
 
 
 def create_app() -> FastAPI:
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+
     app = FastAPI(title="SysDialogue Web API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -748,6 +751,25 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def root_health() -> dict[str, str]:
         return {"status": "ok", "service": "sysdialogue-web"}
+
+    # 挂载 Web 前端静态文件（如果 SYSDIALOGUE_WEB_DIST 环境变量指向了 dist 目录）
+    web_dist = os.environ.get("SYSDIALOGUE_WEB_DIST", "")
+    if web_dist and Path(web_dist).is_dir():
+        dist_path = Path(web_dist)
+        app.mount("/assets", StaticFiles(directory=str(dist_path / "assets")), name="static-assets")
+
+        @app.get("/")
+        async def serve_index():
+            return FileResponse(str(dist_path / "index.html"))
+
+        # SPA fallback: 所有非 /api/ 和 /health 路由都返回 index.html
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # 尝试提供 dist 目录中存在的静态文件
+            file_path = dist_path / full_path
+            if file_path.is_file() and not full_path.startswith("api/"):
+                return FileResponse(str(file_path))
+            return FileResponse(str(dist_path / "index.html"))
 
     return app
 

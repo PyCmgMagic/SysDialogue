@@ -1,0 +1,47 @@
+{
+  "name": "sysdialogue",
+  "version": "1.0.0",
+  "description": "SysDialogue — Linux 服务器运维智能代理",
+  "license": "MIT",
+  "keywords": [
+    "linux",
+    "server",
+    "ops",
+    "agent",
+    "ai",
+    "ssh"
+  ],
+  "bin": {
+    "sysdialogue": "./bin/sysdialogue.js",
+    "sysdialogue-web": "./bin/sysdialogue-web.js"
+  },
+  "scripts": {
+    "prepare": "node scripts/build-web.js",
+    "postinstall": "node scripts/postinstall.js",
+    "preuninstall": "node scripts/preuninstall.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "sysdialogue/**/*.py",
+    "sysdialogue/workflows/*.yaml",
+    "!sysdialogue/**/__pycache__/**",
+    "web/dist/",
+    "web/dist/**",
+    "pyproject.toml",
+    "requirements.txt",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "win32",
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

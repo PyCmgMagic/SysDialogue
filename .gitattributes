@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# bin scripts must be LF (shebang requirement)
+bin/*.js text eol=lf
+scripts/*.js text eol=lf

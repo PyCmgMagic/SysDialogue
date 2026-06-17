@@ -33,18 +33,31 @@ def load_config(
     ssh: dict | None = None,
     safety_profile: str | None = None,
 ) -> AppConfig:
-    """从环境变量 + 可选 .env 文件加载配置。"""
-    # 优先加载 .env
+    """从全局配置 + 环境变量 + 可选 .env 文件加载配置。
+
+    优先级（从低到高）：
+      1. ~/.sysdialogue/config  全局配置
+      2. .env 文件
+      3. 环境变量
+      4. 命令行参数
+    """
+    # 1. 加载全局配置
+    from sysdialogue.app.setup import load_global_config
+
+    for key, value in load_global_config().items():
+        os.environ.setdefault(key, value)
+
+    # 2. 加载 .env 文件（覆盖全局配置）
     if env_file and Path(env_file).exists():
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_file)
+            load_dotenv(env_file, override=True)
         except ImportError:
             pass
     elif Path(".env").exists():
         try:
             from dotenv import load_dotenv
-            load_dotenv(".env")
+            load_dotenv(".env", override=True)
         except ImportError:
             pass
 

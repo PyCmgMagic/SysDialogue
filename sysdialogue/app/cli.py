@@ -89,6 +89,9 @@ from sysdialogue.audit.trace_store import AuditLog
 @click.option("--simple", is_flag=True, help="启动 stdin/stdout 轻量 CLI")
 @click.option("--break-glass", "break_glass", is_flag=True,
               help="Enable the explicit break_glass safety profile for DynTool shell execution.")
+@click.option("--setup", is_flag=True, help="交互式配置向导（设置 API Key、模型等）")
+@click.option("--config", "show_config", is_flag=True, help="查看当前配置")
+@click.option("--reset", is_flag=True, help="重新配置（配合 --setup 使用）")
 def main(evidence: bool, acceptance: bool, acceptance_runner: bool, acceptance_runner_mode: str, acceptance_drill_plan: str | None, acceptance_replay_session: str | None, acceptance_suite_path: str | None, acceptance_bundle_path: str | None, release_readiness_path: str | None, release_gate_path: str | None,
          verify: bool, doctor: bool, check_model: bool, demo: bool, remote: str | None,
          ssh_key_file: str | None, ssh_password: str | None, ssh_proxy_command: str | None,
@@ -97,8 +100,21 @@ def main(evidence: bool, acceptance: bool, acceptance_runner: bool, acceptance_r
          export_audit_session: str | None, export_replay_session: str | None,
          export_dir: str | None,
          simple: bool,
-         break_glass: bool) -> None:
+         break_glass: bool,
+         setup: bool,
+         show_config: bool,
+         reset: bool) -> None:
     """SysDialogue v9 — Linux 服务器运维智能代理。"""
+
+    # 查看当前配置
+    if show_config:
+        from sysdialogue.app.setup import show_config
+        sys.exit(show_config())
+
+    # 交互式配置向导
+    if setup:
+        from sysdialogue.app.setup import run_setup
+        sys.exit(run_setup(reset=reset))
 
     remote_mode, ssh_conf = _parse_remote_option(remote, ssh_key_file, ssh_password, ssh_proxy_command)
 
@@ -181,14 +197,34 @@ def _require_api_config(config, entrypoint: str) -> None:
         missing.append("OPENAI_MODEL 或 --model")
     if not missing:
         return
+
+    from sysdialogue.app.setup import has_global_config, run_setup
+
+    if not has_global_config():
+        # 首次运行，自动引导配置
+        click.echo()
+        click.secho("欢迎使用 SysDialogue！", fg="cyan", bold=True)
+        click.secho("检测到尚未配置 API 连接信息，正在启动配置向导...\n", fg="yellow")
+        rc = run_setup()
+        if rc != 0:
+            sys.exit(2)
+        # 重新加载配置
+        from sysdialogue.app.setup import load_global_config
+        for key, value in load_global_config().items():
+            os.environ.setdefault(key, value)
+        config.api_key = config.api_key or os.environ.get("OPENAI_API_KEY", "")
+        config.base_url = config.base_url or os.environ.get("OPENAI_BASE_URL", "")
+        config.model = config.model or os.environ.get("OPENAI_MODEL", "")
+        # 再次检查
+        if config.api_key and config.model:
+            return
     click.secho(
         f"错误：缺少 OpenAI-compatible API 配置，无法启动 {entrypoint}。\n"
         f"  - 缺少：{', '.join(missing)}\n"
-        "  - 设置环境变量：export OPENAI_API_KEY=...\n"
-        "  - 设置模型：export OPENAI_MODEL=... 或使用 --model\n"
-        "  - 可选 base_url：export OPENAI_BASE_URL=https://...\n"
+        "  - 运行 sysdialogue --setup 交互式配置\n"
+        "  - 或设置环境变量：export OPENAI_API_KEY=...\n"
         "  - 或创建 .env 文件并用 --env-file 指定\n"
-        "  - 不调 API 可用 --verify、--evidence、--acceptance、--acceptance-runner、--acceptance-bundle、--release-readiness、--release-gate、--doctor、--demo 或 --run-scheduled-job 模式",
+        "  - 不调 API 可用 --verify、--evidence、--acceptance、--doctor、--demo 模式",
         fg="red",
         err=True,
     )
