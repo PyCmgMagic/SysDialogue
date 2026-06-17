@@ -197,6 +197,7 @@ class WebSession:
     server_payload: dict[str, Any]
     lock: RLock = field(default_factory=RLock)
     pending_approval_id: str = ""
+    terminal_cwd: str = ""
 
     def close(self) -> None:
         self.bundle.close()
@@ -326,7 +327,11 @@ class WebSessionManager:
         if not command:
             raise HTTPException(status_code=400, detail="command is required")
         with session.lock:
-            output, exit_code = session.bundle.executor.run_shell(command, timeout=60)
+            wrapped_command = _terminal_command(command, session.connection.mode)
+            output, exit_code = session.bundle.executor.run_shell(wrapped_command, timeout=60, cwd=session.terminal_cwd or None)
+            output, cwd = _extract_terminal_cwd(output)
+            if cwd:
+                session.terminal_cwd = cwd
             session.bundle.audit_log.log_command(
                 tool="terminal",
                 cmd=["shell", command],
@@ -334,8 +339,9 @@ class WebSessionManager:
                 output_preview=output,
             )
         lines = output.splitlines() if output else []
-        lines.append(f"[exit {exit_code}]")
-        return {"lines": lines, "audit": _audit_records(session)}
+        if exit_code != 0:
+            lines.append(f"[exit {exit_code}]")
+        return {"lines": lines, "cwd": session.terminal_cwd, "audit": _audit_records(session)}
 
     def run_tool(self, request: NamedRunRequest) -> dict[str, Any]:
         session = self.get(request.serverId)
@@ -957,6 +963,30 @@ def _metrics_from_session(session: WebSession | None) -> list[dict[str, Any]]:
 
 def _metric(label: str, ok: bool, detail: str) -> dict[str, Any]:
     return {"label": label, "value": 100 if ok else 32, "detail": detail, "tone": "success" if ok else "warning"}
+
+
+def _terminal_command(command: str, mode: ConnectionMode) -> str:
+    marker = "__SYSDIALOGUE_CWD__"
+    if mode == "local" and os.name == "nt":
+        return (
+            f"{command}\n"
+            "$__sysdialogue_code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }\n"
+            f"Write-Output \"{marker}$((Get-Location).Path)\"\n"
+            "exit $__sysdialogue_code"
+        )
+    return f"{command}\n_code=$?\nprintf '\\n{marker}%s\\n' \"$PWD\"\nexit $_code"
+
+
+def _extract_terminal_cwd(output: str) -> tuple[str, str]:
+    marker = "__SYSDIALOGUE_CWD__"
+    if not output:
+        return "", ""
+    lines = output.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith(marker):
+            cwd = lines[index][len(marker):].strip()
+            return "\n".join(lines[:index]).strip(), cwd
+    return output, ""
 
 
 def _audit_records(session: WebSession | None) -> list[dict[str, Any]]:

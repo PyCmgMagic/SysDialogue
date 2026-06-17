@@ -138,6 +138,7 @@ export interface TerminalLine {
   id: string;
   kind: "input" | "output" | "error" | "system";
   text: string;
+  prompt?: string;
   at: Date;
 }
 
@@ -159,6 +160,7 @@ export interface TaskExecutionResponse {
 
 export interface TerminalExecutionResponse {
   lines: string[];
+  cwd?: string;
   audit?: AuditRecord[];
 }
 

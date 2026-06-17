@@ -45,6 +45,10 @@ select {
   min-height: calc(100vh - 54px);
 }
 
+.app-grid-dock-collapsed {
+  grid-template-columns: 80px minmax(0, 1fr) 48px;
+}
+
 .main-scroll {
   height: calc(100vh - 54px);
   overflow: hidden;

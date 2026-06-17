@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from sysdialogue.app import web_api
+from tests.helpers import RecordingExecutor
 
 
 def _client(monkeypatch) -> TestClient:
@@ -419,3 +420,35 @@ def test_web_acceptance_manager_uses_connected_session_target() -> None:
     assert payload["connected"] is True
     assert payload["target"] == "ssh://prod.example.test:2200 via ProxyCommand"
     assert "sysdialogue --doctor --remote deploy@prod.example.test:2200" in payload["text"]
+
+
+def test_web_terminal_keeps_cwd_and_hides_success_exit_code() -> None:
+    manager = web_api.WebSessionManager()
+    executor = RecordingExecutor()
+    executor_outputs = iter([
+        ("__SYSDIALOGUE_CWD__/\n", 0),
+        ("bin\netc\n__SYSDIALOGUE_CWD__/\n", 0),
+        ("boom\n__SYSDIALOGUE_CWD__/\n", 2),
+    ])
+
+    executor.handler = lambda _cmd, _timeout: next(executor_outputs)
+    manager._sessions["srv_1"] = SimpleNamespace(
+        bundle=SimpleNamespace(
+            executor=executor,
+            audit_log=SimpleNamespace(log_command=lambda **_kwargs: None, read_all=lambda: []),
+        ),
+        lock=web_api.RLock(),
+        connection=web_api.ServerConnectionIn(id="srv_1", mode="ssh", host="example.test", user="root"),
+        terminal_cwd="",
+    )
+
+    cd_payload = manager.run_command(web_api.CommandRequest(serverId="srv_1", command="cd /"))
+    ls_payload = manager.run_command(web_api.CommandRequest(serverId="srv_1", command="ls"))
+    fail_payload = manager.run_command(web_api.CommandRequest(serverId="srv_1", command="false"))
+
+    assert cd_payload["lines"] == []
+    assert cd_payload["cwd"] == "/"
+    assert ls_payload["lines"] == ["bin", "etc"]
+    assert ls_payload["cwd"] == "/"
+    assert fail_payload["lines"] == ["boom", "[exit 2]"]
+    assert executor.shell_cwd_calls == [None, "/", "/"]

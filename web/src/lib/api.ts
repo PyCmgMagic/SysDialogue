@@ -83,6 +83,7 @@ class HttpSysDialogueApi implements SysDialogueApi {
     if (Array.isArray(payload)) return { lines: payload };
     return {
       lines: Array.isArray(payload.lines) ? payload.lines.map(String) : [],
+      cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
       audit: normalizeAuditList(payload.audit),
     };
   }
@@ -243,6 +244,7 @@ type WireTaskExecutionResponse = Omit<TaskExecutionResponse, "task" | "messages"
 };
 type WireTerminalExecutionResponse = {
   lines?: unknown[];
+  cwd?: unknown;
   audit?: WireAuditRecord[];
 };
 

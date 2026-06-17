@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import {
@@ -26,6 +26,8 @@ import {
   Loader2,
   LockKeyhole,
   Network,
+  PanelRightClose,
+  PanelRightOpen,
   PlugZap,
   Plus,
   RefreshCcw,
@@ -174,6 +176,7 @@ const auditRiskOptions: Array<{ label: string; value: AuditRiskFilter }> = [
 const RUNTIME_CONFIG_STORAGE_KEY = "sysdialogue.web.runtimeConfig.v1";
 const SERVER_DRAFT_STORAGE_KEY = "sysdialogue.web.serverDraft.v1";
 const RECENT_CONNECTIONS_STORAGE_KEY = "sysdialogue.web.recentConnections.v1";
+const RIGHT_DOCK_COLLAPSED_STORAGE_KEY = "sysdialogue.web.rightDockCollapsed.v1";
 const WORKSPACE_PATH = "D:/项目/Nexus";
 const SURFACE_HISTORY_LIMIT = 16;
 
@@ -236,7 +239,8 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<TaskRun[]>([]);
   const [terminal, setTerminal] = useState<TerminalLine[]>([]);
-  const [terminalNotice, setTerminalNotice] = useState("");
+  const [terminalCwd, setTerminalCwd] = useState("~");
+  const [rightDockCollapsed, setRightDockCollapsed] = useState(() => loadRightDockCollapsed());
   const [topbarNotice, setTopbarNotice] = useState("");
   const [prompt, setPrompt] = useState("");
   const [commandText, setCommandText] = useState("");
@@ -364,9 +368,6 @@ export default function App() {
     () => buildPaletteItems(paletteQuery, tools, workflowList),
     [paletteQuery, tools, workflowList],
   );
-  const terminalCommands = useMemo(() => recentTerminalCommands(terminal), [terminal]);
-  const terminalTranscript = useMemo(() => formatTerminalTranscript(terminal), [terminal]);
-  const terminalOutput = useMemo(() => latestTerminalOutput(terminal), [terminal]);
   const canGoBack = surfaceBackStack.length > 0;
   const canGoForward = surfaceForwardStack.length > 0;
 
@@ -436,6 +437,7 @@ export default function App() {
       setMessages([]);
       setTasks([]);
       setTerminal([]);
+      setTerminalCwd("~");
       setPendingApproval(null);
       setAcceptanceChecklist(null);
       setReleaseInput("");
@@ -589,10 +591,10 @@ export default function App() {
     return true;
   }
 
-  function handlePromptSubmit(event: FormEvent) {
-    event.preventDefault();
+  function submitPrompt() {
     const text = prompt.trim();
     if (!text) return;
+    if (pendingApproval) return;
     if (!requireApiAndTarget()) return;
     setPrompt("");
     setMessages((current) => [
@@ -620,6 +622,11 @@ export default function App() {
       .finally(() => setRunning(false));
   }
 
+  function handlePromptSubmit(event: FormEvent) {
+    event.preventDefault();
+    submitPrompt();
+  }
+
   async function resolveApproval(approved: boolean) {
     if (!pendingApproval) return;
     const { id, taskId } = pendingApproval;
@@ -641,12 +648,18 @@ export default function App() {
 
   async function connectServer(event: FormEvent) {
     event.preventDefault();
+    await connectDraftServer(draftServer);
+  }
+
+  async function connectDraftServer(source: ServerConnection) {
     setConnectionError("");
+    const connection = connectionRequestFromDraft(source, runtimeConfig.safetyProfile);
+    setDraftServer(connection);
+    setRecentConnections((current) => rememberRecentConnection(current, connection));
     if (!apiReady) {
       setConnectionError("请先配置并启动真实 SysDialogue Web API。");
       return;
     }
-    const connection = connectionRequestFromDraft(draftServer, runtimeConfig.safetyProfile);
     setServer((current) => ({ ...current, ...connection, status: "connecting" }));
     try {
       const connected = await api.connectServer(connection);
@@ -654,6 +667,7 @@ export default function App() {
       setDraftServer(connected);
       setRecentConnections((current) => rememberRecentConnection(current, connected));
       setTerminal([]);
+      setTerminalCwd("~");
       const overview = await api.getOverview();
       setTools(overview.tools);
       setWorkflowList(overview.workflows);
@@ -669,12 +683,19 @@ export default function App() {
     event.preventDefault();
     const text = commandText.trim();
     if (!text) return;
-    if (!requireApiAndTarget()) return;
     setCommandText("");
-    const inputLine: TerminalLine = { id: uid("term"), kind: "input", text, at: new Date() };
+    if (text === "clear" || text === "cls") {
+      setTerminal([]);
+      return;
+    }
+    if (!requireApiAndTarget()) return;
+    const inputLine: TerminalLine = { id: uid("term"), kind: "input", text, prompt: terminalPrompt(server, terminalCwd), at: new Date() };
     setTerminal((current) => [...current, inputLine]);
     try {
       const result = await api.runCommand(server.id, text);
+      if (result.cwd) {
+        setTerminalCwd(result.cwd);
+      }
       setTerminal((current) => [
         ...current,
         ...result.lines.map<TerminalLine>((line) => ({
@@ -973,11 +994,6 @@ export default function App() {
     if (workflow) openWorkflowRunner(workflow);
   }
 
-  function clearTerminal() {
-    setTerminal([]);
-    setTerminalNotice("");
-  }
-
   function startNewTask() {
     setMessages([]);
     setTasks([]);
@@ -987,51 +1003,12 @@ export default function App() {
     setSurface("workbench");
   }
 
-  function flashTerminalNotice(text: string) {
-    setTerminalNotice(text);
-    window.setTimeout(() => {
-      setTerminalNotice((current) => (current === text ? "" : current));
-    }, 1800);
-  }
-
-  async function copyTerminalTranscript() {
-    if (!terminalTranscript) return;
-    try {
-      await copyText(terminalTranscript);
-      flashTerminalNotice("已复制终端记录");
-    } catch (error) {
-      setOperationError(errorMessage(error));
-    }
-  }
-
-  async function copyLatestTerminalOutput() {
-    if (!terminalOutput) return;
-    try {
-      await copyText(terminalOutput);
-      flashTerminalNotice("已复制最近输出");
-    } catch (error) {
-      setOperationError(errorMessage(error));
-    }
-  }
-
-  function reuseTerminalCommand(command: string) {
-    setCommandText(command);
-    flashTerminalNotice("已填入命令");
-  }
-
   function applyRecentConnection(connection: RecentConnection) {
-    setDraftServer({
-      ...disconnectedServer,
-      ...connection,
-      password: "",
-      sudoPassword: "",
-      fingerprint: "",
-      latencyMs: 0,
-      distro: "",
-      kernel: "",
-      status: "offline",
-      lastSeen: new Date(0),
-    });
+    setDraftServer(draftFromRecentConnection(connection));
+  }
+
+  function connectRecentConnection(connection: RecentConnection) {
+    void connectDraftServer(draftFromRecentConnection(connection));
   }
 
   function removeRecentConnection(id: string) {
@@ -1104,7 +1081,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="app-grid">
+        <div className={cn("app-grid", rightDockCollapsed && "app-grid-dock-collapsed")}>
           <aside className="side-rail flex flex-col items-center border-r border-neutral-200/80 bg-white/72 py-4">
             <button
               className="mb-7 flex size-12 items-center justify-center rounded-lg border-2 border-neutral-950 bg-white text-lg font-semibold text-cyan-700 shadow-sm"
@@ -1163,19 +1140,15 @@ export default function App() {
                   <WorkbenchView
                     apiReady={apiReady}
                     activeTask={activeTask}
-                    canCopyTerminalOutput={Boolean(terminalOutput)}
-                    clearTerminal={clearTerminal}
                     commandText={commandText}
-                    copyLatestTerminalOutput={copyLatestTerminalOutput}
-                    copyTerminalTranscript={copyTerminalTranscript}
                     handlePromptSubmit={handlePromptSubmit}
+                    submitPrompt={submitPrompt}
                     handleTerminalSubmit={handleTerminalSubmit}
                     hasOpenTask={hasOpenTask}
                     messages={messages}
                     operationError={operationError}
                     pendingApproval={pendingApproval}
                     prompt={prompt}
-                    reuseTerminalCommand={reuseTerminalCommand}
                     running={running}
                     server={server}
                     setCommandText={setCommandText}
@@ -1183,8 +1156,7 @@ export default function App() {
                     setSurface={setSurface}
                     tasks={tasks}
                     terminal={terminal}
-                    terminalCommands={terminalCommands}
-                    terminalNotice={terminalNotice}
+                    terminalCwd={terminalCwd}
                   />
                 )}
                 {surface === "servers" && (
@@ -1201,6 +1173,7 @@ export default function App() {
                     runtimeConfig={runtimeConfig}
                     server={server}
                     applyRecentConnection={applyRecentConnection}
+                    connectRecentConnection={connectRecentConnection}
                     setDraftConfig={setDraftConfig}
                     setDraftServer={setDraftServer}
                   />
@@ -1266,7 +1239,12 @@ export default function App() {
               activeTask={activeTask}
               audit={audit}
               clock={clock}
+              collapsed={rightDockCollapsed}
               metrics={metrics}
+              onCollapsedChange={(collapsed) => {
+                setRightDockCollapsed(collapsed);
+                saveRightDockCollapsed(collapsed);
+              }}
               pendingApproval={pendingApproval}
               readiness={readiness}
               server={server}
@@ -1649,11 +1627,7 @@ function RailHistoryPopover(props: {
 function WorkbenchView(props: {
   apiReady: boolean;
   activeTask: TaskRun | undefined;
-  canCopyTerminalOutput: boolean;
-  clearTerminal: () => void;
   commandText: string;
-  copyLatestTerminalOutput: () => void;
-  copyTerminalTranscript: () => void;
   handlePromptSubmit: (event: FormEvent) => void;
   handleTerminalSubmit: (event: FormEvent) => void;
   hasOpenTask: boolean;
@@ -1661,25 +1635,20 @@ function WorkbenchView(props: {
   operationError: string;
   pendingApproval: ApprovalRequest | null;
   prompt: string;
-  reuseTerminalCommand: (command: string) => void;
   running: boolean;
   server: ServerConnection;
   setCommandText: (value: string) => void;
   setPrompt: (value: string) => void;
   setSurface: (surface: Surface) => void;
+  submitPrompt: () => void;
   tasks: TaskRun[];
   terminal: TerminalLine[];
-  terminalCommands: string[];
-  terminalNotice: string;
+  terminalCwd: string;
 }) {
   const {
     apiReady,
     activeTask,
-    canCopyTerminalOutput,
-    clearTerminal,
     commandText,
-    copyLatestTerminalOutput,
-    copyTerminalTranscript,
     handlePromptSubmit,
     handleTerminalSubmit,
     hasOpenTask,
@@ -1687,21 +1656,38 @@ function WorkbenchView(props: {
     operationError,
     pendingApproval,
     prompt,
-    reuseTerminalCommand,
     running,
     server,
     setCommandText,
     setPrompt,
     setSurface,
+    submitPrompt,
     tasks,
     terminal,
-    terminalCommands,
-    terminalNotice,
+    terminalCwd,
   } = props;
+  const terminalInputRef = useRef<HTMLInputElement>(null);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
   const showQuickStart = apiReady && server.status === "online" && messages.length === 0 && !hasOpenTask;
+  const terminalReady = apiReady && server.status === "online";
+  const currentTerminalPrompt = terminalReady ? terminalPrompt(server, terminalCwd) : "not-connected:~$";
+
+  useEffect(() => {
+    terminalEndRef.current?.scrollIntoView({ block: "end" });
+  }, [terminal, commandText]);
+
+  function handlePromptKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    submitPrompt();
+  }
+
+  function focusTerminalInput() {
+    terminalInputRef.current?.focus();
+  }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
       <section className="gsap-in flex min-h-[calc(100vh-94px)] flex-col rounded-lg border border-neutral-200 bg-white/82 shadow-sm">
         <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
           <div className="flex items-center gap-3">
@@ -1746,6 +1732,7 @@ function WorkbenchView(props: {
             <Textarea
               className="min-h-24 border-0 shadow-none focus:ring-0"
               onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={handlePromptKeyDown}
               placeholder='随便问点什么... "修复失败的测试"'
               disabled={!apiReady || server.status !== "online"}
               value={prompt}
@@ -1767,94 +1754,60 @@ function WorkbenchView(props: {
         </form>
       </section>
 
-      <section className="gsap-in flex min-h-[520px] flex-col rounded-lg border border-neutral-900 bg-neutral-950 text-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+      <section className="gsap-in flex h-[min(640px,calc(100vh-94px))] min-h-[520px] flex-col overflow-hidden rounded-lg border border-neutral-900 bg-[#050505] text-white shadow-sm lg:sticky lg:top-5 lg:h-[calc(100vh-94px)]">
+        <div className="flex h-9 shrink-0 items-center justify-between border-b border-white/10 bg-neutral-900 px-3">
           <div className="flex items-center gap-2">
-            <SquareTerminal className="size-4 text-cyan-300" />
-            <span className="text-sm font-medium">SSH Control</span>
+            <span className="size-2.5 rounded-full bg-rose-500" />
+            <span className="size-2.5 rounded-full bg-amber-400" />
+            <span className="size-2.5 rounded-full bg-emerald-500" />
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {terminalNotice && <span className="text-xs text-cyan-200">{terminalNotice}</span>}
-            {terminal.length > 0 && (
-              <>
-                <Button className="text-white/70 hover:bg-white/10 hover:text-white" variant="ghost" size="sm" onClick={copyTerminalTranscript} type="button">
-                  <Copy />
-                  复制
-                </Button>
-                <Button className="text-white/70 hover:bg-white/10 hover:text-white" disabled={!canCopyTerminalOutput} variant="ghost" size="sm" onClick={copyLatestTerminalOutput} type="button">
-                  <FileText />
-                  输出
-                </Button>
-                <Button className="text-white/70 hover:bg-white/10 hover:text-white" variant="ghost" size="sm" onClick={clearTerminal} type="button">
-                  <Trash2 />
-                  清空
-                </Button>
-              </>
-            )}
-            <Badge variant={server.status === "online" ? "success" : "danger"}>{server.status}</Badge>
+          <div className="min-w-0 truncate font-mono text-[11px] text-white/65">
+            {server.status === "online" ? connectedTargetLabel(server) : "ssh session"}
           </div>
+          <span className={cn("size-2 rounded-full", terminalReady ? "bg-emerald-400" : "bg-rose-400")} />
         </div>
-        <ScrollArea className="terminal-grid min-h-0 flex-1">
-          <div className="space-y-2 p-4 font-mono text-xs leading-6">
-            {terminal.length === 0 && (
-              <div className="text-amber-200">
-                &gt; {server.status === "online" ? "已连接真实目标 · 终端空闲。" : "等待真实 SysDialogue API 与目标连接；未连接时不会模拟 SSH 输出。"}
+        <form className="terminal-grid min-h-0 flex-1 cursor-text overflow-hidden" onClick={focusTerminalInput} onSubmit={handleTerminalSubmit}>
+          <ScrollArea className="h-full">
+            <div className="min-h-full px-4 py-3 font-mono text-[12px] leading-6 text-neutral-100">
+              {terminal.length === 0 && (
+                <div className="mb-2 text-neutral-500">
+                  {terminalReady
+                    ? `Last login: ${formatClock()} on sysdialogue`
+                    : "ssh: connect to target first from Servers"}
+                </div>
+              )}
+              {terminal.map((line) => (
+                <div
+                  key={line.id}
+                  className={cn(
+                    "whitespace-pre-wrap break-words",
+                    line.kind === "input" && "text-cyan-200",
+                    line.kind === "output" && "text-neutral-100",
+                    line.kind === "error" && "text-rose-300",
+                    line.kind === "system" && "text-amber-200",
+                  )}
+                >
+                  {line.kind === "input" ? `${line.prompt || currentTerminalPrompt} ${line.text}` : line.text}
+                </div>
+              ))}
+              <div className="flex min-w-0 items-center text-cyan-100">
+                <span className="mr-2 shrink-0 text-cyan-300">{currentTerminalPrompt}</span>
+                <input
+                  ref={terminalInputRef}
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[12px] text-neutral-50 caret-cyan-300 outline-none placeholder:text-neutral-600 disabled:cursor-not-allowed"
+                  disabled={!terminalReady}
+                  onChange={(event) => setCommandText(event.target.value)}
+                  placeholder={terminalReady ? "" : "not connected"}
+                  spellCheck={false}
+                  value={commandText}
+                />
               </div>
-            )}
-            {terminal.map((line) => (
-              <div
-                key={line.id}
-                className={cn(
-                  "break-words",
-                  line.kind === "input" && "text-cyan-200",
-                  line.kind === "output" && "text-neutral-200",
-                  line.kind === "error" && "text-rose-300",
-                  line.kind === "system" && "text-amber-200",
-                )}
-              >
-                <span className="mr-2 text-white/35">{line.kind === "input" ? "$" : ">"}</span>
-                {line.text}
-              </div>
-            ))}
-          </div>
-        </ScrollArea>
-        <div className="flex flex-wrap gap-2 border-t border-white/10 px-3 py-2">
-          {terminalPresets.map((preset) => (
-            <button
-              className="rounded-md border border-white/10 bg-white/8 px-2 py-1 font-mono text-[11px] text-cyan-100 transition hover:border-cyan-300 disabled:opacity-40"
-              disabled={!apiReady || server.status !== "online"}
-              key={preset.label}
-              onClick={() => setCommandText(preset.command)}
-              type="button"
-            >
-              {preset.label}
-            </button>
-          ))}
-          {terminalCommands.slice(0, 4).map((command) => (
-            <button
-              className="max-w-full truncate rounded-md border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 font-mono text-[11px] text-cyan-50 transition hover:border-cyan-200 disabled:opacity-40"
-              disabled={!apiReady || server.status !== "online"}
-              key={command}
-              onClick={() => reuseTerminalCommand(command)}
-              title={command}
-              type="button"
-            >
-              <RefreshCcw className="mr-1 inline size-3" />
-              {command}
-            </button>
-          ))}
-        </div>
-        <form className="flex gap-2 border-t border-white/10 p-3" onSubmit={handleTerminalSubmit}>
-          <Input
-            className="border-white/10 bg-white/8 font-mono text-sm text-white placeholder:text-white/35 focus:border-cyan-300"
-            onChange={(event) => setCommandText(event.target.value)}
-            placeholder="systemctl status nginx"
-            disabled={!apiReady || server.status !== "online"}
-            value={commandText}
-          />
-          <Button disabled={!apiReady || server.status !== "online" || !commandText.trim()} type="submit" variant="secondary" size="icon">
-            <Send />
-          </Button>
+              <div ref={terminalEndRef} />
+            </div>
+          </ScrollArea>
         </form>
       </section>
     </div>
@@ -1927,6 +1880,7 @@ function ServersView(props: {
   apiReady: boolean;
   applyRecentConnection: (connection: RecentConnection) => void;
   applyRuntimeConfig: (config?: RuntimeConfig) => void;
+  connectRecentConnection: (connection: RecentConnection) => void;
   connectionError: string;
   connectServer: (event: FormEvent) => void;
   draftConfig: RuntimeConfig;
@@ -1943,6 +1897,7 @@ function ServersView(props: {
     apiReady,
     applyRecentConnection,
     applyRuntimeConfig,
+    connectRecentConnection,
     connectionError,
     connectServer,
     draftConfig,
@@ -1973,6 +1928,11 @@ function ServersView(props: {
           </div>
         )}
         <ConnectionRoutePanel apiReady={apiReady} draftServer={draftServer} runtimeConfig={runtimeConfig} server={server} />
+        {draftServer.mode === "ssh" && (
+          <div className="mb-4 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-900">
+            已输入的 Host、Port、User 和 SSH key 路径会自动保存在本机浏览器；Password 和 Sudo password 不会保存。
+          </div>
+        )}
         {recentConnections.length > 0 && (
           <div className="mb-4 rounded-lg border border-neutral-200 bg-neutral-50 p-3">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-neutral-800">
@@ -1994,6 +1954,16 @@ function ServersView(props: {
                       {recentCredentialLabel(connection)} · {formatRelativeTime(new Date(connection.lastUsed))}
                     </div>
                   </button>
+                  <Button
+                    aria-label="连接最近目标"
+                    disabled={server.status === "connecting"}
+                    onClick={() => connectRecentConnection(connection)}
+                    size="icon"
+                    type="button"
+                    variant="secondary"
+                  >
+                    <PlugZap />
+                  </Button>
                   <Button
                     aria-label="删除最近目标"
                     onClick={() => removeRecentConnection(connection.id)}
@@ -2927,16 +2897,57 @@ function RightDock(props: {
   activeTask: TaskRun | undefined;
   audit: AuditRecord[];
   clock: string;
+  collapsed: boolean;
   metrics: Metric[];
+  onCollapsedChange: (collapsed: boolean) => void;
   pendingApproval: ApprovalRequest | null;
   readiness: ReadinessItem[];
   server: ServerConnection;
   setSurface: (surface: Surface) => void;
   tasks: TaskRun[];
 }) {
-  const { activeTask, audit, clock, metrics, pendingApproval, readiness, server, setSurface, tasks } = props;
+  const { activeTask, audit, clock, collapsed, metrics, onCollapsedChange, pendingApproval, readiness, server, setSurface, tasks } = props;
+  if (collapsed) {
+    return (
+      <div className="flex h-[calc(100vh-54px)] flex-col items-center gap-3 py-3">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="展开右侧信息栏"
+              onClick={() => onCollapsedChange(false)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <PanelRightOpen />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">展开信息栏</TooltipContent>
+        </Tooltip>
+        <span className={cn("size-2.5 rounded-full", server.status === "online" ? "bg-emerald-500" : "bg-rose-500")} />
+        {pendingApproval && <span className="size-2.5 rounded-full bg-amber-500" />}
+      </div>
+    );
+  }
   return (
     <div className="flex h-[calc(100vh-54px)] flex-col">
+      <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
+        <div className="text-sm font-semibold">状态面板</div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="收起右侧信息栏"
+              onClick={() => onCollapsedChange(true)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <PanelRightClose />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">收起信息栏</TooltipContent>
+        </Tooltip>
+      </div>
       <div className="border-b border-neutral-200 p-4">
         <Tabs defaultValue="server">
           <TabsList className="grid w-full grid-cols-4">
@@ -3822,6 +3833,12 @@ function connectedTargetLabel(server: ServerConnection) {
   return `${user}${compactHost(server.host, server.port)}`;
 }
 
+function terminalPrompt(server: ServerConnection, cwd: string) {
+  const user = server.user || "sysdialogue";
+  const host = server.mode === "ssh" ? server.host || "remote" : "local";
+  return `${user}@${host}:${cwd || "~"}$`;
+}
+
 function draftTargetLabel(server: ServerConnection) {
   if (server.mode === "local") return "localhost";
   if (!server.host.trim()) return "待填写 host";
@@ -3832,6 +3849,17 @@ function draftTargetLabel(server: ServerConnection) {
 function recentCredentialLabel(connection: RecentConnection) {
   if (connection.keyFile.trim()) return `key · ${connection.keyFile}`;
   return "agent / 手输密码";
+}
+
+function draftFromRecentConnection(connection: RecentConnection): ServerConnection {
+  return sshConnectionDraft({
+    mode: "ssh",
+    host: connection.host,
+    port: connection.port,
+    user: connection.user,
+    keyFile: connection.keyFile,
+    safetyProfile: connection.safetyProfile,
+  });
 }
 
 function readinessDotClass(state: ReadinessState) {
@@ -3994,33 +4022,6 @@ function auditRecordKey(record: AuditRecord, index: number) {
 
 function isOpenTask(task: TaskRun) {
   return task.status === "running" || task.status === "waiting_approval";
-}
-
-function recentTerminalCommands(lines: TerminalLine[]) {
-  const seen = new Set<string>();
-  const commands: string[] = [];
-  for (const line of [...lines].reverse()) {
-    if (line.kind !== "input") continue;
-    const command = line.text.trim();
-    if (!command || seen.has(command)) continue;
-    seen.add(command);
-    commands.push(command);
-    if (commands.length >= 6) break;
-  }
-  return commands;
-}
-
-function latestTerminalOutput(lines: TerminalLine[]) {
-  const lastInputIndex = lines.map((line) => line.kind).lastIndexOf("input");
-  const outputLines = lines
-    .slice(lastInputIndex + 1)
-    .filter((line) => line.kind !== "input")
-    .map((line) => line.text);
-  return outputLines.join("\n").trim();
-}
-
-function formatTerminalTranscript(lines: TerminalLine[]) {
-  return lines.map((line) => `${line.kind === "input" ? "$" : ">"} ${line.text}`).join("\n").trim();
 }
 
 async function copyText(text: string) {
@@ -4380,6 +4381,16 @@ function loadRecentConnections(): RecentConnection[] {
 function saveRecentConnections(connections: RecentConnection[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(RECENT_CONNECTIONS_STORAGE_KEY, JSON.stringify(connections));
+}
+
+function loadRightDockCollapsed() {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(RIGHT_DOCK_COLLAPSED_STORAGE_KEY) === "true";
+}
+
+function saveRightDockCollapsed(collapsed: boolean) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(RIGHT_DOCK_COLLAPSED_STORAGE_KEY, String(collapsed));
 }
 
 function rememberRecentConnection(current: RecentConnection[], server: ServerConnection) {
