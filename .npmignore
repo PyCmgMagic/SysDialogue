@@ -1,0 +1,51 @@
+# npm publish exclusion rules
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local config and state
+.env
+.sysdialogue/
+
+# Frontend source (only need dist)
+web/src/
+web/node_modules/
+web/public/
+web/.env*
+web/*.log
+web/*.ts
+web/*.json
+web/*.html
+!web/dist/**
+
+# Tests and docs
+tests/
+docs/
+.pytest_cache/
+_test_*.py
+
+# IDE and logs
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+.DS_Store
+Thumbs.db
+.claude/
+.playwright-mcp/
+
+# Videos and temp files
+video/
+*.mp4
+*.zip
+*.tgz
