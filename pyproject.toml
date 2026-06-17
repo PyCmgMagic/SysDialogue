@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sysdialogue"
-version = "1.0.0"
+version = "1.0.2"
 description = "SysDialogue — Linux 服务器运维智能代理 (v8)"
 requires-python = ">=3.11"
 dependencies = [

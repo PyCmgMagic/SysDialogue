@@ -21,3 +21,23 @@ execSync("node node_modules/vite/bin/vite.js build --configLoader runner", {
 });
 
 console.log("  [build-web] Done.");
+
+// Fix LF line endings for bin/scripts (npm requires LF shebang)
+const rootDir = path.resolve(__dirname, "..");
+const jsFiles = [
+  "bin/sysdialogue.js",
+  "bin/sysdialogue-web.js",
+  "scripts/postinstall.js",
+  "scripts/preuninstall.js",
+];
+for (const f of jsFiles) {
+  const fp = path.join(rootDir, f);
+  if (fs.existsSync(fp)) {
+    let content = fs.readFileSync(fp, "utf8");
+    if (content.includes("\r\n")) {
+      content = content.replace(/\r\n/g, "\n");
+      fs.writeFileSync(fp, content, "utf8");
+      console.log(`  [build-web] Fixed LF: ${f}`);
+    }
+  }
+}

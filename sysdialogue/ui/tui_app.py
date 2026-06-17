@@ -23,6 +23,7 @@ from sysdialogue.ui.confirm_modal import ConfirmModal
 from sysdialogue.ui.env_panel import EnvPanel
 from sysdialogue.ui.history_modal import HistoryModal
 from sysdialogue.ui.input_modal import InputModal
+from sysdialogue.ui.remote_modal import RemoteModal
 from sysdialogue.ui.status_panel import StatusPanel
 from sysdialogue.ui.task_timeline import TaskTimelineCard
 from sysdialogue.ui.theme import get_glyphs, get_theme
@@ -78,6 +79,7 @@ class SysDialogueTUI(App):
         Binding("f2", "show_history", "历史"),
         Binding("f3", "toggle_audit", "审计"),
         Binding("f4", "toggle_env", "环境"),
+        Binding("f5", "connect_remote", "远程"),
         Binding("ctrl+c", "cancel_current", "取消"),
         Binding("ctrl+l", "clear_log", "清屏"),
         Binding("ctrl+d", "quit", "退出"),
@@ -154,16 +156,20 @@ class SysDialogueTUI(App):
         line2 = Text.from_markup(
             f"[dim]{glyphs.bullet}[/dim]  [bold]/doctor[/bold] 检查代理状态；[bold]/check-model[/bold] 验证模型工具调用能力。"
         )
+        line_ssh = Text.from_markup(
+            f"[dim]{glyphs.bullet}[/dim]  [bold]F5[/bold] 连接远程服务器（SSH），所有操作将在目标机器上执行。"
+        )
         line3 = Text.from_markup(
             f"[dim]{glyphs.bullet}[/dim]  高风险操作会主动拦截，请求二次确认。"
         )
         line4 = Text.from_markup(
             f"[dim]{glyphs.bullet}[/dim]  "
             "[bold]F2[/bold] 历史  [bold]F3[/bold] 审计  [bold]F4[/bold] 环境  "
+            "[bold]F5[/bold] 远程  "
             "[bold]^C[/bold] 取消  [bold]^L[/bold] 清屏  [bold]^D[/bold] 退出"
         )
         return Panel(
-            Group(logo, tagline, Rule(style="dim"), line1, line2, line3, line4),
+            Group(logo, tagline, Rule(style="dim"), line1, line2, line_ssh, line3, line4),
             border_style=f"dim {theme.banner_fg}",
             padding=(1, 3),
             title_align="left",
@@ -352,6 +358,13 @@ class SysDialogueTUI(App):
             session_id = getattr(self.controller, "session_id", "") or ""
             model = _controller_model_name(self.controller)
             parts = [f"{glyphs.bullet} {text}"]
+            # 显示远程连接信息
+            executor = getattr(self.controller, "executor", None)
+            if hasattr(executor, "_config"):
+                ssh_cfg = executor._config
+                parts.append(f"{ssh_cfg.username}@{ssh_cfg.host}")
+            else:
+                parts.append("本地")
             if session_id:
                 parts.append(f"会话 #{session_id[:6]}")
             if model:
@@ -568,6 +581,119 @@ class SysDialogueTUI(App):
 
     def action_toggle_env(self) -> None:
         self._switch_right_panel("env")
+
+    def action_connect_remote(self) -> None:
+        """F5: 打开 SSH 远程连接弹窗。"""
+        busy = (
+            (self._worker is not None and self._worker.is_alive())
+            or self._confirm_state is not None
+            or self._input_state is not None
+        )
+        if busy:
+            self._write_warning("任务执行中，请等待完成后再连接远程服务器。", title="远程连接")
+            return
+
+        # 当前远程连接信息
+        current_remote: str | None = None
+        executor = getattr(self.controller, "executor", None)
+        if hasattr(executor, "_config"):
+            ssh_cfg = executor._config
+            current_remote = f"{ssh_cfg.username}@{ssh_cfg.host}:{ssh_cfg.port}"
+
+        self.push_screen(
+            RemoteModal(current_remote),
+            callback=self._on_remote_submitted,
+        )
+
+    def _on_remote_submitted(self, info) -> None:
+        if info is None:
+            return  # 用户取消
+
+        from rich.panel import Panel as RichPanel
+        from rich.text import Text as RichText
+
+        self._set_status(f"正在连接 {info.username}@{info.host}...")
+        self._write_log(
+            RichPanel(
+                f"正在连接 [bold]{info.username}@{info.host}:{info.port}[/bold]...",
+                title="[bold cyan]远程连接[/bold cyan]",
+                border_style="dim cyan",
+                padding=(0, 1),
+            )
+        )
+
+        import threading
+
+        def worker() -> None:
+            ok, message = self._do_connect_remote(info)
+            self.call_from_thread(lambda: self._on_remote_done(info, ok, message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_connect_remote(self, info) -> tuple[bool, str]:
+        """在后台线程执行 SSH 连接。"""
+        try:
+            from sysdialogue.runtime.ssh_adapter import SSHConfig, RemoteExecutor
+            from sysdialogue.runtime.capability_probe import CapabilityProbe
+            from sysdialogue.runtime.local_adapter import LocalExecutor
+        except ImportError as exc:
+            return False, f"缺少依赖: {exc}"
+
+        ssh_cfg = SSHConfig(
+            host=info.host,
+            port=info.port,
+            username=info.username,
+            password=info.password,
+            key_filename=info.key_filename,
+        )
+        try:
+            new_executor = RemoteExecutor(ssh_cfg)
+            new_executor.connect()
+            # 重探针环境
+            probe = CapabilityProbe(new_executor, remote_mode=True, ssh_port=info.port)
+            env_profile = probe.probe()
+            env_profile["host"] = info.host
+            env_profile["ssh_port"] = info.port
+            # 替换 executor 和 env_profile
+            old_executor = self.controller.executor
+            self.controller.executor = new_executor
+            self.controller.env_profile = env_profile
+            # 断开旧连接
+            if hasattr(old_executor, "disconnect"):
+                try:
+                    old_executor.disconnect()
+                except Exception:
+                    pass
+            return True, f"已连接到 {info.username}@{info.host}:{info.port}"
+        except Exception as exc:
+            return False, f"连接失败: {exc}"
+
+    def _on_remote_done(self, info, ok: bool, message: str) -> None:
+        from rich.panel import Panel as RichPanel
+
+        if ok:
+            self._write_log(
+                RichPanel(
+                    f"[green]✓[/green] {message}\n"
+                    f"后续所有运维操作将在 [bold]{info.host}[/bold] 上执行。",
+                    title="[bold green]远程连接成功[/bold green]",
+                    border_style="green",
+                    padding=(0, 1),
+                )
+            )
+            # 刷新右侧状态面板
+            self._switch_right_panel(self._right_panel_mode)
+        else:
+            self._write_log(
+                RichPanel(
+                    f"[red]✗[/red] {message}\n"
+                    "请检查主机地址、用户名、密钥或密码是否正确。",
+                    title="[bold red]远程连接失败[/bold red]",
+                    border_style="red",
+                    padding=(0, 1),
+                )
+            )
+        self._set_status("就绪")
 
     def action_show_history(self) -> None:
         busy = (
