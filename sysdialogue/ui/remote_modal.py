@@ -263,17 +263,39 @@ class RemoteModal(ModalScreen[RemoteConnectionInfo | None]):
             return
 
         self._testing = True
-        self._set_status("正在测试连接...")
+        self._set_status("⏳ 正在测试连接（最多 8 秒）...")
         self.query_one("#btn_connect", Button).disabled = True
         self.query_one("#btn_test", Button).disabled = True
 
         import threading
 
+        result_box: list[tuple[bool, str]] = []
+
         def worker() -> None:
             ok, msg = _test_ssh_connection(info)
-            self.call_from_thread(lambda: self._on_test_done(ok, msg))
+            result_box.append((ok, msg))
 
-        threading.Thread(target=worker, daemon=True).start()
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        # 在主线程轮询结果，每 200ms 检查一次，硬超时 8 秒
+        elapsed = 0.0
+        import time
+        start = time.monotonic()
+
+        def _poll() -> None:
+            nonlocal elapsed
+            if result_box:
+                ok, msg = result_box[0]
+                self._on_test_done(ok, msg)
+                return
+            elapsed = time.monotonic() - start
+            if elapsed >= 8.0:
+                self._on_test_done(False, "连接超时（8 秒），请检查服务器地址和网络")
+                return
+            self.set_timer(0.2, _poll)
+
+        self.set_timer(0.2, _poll)
 
     def _on_test_done(self, ok: bool, msg: str) -> None:
         self._testing = False
@@ -316,27 +338,71 @@ class RemoteModal(ModalScreen[RemoteConnectionInfo | None]):
 
 
 def _test_ssh_connection(info: RemoteConnectionInfo) -> tuple[bool, str]:
-    """测试 SSH 连接，返回 (成功, 消息)。"""
-    try:
-        from sysdialogue.runtime.ssh_adapter import SSHConfig, RemoteExecutor
-    except ImportError:
-        return False, "paramiko 未安装，无法使用远程模式"
+    """测试 SSH 连接，返回 (成功, 消息)。
 
-    ssh_cfg = SSHConfig(
-        host=info.host,
-        port=info.port,
-        username=info.username,
-        password=info.password,
-        key_filename=info.key_filename,
-    )
+    总超时上限约 11 秒：TCP 预检 2s + SSH connect 6s + 验证 3s。
+    """
+    import socket
+
+    # ── 阶段 1: TCP 端口预检（2 秒快速失败）──
     try:
-        executor = RemoteExecutor(ssh_cfg)
-        executor.connect()
-        # 尝试运行简单命令确认连通
-        output, code = executor.run_shell("uname -n", timeout=5)
-        executor.disconnect()
-        if code == 0:
-            return True, f"连接成功，主机名: {output.strip()}"
+        sock = socket.create_connection((info.host, info.port), timeout=2)
+        sock.close()
+    except socket.timeout:
+        return False, f"连接超时：{info.host}:{info.port} 在 2 秒内无响应，请检查地址"
+    except socket.gaierror:
+        return False, f"无法解析主机名：{info.host}"
+    except ConnectionRefusedError:
+        return False, f"连接被拒绝：{info.host}:{info.port} 上 SSH 服务未启动"
+    except OSError as exc:
+        return False, f"网络不可达：{exc}"
+
+    # ── 阶段 2: SSH 握手 ──
+    try:
+        import paramiko
+    except ImportError:
+        return False, "paramiko 未安装"
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=info.host,
+            port=info.port,
+            username=info.username,
+            password=info.password,
+            key_filename=info.key_filename,
+            timeout=6,
+            auth_timeout=6,
+            banner_timeout=6,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+    except paramiko.AuthenticationException:
+        client.close()
+        return False, "认证失败：用户名或密码/密钥不正确"
+    except paramiko.SSHException as exc:
+        client.close()
+        return False, f"SSH 协议错误: {exc}"
+    except socket.timeout:
+        client.close()
+        return False, "SSH 握手超时"
+    except Exception as exc:
+        client.close()
+        return False, f"连接失败: {exc}"
+
+    # ── 阶段 3: 验证命令 ──
+    try:
+        _, stdout, _ = client.exec_command("uname -n", timeout=3)
+        output = stdout.read().decode("utf-8", errors="replace").strip()
+        exit_code = stdout.channel.recv_exit_status()
+        client.close()
+        if exit_code == 0 and output:
+            return True, f"连接成功！主机名: {output}"
         return True, "连接成功"
     except Exception as exc:
-        return False, f"连接失败: {exc}"
+        try:
+            client.close()
+        except Exception:
+            pass
+        return True, f"连接成功（验证命令异常: {exc}）"

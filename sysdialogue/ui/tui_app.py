@@ -151,7 +151,7 @@ class SysDialogueTUI(App):
         tagline.append("  ·  ", style="dim")
         tagline.append("自然语言 -> 意图解析 -> 安全执行 -> 反馈核查", style="dim")
         line1 = Text.from_markup(
-            f"[dim]{glyphs.bullet}[/dim]  直接输入需求回车即可；[bold]/examples[/bold] 看任务样例，[bold]/playbooks[/bold] 看生产工作流，[bold]/evidence[/bold] 看完成证据，[bold]/acceptance[/bold] 看发布验收。"
+            f"[dim]{glyphs.bullet}[/dim]  直接输入需求回车即可；[bold]/help[/bold] 查看全部命令，[bold]/examples[/bold] 看任务样例，[bold]/playbooks[/bold] 看生产工作流。"
         )
         line2 = Text.from_markup(
             f"[dim]{glyphs.bullet}[/dim]  [bold]/doctor[/bold] 检查代理状态；[bold]/check-model[/bold] 验证模型工具调用能力。"

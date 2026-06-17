@@ -103,41 +103,56 @@ def _split_command(text: str) -> tuple[str, str]:
 
 
 def _help_text() -> str:
-    return "\n".join(
-        [
-            "Available commands:",
-            "- /help: show this command reference",
-            "- /status: show session and active task state",
-            "- /doctor: show agent readiness, stores, tools, and actionable notices",
-            "- /check-model: call the configured model once to verify tool-call support",
-            "- /examples: show copy-ready safe operational task examples",
-            "- /playbooks: show copy-ready production workflow playbooks",
-            "- /evidence: show product-bar and verification-gate evidence",
-            "- /acceptance: show release-ready operator acceptance checklist",
-            "- /acceptance-runner: run safe local preflight and produce a guided A01-A10 artifact",
-            "- /release-readiness [path]: summarize completed acceptance artifacts",
-            "- /release-gate [path]: show strict release gate status and blocking reasons",
-            "- /next: recommend the best continuation for an interrupted, blocked, or failed task",
-            "- /resume: explicitly resume the interrupted active task",
-            "- /abandon [task_id]: abandon an interrupted/stale active task and release its locks",
-            "- /locks: show current lock leases",
-            "- /plan: show active durable plan/workflow steps",
-            "- /audit: show recent audit records",
-            "- /export-audit [session_id]: export sanitized audit JSONL",
-            "- /export-replay [session_id]: export sanitized replay ZIP",
-            "- /memory [text]: list memory or remember a note",
-            "- /tools: show static and reusable dynamic tools",
-            "- /permissions: show active permission policy summary",
-            "- /compact [summary]: compact current context into memory",
-            "- /skills: list installed Markdown skills",
-            "- /skill <name> [json args]: activate a skill for this session",
-            "- /skill-reload: rescan project/user skills",
-            "- /hooks: show configured hooks",
-            "- /forget <memory_id>: remove one memory record",
-            "- /target [set key=value]: show or update current target profile",
-            "- /why [tool]: explain the current permission decision",
-        ]
-    )
+    sections = [
+        ("基础操作", [
+            ("/help", "显示本帮助信息"),
+            ("/status", "查看当前会话与任务状态"),
+            ("/examples", "常用运维任务示例（可直接复制使用）"),
+            ("/playbooks", "生产工作流列表（多步骤自动化）"),
+        ]),
+        ("任务控制", [
+            ("/next", "推荐下一步操作（任务中断/失败时）"),
+            ("/resume", "恢复中断的任务"),
+            ("/abandon [task_id]", "放弃任务并释放锁"),
+            ("/plan", "查看当前任务步骤"),
+            ("/locks", "查看当前持有的锁"),
+        ]),
+        ("诊断与审计", [
+            ("/doctor", "检查代理状态、工具可用性"),
+            ("/check-model", "验证模型是否支持工具调用"),
+            ("/audit", "查看近期审计记录"),
+            ("/export-audit [session_id]", "导出审计日志（JSONL）"),
+            ("/export-replay [session_id]", "导出回放包（ZIP）"),
+        ]),
+        ("验证与发布", [
+            ("/evidence", "查看执行证据矩阵"),
+            ("/acceptance", "查看验收清单"),
+            ("/acceptance-runner", "运行引导式验收检查"),
+            ("/release-readiness [path]", "发布准备度报告"),
+            ("/release-gate [path]", "发布门禁检查"),
+        ]),
+        ("配置与工具", [
+            ("/tools", "查看可用工具列表"),
+            ("/skills", "查看已安装的技能"),
+            ("/skill <名称> [参数]", "激活指定技能"),
+            ("/skill-reload", "重新扫描技能文件"),
+            ("/permissions", "查看权限策略"),
+            ("/memory [内容]", "查看/保存记忆笔记"),
+            ("/forget <memory_id>", "删除指定记忆"),
+            ("/compact [摘要]", "压缩当前上下文到记忆"),
+            ("/hooks", "查看配置的钩子"),
+            ("/target [set key=value]", "查看/修改目标环境配置"),
+            ("/why [工具名]", "解释权限决策原因"),
+        ]),
+    ]
+    lines = ["📖  **SysDialogue 命令参考**", ""]
+    for section_name, cmds in sections:
+        lines.append(f"**【{section_name}】**")
+        for cmd, desc in cmds:
+            lines.append(f"  `{cmd}` — {desc}")
+        lines.append("")
+    lines.append("**快捷键**：F2 历史 · F3 审计 · F4 环境 · F5 远程 · Ctrl+L 清屏 · Ctrl+D 退出")
+    return "\n".join(lines)
 
 
 def _status(controller: Any) -> str:
